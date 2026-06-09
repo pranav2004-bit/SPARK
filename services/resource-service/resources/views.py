@@ -406,19 +406,25 @@ class StudentUploadListView(APIView):
 def _ensure_system_module(institution_id):
     """
     Guarantee exactly one system Module exists for this institution.
-    Uses filter+deduplicate instead of get_or_create to avoid
-    MultipleObjectsReturned under concurrent requests.
+    Uses filter+deduplicate + IntegrityError catch to handle concurrent
+    first-requests from the same institution without raising 500.
     """
+    from django.db import IntegrityError
+
     qs = Module.objects.filter(is_system=True, institution_id=institution_id).order_by("created_at")
     count = qs.count()
     if count == 0:
-        Module.objects.create(
-            name="Company Resources",
-            is_system=True,
-            is_published=True,
-            order=0,
-            institution_id=institution_id,
-        )
+        try:
+            Module.objects.create(
+                name="Company Resources",
+                is_system=True,
+                is_published=True,
+                order=0,
+                institution_id=institution_id,
+            )
+        except IntegrityError:
+            # Concurrent request already created it — safe to continue.
+            pass
     else:
         obj = qs.first()
         if count > 1:

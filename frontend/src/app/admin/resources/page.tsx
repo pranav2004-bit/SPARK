@@ -198,7 +198,7 @@ export default function AdminResourcesPage() {
   // ── Load ───────────────────────────────────────────────────────────────────
   useEffect(() => {
     api.get("/resources/modules/")
-      .then(res => setModules(res.data.data))
+      .then(res => setModules(res.data.results ?? []))
       .catch(() => toast.error("Failed to load modules."))
       .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
