@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#ffffff" />
+  <title>You're Offline — SPARK</title>
+  <style>
+    /* ── Reset ──────────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ── Base ───────────────────────────────────────────────────────────── */
+    html, body {
+      height: 100%;
+      font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+                   system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      /* Studio lighting — pure white centre, warm off-white edges */
+      background: radial-gradient(
+        ellipse at 50% 48%,
+        #ffffff   0%,
+        #f7f5f2  45%,
+        #ece8e3 100%
+      );
+      padding: clamp(24px, 5vw, 48px);
+    }
+
+    /* ── Composition ────────────────────────────────────────────────────── */
+    .stage {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      gap: 0;
+    }
+
+    /* ── SPARK star ─────────────────────────────────────────────────────── */
+    .star-wrap {
+      animation: star-pulse 3s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+    }
+
+    .star-svg {
+      width:  clamp(64px, 14vw, 88px);
+      height: clamp(64px, 14vw, 88px);
+      display: block;
+    }
+
+    /* ── Offline icon chip ──────────────────────────────────────────────── */
+    .offline-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin-top: clamp(20px, 4vw, 28px);
+      padding: 7px 14px;
+      border-radius: 999px;
+      background: #fff;
+      border: 1px solid #e6e3df;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+
+    .offline-badge svg {
+      flex-shrink: 0;
+    }
+
+    .offline-badge-text {
+      font-size: clamp(11px, 2.2vw, 13px);
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: #5c6e82;
+    }
+
+    /* ── Headline ───────────────────────────────────────────────────────── */
+    .headline {
+      margin-top: clamp(16px, 3vw, 22px);
+      font-size:  clamp(22px, 5.5vw, 30px);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: #1A3150;
+      line-height: 1.15;
+    }
+
+    /* ── Sub-text ───────────────────────────────────────────────────────── */
+    .subtext {
+      margin-top: clamp(8px, 1.8vw, 12px);
+      font-size:  clamp(13px, 2.8vw, 15px);
+      font-weight: 400;
+      color: #8fa3b8;
+      line-height: 1.55;
+      max-width: 300px;
+    }
+
+    /* ── Retry button ───────────────────────────────────────────────────── */
+    .retry-btn {
+      margin-top: clamp(24px, 4.5vw, 32px);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: clamp(10px, 2vw, 13px) clamp(22px, 4vw, 30px);
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+      background: #FF8C00;
+      color: #ffffff;
+      font-family: inherit;
+      font-size: clamp(13px, 2.4vw, 14px);
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      transition: background 0.15s ease, transform 0.15s ease,
+                  box-shadow 0.15s ease;
+      box-shadow: 0 2px 12px rgba(255,140,0,0.30);
+      text-decoration: none;
+    }
+
+    .retry-btn:hover {
+      background: #e07b00;
+      transform: translateY(-1px);
+      box-shadow: 0 4px 18px rgba(255,140,0,0.38);
+    }
+
+    .retry-btn:active {
+      transform: translateY(0);
+      box-shadow: 0 1px 6px rgba(255,140,0,0.25);
+    }
+
+    /* ── Divider ────────────────────────────────────────────────────────── */
+    .divider {
+      margin-top: clamp(28px, 5vw, 40px);
+      width: clamp(32px, 6vw, 44px);
+      height: 1px;
+      background: #e6e3df;
+    }
+
+    /* ── Brand footer ───────────────────────────────────────────────────── */
+    .brand {
+      margin-top: clamp(16px, 3vw, 20px);
+      font-size:  clamp(10px, 1.8vw, 11px);
+      font-weight: 600;
+      letter-spacing: 0.28em;
+      color: #b0bec8;
+      text-transform: uppercase;
+      user-select: none;
+    }
+
+    /* ── Animations ─────────────────────────────────────────────────────── */
+    @keyframes star-pulse {
+      0%,100% { opacity: 1;    transform: scale(1);     }
+      50%      { opacity: 0.65; transform: scale(0.965); }
+    }
+  </style>
+</head>
+<body>
+  <div class="stage">
+
+    <!-- SPARK 4-pointed star (same geometry as the app) -->
+    <div class="star-wrap">
+      <svg class="star-svg" viewBox="0 0 100 100" fill="none"
+           xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <!-- Faint ghost outline -->
+        <path d="M 50,2 L 56,44 L 98,50 L 56,56 L 50,98 L 44,56 L 2,50 L 44,44 Z"
+              stroke="#FF8C00" stroke-width="2" stroke-opacity="0.15"
+              stroke-linejoin="miter"/>
+        <!-- Solid fill — static when offline, no chase animation -->
+        <path d="M 50,2 L 56,44 L 98,50 L 56,56 L 50,98 L 44,56 L 2,50 L 44,44 Z"
+              fill="#FF8C00" fill-opacity="0.92"/>
+      </svg>
+    </div>
+
+    <!-- Offline status badge -->
+    <div class="offline-badge">
+      <!-- Wifi-off icon (inline SVG — no external dependency) -->
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+           stroke="#8fa3b8" stroke-width="2" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <line x1="1" y1="1" x2="23" y2="23"/>
+        <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"/>
+        <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"/>
+        <path d="M10.71 5.05A16 16 0 0 1 22.56 9"/>
+        <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"/>
+        <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+        <circle cx="12" cy="20" r="1" fill="#8fa3b8" stroke="none"/>
+      </svg>
+      <span class="offline-badge-text">No internet connection</span>
+    </div>
+
+    <!-- Headline -->
+    <h1 class="headline">You're offline</h1>
+
+    <!-- Sub-text -->
+    <p class="subtext">
+      Check your connection and try again.<br />
+      Your progress is safe.
+    </p>
+
+    <!-- Retry -->
+    <button class="retry-btn" onclick="window.location.reload()">
+      <!-- Refresh icon -->
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <path d="M23 4v6h-6"/>
+        <path d="M1 20v-6h6"/>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
+        <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
+      </svg>
+      Try Again
+    </button>
+
+    <!-- Divider + brand -->
+    <div class="divider"></div>
+    <p class="brand">SPARK</p>
+
+  </div>
+</body>
+</html>

@@ -1,0 +1,2 @@
+# Frontend runs locally — not in Docker.
+# Start it separately: cd frontend && npm run dev

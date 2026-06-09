@@ -1,0 +1,152 @@
+# Production environment
+# Usage: infra/scripts/start-prod.sh
+# Full implementation completed in Task 7.1
+
+services:
+
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    env_file: .env
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - spark-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --maxmemory 200mb --maxmemory-policy allkeys-lru --save ""
+    networks:
+      - spark-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    build:
+      context: ../gateway
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - auth-service
+      - user-service
+      - resource-service
+      - practice-service
+      - notification-service
+      - analytics-service
+      - frontend
+    networks:
+      - spark-internal
+
+  auth-service:
+    build:
+      context: ../services/auth-service
+      dockerfile: Dockerfile
+    restart: always
+    env_file: ../services/auth-service/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  user-service:
+    build:
+      context: ../services/user-service
+      dockerfile: Dockerfile
+    restart: always
+    env_file: ../services/user-service/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  resource-service:
+    build:
+      context: ../services/resource-service
+      dockerfile: Dockerfile
+    restart: always
+    env_file: ../services/resource-service/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  practice-service:
+    build:
+      context: ../services/practice-service
+      dockerfile: Dockerfile
+    restart: always
+    env_file: ../services/practice-service/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  notification-service:
+    build:
+      context: ../services/notification-service
+      dockerfile: Dockerfile
+    restart: always
+    env_file: ../services/notification-service/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  analytics-service:
+    build:
+      context: ../services/analytics-service
+      dockerfile: Dockerfile
+    restart: always
+    env_file: ../services/analytics-service/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    restart: always
+    networks:
+      - spark-internal
+
+volumes:
+  postgres_data:
+
+networks:
+  spark-internal:
+    driver: bridge

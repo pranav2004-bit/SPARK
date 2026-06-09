@@ -1,0 +1,39 @@
+# Development environment
+# Usage: docker-compose -f infra/docker-compose.dev.yml up
+# Full implementation completed in Task 7.1
+
+services:
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_PASSWORD: dev_password
+      POSTGRES_USER: postgres
+    ports:
+      - "5432:5432"
+    networks:
+      - spark-internal
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save ""
+    ports:
+      - "6379:6379"
+    networks:
+      - spark-internal
+
+  minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - spark-internal
+
+networks:
+  spark-internal:
+    driver: bridge

@@ -1,0 +1,127 @@
+@import "tailwindcss";
+
+/* ── Design Tokens ─────────────────────────────────────────────────────────── */
+/* Brand palette derived directly from SPARK logo:                             */
+/*   Navy   #1A3150 → logo text   — trust, depth, professionalism              */
+/*   Orange #FF8C00 → logo star   — energy, spark, forward momentum            */
+:root {
+  /* Primary — brand navy */
+  --color-primary:        #1A3150;
+  --color-primary-hover:  #243b55;
+  --color-primary-light:  #e8eef5;
+
+  /* Accent — brand orange */
+  --color-accent:         #FF8C00;
+  --color-accent-hover:   #e07b00;
+  --color-accent-light:   #fff4e6;
+  --color-accent-muted:   #ffb84d;
+
+  /* Surfaces — warm white (not cool blue-gray) */
+  --color-surface:           #ffffff;
+  --color-surface-secondary: #f9f8f7;
+  --color-surface-hover:     #f2f0ed;
+
+  /* Borders — warm gray */
+  --color-border:        #e6e3df;
+  --color-border-strong: #d1cdc8;
+
+  /* Text */
+  --color-text:        #1A3150;
+  --color-text-muted:  #5c6e82;
+  --color-text-subtle: #8fa3b8;
+
+  /* Status */
+  --color-danger:       #dc2626;
+  --color-danger-bg:    #fef2f2;
+  --color-danger-hover: #b91c1c;
+  --color-success:      #16a34a;
+  --color-success-bg:   #f0fdf4;
+  --color-warning:      #d97706;
+  --color-warning-bg:   #fffbeb;
+  --color-info:         #1A3150;
+  --color-info-bg:      #e8eef5;
+
+  /* Layout */
+  --sidebar-width: 240px;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+
+  /* Shadows — tinted with brand navy for cohesion */
+  --shadow-xs: 0 1px 2px rgba(26, 49, 80, 0.06);
+  --shadow-sm: 0 1px 3px rgba(26, 49, 80, 0.08), 0 1px 2px rgba(26, 49, 80, 0.05);
+  --shadow-md: 0 4px 16px rgba(26, 49, 80, 0.08), 0 2px 4px rgba(26, 49, 80, 0.05);
+  --shadow-lg: 0 8px 32px rgba(26, 49, 80, 0.10), 0 4px 8px rgba(26, 49, 80, 0.05);
+  --shadow-xl: 0 20px 64px rgba(26, 49, 80, 0.12);
+}
+
+
+/* ── Splash screen — body hidden until splash completes ────────────────────── */
+/* The inline script in layout.tsx sets data-splash="1" on first visit.        */
+/* visibility:hidden on body; the splash itself overrides with visible below.  */
+html[data-splash="1"] body { visibility: hidden; }
+
+/* ── Login panel background ─────────────────────────────────────────────────── */
+.login-panel-bg {
+  background-color: #f9f8f7 !important;
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--color-surface-secondary);
+  color: var(--color-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter",
+    sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+#__next {
+  height: 100%;
+}
+
+
+/* ── Focus ring — brand orange ─────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* ── Cursor ─────────────────────────────────────────────────────────────────── */
+/* Browsers default <button> to arrow cursor — override globally so every      */
+/* clickable button shows the hand pointer. Disabled buttons keep default.     */
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+/* ── Transition ─────────────────────────────────────────────────────────────── */
+button,
+a,
+input,
+select,
+textarea {
+  transition: all 0.15s ease;
+}
+
+/* ── Image shimmer skeleton ─────────────────────────────────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
