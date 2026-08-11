@@ -21,8 +21,16 @@ var/
 sdist/
 develop-eggs/
 .installed.cfg
-lib/
-lib64/
+# NOTE: bare "lib/" and "lib64/" (unanchored Python-venv-lib boilerplate)
+# were removed here — this repo has no in-tree venvs (Python services run
+# via Docker), so they protected nothing, and being unanchored they matched
+# ANY directory named "lib" anywhere in the monorepo — including
+# frontend/src/lib/, silently excluding real app source from git for an
+# unknown period. .venv/, venv/, and ENV/ below already ignore whole
+# virtualenv directories regardless of their internal structure, so nothing
+# is lost by removing the bare lib/lib64 rules. If a future Python build
+# step needs its own lib/ ignored, anchor it to a specific path
+# (e.g. "services/x-service/build/lib/"), never a bare name.
 .venv/
 venv/
 ENV/
