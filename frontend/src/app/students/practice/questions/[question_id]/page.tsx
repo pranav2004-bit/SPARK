@@ -331,7 +331,7 @@ function McqView({ question, options, attemptInfo, questionId, nextId, onNavigat
     if (selected.size === 0) return;
     setSubmitting(true);
     try {
-      const res = await api.post(`/students/practice/questions/${questionId}/submit/`, {
+      const res = await api.post(`/practice/student/questions/${questionId}/submit/`, {
         selected_option_ids: Array.from(selected),
       });
       const result: SubmitResult = res.data.data;
@@ -545,7 +545,7 @@ export default function StudentPracticeQuestionPage() {
     let node = mod;
     while (node.parent) {
       try {
-        const res = await api.get(`/students/practice/modules/${node.parent}/`);
+        const res = await api.get(`/practice/student/modules/${node.parent}/`);
         const parentMod = res.data.data?.module as PracticeModule | undefined;
         if (!parentMod) break;
         chain.unshift(parentMod);
@@ -600,7 +600,7 @@ export default function StudentPracticeQuestionPage() {
     setRevealingAnswer(false);
     setExplConfirmOpen(false);
 
-    api.get(`/students/practice/questions/${question_id}/`)
+    api.get(`/practice/student/questions/${question_id}/`)
       .then(res => {
         const data = res.data.data as QuestionDetailData;
         setDetail(data);
@@ -611,7 +611,7 @@ export default function StudentPracticeQuestionPage() {
           visitedRef.current = question_id;
           const st = data.question.progress_status;
           if (st !== "attempted" && st !== "completed") {
-            api.post(`/students/practice/questions/${question_id}/progress/`, {
+            api.post(`/practice/student/questions/${question_id}/progress/`, {
               status: "visited",
             }).catch(() => {/* non-critical */});
           }
@@ -652,7 +652,7 @@ export default function StudentPracticeQuestionPage() {
     setExplRevealed(true);
     if (!detail?.attempt_info) {
       try {
-        const res = await api.post(`/students/practice/questions/${question_id}/reveal-answer/`);
+        const res = await api.post(`/practice/student/questions/${question_id}/reveal-answer/`);
         const ids: string[] = res.data.data?.correct_option_ids ?? [];
         setMcqRevealedCorrectIds(ids);
       } catch (err) {
@@ -666,7 +666,7 @@ export default function StudentPracticeQuestionPage() {
     setAnswerConfirmOpen(false);
     setRevealingAnswer(true);
     try {
-      const res = await api.post(`/students/practice/questions/${question_id}/reveal-answer/`);
+      const res = await api.post(`/practice/student/questions/${question_id}/reveal-answer/`);
       setFibAnswer(res.data.data.fib_answer ?? "—");
     } catch {
       setFibAnswer("—");

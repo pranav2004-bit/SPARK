@@ -4,6 +4,7 @@ import { ToastProvider } from "@/components/ui/Toast";
 import { GlobalFooter } from "@/components/layout/GlobalFooter";
 import { ServiceWorkerRegistrar } from "@/components/ServiceWorkerRegistrar";
 import { InstallPrompt } from "@/components/ui/InstallPrompt";
+import { SplashScreen } from "@/components/ui/SplashScreen";
 
 export const viewport: Viewport = {
   themeColor: "#0a192f",
@@ -44,6 +45,7 @@ export default function RootLayout({
       </head>
       <body className="h-full antialiased">
         <ToastProvider>
+          <SplashScreen />
           {children}
           {/* <GlobalFooter /> */}{/* hidden for client presentation — restore after */}
           <ServiceWorkerRegistrar />

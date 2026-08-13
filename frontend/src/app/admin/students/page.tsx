@@ -64,7 +64,7 @@ export default function StudentsPage() {
       if (batchFilter) params.set("batch_id", batchFilter);
 
       const { data } = await api.get<PaginatedResponse<Student>>(
-        `/admin/students/?${params}`
+        `/users/students/?${params}`
       );
       setStudents(data.results);
       setTotalCount(data.count);
@@ -83,7 +83,7 @@ export default function StudentsPage() {
   // Fetch batches for dropdown
   useEffect(() => {
     api
-      .get<ApiSuccess<Batch[]>>("/admin/batches/")
+      .get<ApiSuccess<Batch[]>>("/users/batches/")
       .then(({ data }) => setBatches(data.data))
       .catch(() => {});
   }, []);
@@ -111,7 +111,7 @@ export default function StudentsPage() {
   async function onAddSubmit(data: AddStudentForm) {
     setAddLoading(true);
     try {
-      const res = await api.post<ApiSuccess<Student>>("/admin/students/", data);
+      const res = await api.post<ApiSuccess<Student>>("/users/students/", data);
       setStudents((prev) => [res.data.data, ...prev]);
       setTotalCount((c) => c + 1);
       toastSuccess("Student created.");
@@ -290,7 +290,7 @@ export default function StudentsPage() {
           <div className="space-y-4">
             <Input
               label="Student ID"
-              placeholder="e.g. A23126551001"
+              placeholder="e.g. A23126551030"
               error={errors.student_id?.message}
               {...register("student_id", {
                 required: "Student ID is required.",

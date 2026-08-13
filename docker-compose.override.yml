@@ -1,2 +1,2 @@
-# Frontend runs locally — not in Docker.
-# Start it separately: cd frontend && npm run dev
+# Legacy monolith is QUARANTINED — see docker-compose.yml for details.
+# No overrides apply. All services run via infra/docker-compose.dev.yml.

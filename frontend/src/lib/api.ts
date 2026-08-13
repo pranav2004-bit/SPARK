@@ -77,7 +77,7 @@ api.interceptors.response.use(
           pendingQueue.push({ resolve, reject });
         }).then((token) => {
           originalRequest.headers["Authorization"] = `Bearer ${token}`;
-          return api(originalRequest);
+          return api.request(originalRequest);
         });
       }
 
@@ -86,34 +86,59 @@ api.interceptors.response.use(
 
       const refreshToken = useAuthStore.getState().refreshToken;
 
-      if (!refreshToken) {
+      const forceLogout = (err: unknown) => {
         const role = useAuthStore.getState().user?.role;
         useAuthStore.getState().clearAuth();
         clearAuthCookies();
         window.location.href = LOGIN_REDIRECT_PATHS[role ?? "admin"] ?? "/login";
-        return Promise.reject(error);
+        return Promise.reject(err);
+      };
+
+      if (!refreshToken) {
+        isRefreshing = false;
+        return forceLogout(error);
       }
 
+      let newAccess: string;
       try {
         const { data } = await axios.post(`${BASE_URL}/auth/token/refresh/`, {
           refresh: refreshToken,
         });
-
-        const newAccess: string = data.access;
-        useAuthStore.getState().setAccessToken(newAccess);
-        processPendingQueue(null, newAccess);
-
-        originalRequest.headers["Authorization"] = `Bearer ${newAccess}`;
-        return api(originalRequest);
+        newAccess = data.access;
       } catch (refreshError) {
-        const role = useAuthStore.getState().user?.role;
+        // The refresh call itself failed (refresh token invalid/expired,
+        // or a network error) — the session is definitively dead.
         processPendingQueue(refreshError, null);
-        useAuthStore.getState().clearAuth();
-        clearAuthCookies();
-        window.location.href = LOGIN_REDIRECT_PATHS[role ?? "admin"] ?? "/login";
-        return Promise.reject(refreshError);
-      } finally {
         isRefreshing = false;
+        return forceLogout(refreshError);
+      }
+
+      useAuthStore.getState().setAccessToken(newAccess);
+      processPendingQueue(null, newAccess);
+      isRefreshing = false;
+
+      // Retry the original request with the new token. This must be
+      // awaited (not `return api(originalRequest)`) — returning the promise
+      // unawaited detaches it from this try/catch, so a failure on the
+      // retry would silently propagate to the caller instead of being
+      // handled below. That was the original bug: a 401 here (e.g. the
+      // resource server rejects a token that auth-service just issued as
+      // valid — a stale token_version, a deactivated account) left the
+      // user stuck on a broken page with a generic error toast and no way
+      // back to login short of manually clearing cookies.
+      originalRequest.headers["Authorization"] = `Bearer ${newAccess}`;
+      try {
+        return await api.request(originalRequest);
+      } catch (retryError) {
+        if (axios.isAxiosError(retryError) && retryError.response?.status === 401) {
+          // Refresh succeeded but the freshly-authenticated retry still
+          // 401'd — treat as a dead session, same as a failed refresh.
+          return forceLogout(retryError);
+        }
+        // Any other error (500, network, etc.) is not a session problem —
+        // propagate it as-is so the caller's normal error handling applies,
+        // rather than force-logging the user out over an unrelated failure.
+        throw retryError;
       }
     }
 

@@ -1,38 +1,733 @@
-# Development environment
-# Usage: docker-compose -f infra/docker-compose.dev.yml up
-# Full implementation completed in Task 7.1
+# SPARK — Development environment
+# Usage: docker-compose -f infra/docker-compose.dev.yml up --build
+# All secrets below are DEV-ONLY placeholders — never use in production.
+
+x-shared-env: &shared-env
+  DEBUG: "True"
+  ENVIRONMENT: development
+  ALLOWED_HOSTS: "*"
+  JWT_SIGNING_KEY: dev-jwt-key-32-chars-minimum-length-ok
+  SERVICE_KEY: dev-service-key-32-chars-minimum-ok
+  REDIS_URL: redis://redis:6379/0
+  DB_HOST: pgbouncer
+  DB_PORT: "5432"
+  CONN_MAX_AGE: "0"
+  UVICORN_WORKERS: "1"
 
 services:
 
+  # ── Infrastructure ───────────────────────────────────────────────────────────
+
   postgres:
     image: postgres:15-alpine
+    restart: always
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=128MB
+      -c effective_cache_size=384MB
+      -c work_mem=16MB
+      -c wal_buffers=64MB
+      -c log_min_duration_statement=200
+      -c log_line_prefix='%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
     environment:
-      POSTGRES_PASSWORD: dev_password
       POSTGRES_USER: postgres
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: dev_password
+      POSTGRES_DB: postgres
+      POSTGRES_HOST_AUTH_METHOD: md5
+    # No host port — DB is internal only, matching production.
+    # Shell access: docker exec -it <postgres-container> psql -U postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
     networks:
       - spark-internal
 
   redis:
     image: redis:7-alpine
+    restart: always
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save ""
-    ports:
-      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - spark-internal
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    restart: always
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     networks:
       - spark-internal
 
   minio:
     image: minio/minio:latest
+    restart: always
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9001:9001"   # MinIO admin console only (http://localhost:9001)
+      # Port 9000 (S3 API) is NOT exposed — all MinIO traffic routes through
+      # nginx:9002 (presigned uploads) and nginx:80/api/resources (file URLs).
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
     networks:
       - spark-internal
+
+  minio-init:
+    image: minio/mc:latest
+    restart: on-failure
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do
+        echo 'Waiting for MinIO...'; sleep 2;
+      done;
+      mc mb --ignore-existing local/spark;
+      mc anonymous set download local/spark;
+      echo 'MinIO bucket ready.';
+      "
+    networks:
+      - spark-internal
+
+  clamav:
+    image: clamav/clamav:stable
+    restart: always
+    # Root-cause fix for the OOM crash observed in dev: clamd's signature
+    # database load is unbounded by default and can consume enough memory
+    # to starve/kill sibling containers on a small host. mem_limit caps it
+    # (classic Compose key — works under plain `docker compose up`, unlike
+    # `deploy.resources.limits` which only applies under `docker stack
+    # deploy`/swarm). mem_reservation is a soft floor for scheduling.
+    # Measured directly: 1g was NOT enough — clamd got OOMKilled by this
+    # container's own cgroup limit while loading its full signature set
+    # (~3.6M signatures across main+daily+bytecode). 1.5g is what it
+    # actually needs; matches the prod value. NOTE: this dev host needs
+    # ~2GB of free RAM for clamav alone, on top of everything else — see
+    # PRODUCTION_CHECKLIST.md. On an undersized host this container may
+    # simply not be able to run reliably; that's a host-sizing problem,
+    # not something a smaller limit here can paper over (a tighter cap
+    # just moves the same crash earlier).
+    mem_limit: 1500m
+    mem_reservation: 768m
+    environment:
+      # Video/audio uploads go up to 500MB — clamd's INSTREAM defaults (25MB)
+      # would reject them outright. Raise the ceiling to match.
+      CLAMD_CONF_StreamMaxLength: "550M"
+      CLAMD_CONF_MaxFileSize: "550M"
+      CLAMD_CONF_MaxScanSize: "600M"
+    volumes:
+      - clamav_data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD", "clamdscan", "--ping", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      # First boot downloads the virus signature database (~300MB) via
+      # freshclam before clamd will accept connections — this can take
+      # several minutes depending on network speed.
+      start_period: 300s
+    networks:
+      - spark-internal
+
+  # ── Services ─────────────────────────────────────────────────────────────────
+
+  auth-service:
+    build:
+      context: ../services/auth-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-auth-service-secret-key-replace-before-production-xxxxxxxxxxx
+      DB_NAME: auth_db
+      DB_USER: auth_db_user
+      DB_PASSWORD: auth_dev_password_2024
+      # The UUID that identifies this institution (college).
+      # Every super-admin account and faculty account they create is scoped to this institution.
+      # Set this once per deployment — the IT team changes it only when onboarding a new college.
+      INSTITUTION_ID: "1470350a-1765-41d1-92b9-bf7b040ddaf9"
+      SUPERADMIN_EMAIL: "spark@gmail.com"
+      SUPERADMIN_PASSWORD: "000346"
+      ADMIN_DEFAULT_PASSWORD: "spark@123"
+      STUDENT_DEFAULT_PASSWORD: "ANITS@123"
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/auth/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks:
+      - spark-internal
+
+  user-service:
+    build:
+      context: ../services/user-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-user-service-secret-key-replace-before-production-xxxxxxxxxxx
+      DB_NAME: user_db
+      DB_USER: user_db_user
+      DB_PASSWORD: user_dev_password_2024
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/users/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks:
+      - spark-internal
+
+  outbox-worker:
+    build:
+      context: ../services/user-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-user-service-secret-key-replace-before-production-xxxxxxxxxxx
+      DB_NAME: user_db
+      DB_USER: user_db_user
+      DB_PASSWORD: user_dev_password_2024
+      # Worker handles its own retry loop — auth_client should NOT also retry
+      # internally, or a transient failure causes two separate retry chains.
+      AUTH_SERVICE_TIMEOUT: "10"
+      AUTH_SERVICE_RETRIES: "1"
+      AUTH_SERVICE_RETRY_BACKOFF: "0"
+      OUTBOX_POLL_INTERVAL: "30"
+      # Email alert credentials — supply real values via host environment or .env file.
+      # Never hardcode credentials here; leave blank for dev if email alerts are not needed.
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD:-}
+      ALERT_EMAIL_RECIPIENTS: ${ALERT_EMAIL_RECIPIENTS:-}
+    entrypoint: ["python", "-u", "manage.py", "run_outbox_worker"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  resource-service:
+    build:
+      context: ../services/resource-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-resource-service-secret-key-replace-before-production-xxxxxxx
+      DB_NAME: resource_db
+      DB_USER: resource_db_user
+      DB_PASSWORD: resource_dev_password_2024
+      R2_ACCESS_KEY_ID: minioadmin
+      R2_SECRET_ACCESS_KEY: minioadmin
+      R2_BUCKET_NAME: spark
+      R2_ENDPOINT_URL: http://minio:9000          # internal boto3 connection
+      R2_PUBLIC_ENDPOINT_URL: http://localhost:9002 # presigned PUT URLs sent to browser → nginx CORS proxy
+      R2_CDN_DOMAIN: "localhost:9002/spark"        # served file URLs → nginx CORS proxy
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/resources/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks:
+      - spark-internal
+
+  resource-worker:
+    build:
+      context: ../services/resource-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-resource-service-secret-key-replace-before-production-xxxxxxx
+      DB_NAME: resource_db
+      DB_USER: resource_db_user
+      DB_PASSWORD: resource_dev_password_2024
+      R2_ACCESS_KEY_ID: minioadmin
+      R2_SECRET_ACCESS_KEY: minioadmin
+      R2_BUCKET_NAME: spark
+      R2_ENDPOINT_URL: http://minio:9000          # internal boto3 connection (delete tasks)
+      R2_PUBLIC_ENDPOINT_URL: http://localhost:9002
+      R2_CDN_DOMAIN: "localhost:9002/spark"
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=2", "-Q", "resource-service"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      # NOT service_healthy — the worker also runs unrelated tasks (e.g.
+      # async_delete_file) that must keep working even if ClamAV is slow to
+      # come up (first-boot virus-DB download) or briefly unavailable. The
+      # scan task itself retries with backoff on connection errors, so
+      # blocking worker startup on clamav's health would just make an
+      # unrelated feature (deletes) hostage to this one.
+      clamav:
+        condition: service_started
+    networks:
+      - spark-internal
+
+  practice-service:
+    build:
+      context: ../services/practice-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-practice-service-secret-key-replace-before-production-xxxxxxx
+      DB_NAME: practice_db
+      DB_USER: practice_db_user
+      DB_PASSWORD: practice_dev_password_2024
+      R2_ACCESS_KEY_ID: minioadmin
+      R2_SECRET_ACCESS_KEY: minioadmin
+      R2_BUCKET_NAME: spark
+      R2_ENDPOINT_URL: http://minio:9000          # internal boto3 connection
+      R2_PUBLIC_ENDPOINT_URL: http://localhost:9002 # presigned PUT URLs sent to browser → nginx CORS proxy
+      R2_CDN_DOMAIN: "localhost:9002/spark"        # served file URLs → nginx CORS proxy
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      # NOT service_healthy — scanning happens synchronously in this
+      # service's own API process (no worker to isolate it from), but this
+      # service must still be able to start and serve non-image-upload
+      # traffic even if ClamAV is slow to come up or briefly unavailable.
+      clamav:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/practice/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks:
+      - spark-internal
+
+  notification-service:
+    build:
+      context: ../services/notification-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-notification-service-secret-key-replace-before-production-xxx
+      DB_NAME: notification_db
+      DB_USER: notification_db_user
+      DB_PASSWORD: notification_dev_password_2024
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/notifications/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks:
+      - spark-internal
+
+  notification-worker:
+    build:
+      context: ../services/notification-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-notification-service-secret-key-replace-before-production-xxx
+      DB_NAME: notification_db
+      DB_USER: notification_db_user
+      DB_PASSWORD: notification_dev_password_2024
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=2", "-Q", "notification-service"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  notification-beat:
+    build:
+      context: ../services/notification-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-notification-service-secret-key-replace-before-production-xxx
+      DB_NAME: notification_db
+      DB_USER: notification_db_user
+      DB_PASSWORD: notification_dev_password_2024
+    entrypoint: ["celery", "-A", "core", "beat", "--loglevel=info",
+                 "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  analytics-service:
+    build:
+      context: ../services/analytics-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-analytics-service-secret-key-replace-before-production-xxxxxx
+      DB_NAME: analytics_db
+      DB_USER: analytics_db_user
+      DB_PASSWORD: analytics_dev_password_2024
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/analytics/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks:
+      - spark-internal
+
+  analytics-worker:
+    build:
+      context: ../services/analytics-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-analytics-service-secret-key-replace-before-production-xxxxxx
+      DB_NAME: analytics_db
+      DB_USER: analytics_db_user
+      DB_PASSWORD: analytics_dev_password_2024
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=2", "-Q", "analytics-service"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  analytics-beat:
+    build:
+      context: ../services/analytics-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-analytics-service-secret-key-replace-before-production-xxxxxx
+      DB_NAME: analytics_db
+      DB_USER: analytics_db_user
+      DB_PASSWORD: analytics_dev_password_2024
+    entrypoint: ["celery", "-A", "core", "beat", "--loglevel=info",
+                 "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  assessment-service:
+    build:
+      context: ../services/assessment-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-assessment-service-secret-key-replace-before-production-xxxxx
+      DB_NAME: assessment_db
+      DB_USER: assessment_db_user
+      DB_PASSWORD: assessment_dev_password_2024
+      R2_ACCESS_KEY_ID: minioadmin
+      R2_SECRET_ACCESS_KEY: minioadmin
+      R2_BUCKET_NAME: spark
+      R2_ENDPOINT_URL: http://minio:9000          # internal boto3 connection
+      R2_PUBLIC_ENDPOINT_URL: http://localhost:9002 # presigned PUT URLs sent to browser → nginx CORS proxy
+      R2_CDN_DOMAIN: "localhost:9002/spark"        # served file URLs → nginx CORS proxy
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+      USER_SERVICE_URL: http://user-service:8000   # roster snapshot, Task 3.1 — internal Docker network, bypasses nginx
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      # NOT service_healthy — scanning happens synchronously in this
+      # service's own API process (no worker to isolate it from), but this
+      # service must still be able to start and serve non-image-upload
+      # traffic even if ClamAV is slow to come up or briefly unavailable.
+      clamav:
+        condition: service_started
+      user-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/assessments/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks:
+      - spark-internal
+
+  assessment-worker:
+    build:
+      context: ../services/assessment-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-assessment-service-secret-key-replace-before-production-xxxxx
+      DB_NAME: assessment_db
+      DB_USER: assessment_db_user
+      DB_PASSWORD: assessment_dev_password_2024
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=2", "-Q", "assessment-service"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  assessment-beat:
+    build:
+      context: ../services/assessment-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-assessment-service-secret-key-replace-before-production-xxxxx
+      DB_NAME: assessment_db
+      DB_USER: assessment_db_user
+      DB_PASSWORD: assessment_dev_password_2024
+    # The auto-submit/auto-close sweep (ADR 001, Task 4.1) — not implemented
+    # until Phase 4, but the container/beat schedule infrastructure is stood
+    # up now per Task 1.3 so the worker/beat pair has something to boot into.
+    entrypoint: ["celery", "-A", "core", "beat", "--loglevel=info",
+                 "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  # ── Frontend ─────────────────────────────────────────────────────────────────
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.dev
+    restart: always
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost/api
+      NODE_ENV: development
+      # ../frontend/src is bind-mounted from the Windows host filesystem (see
+      # below), and native fs-event delivery across that Docker Desktop
+      # bind-mount boundary is unreliable: it throws "Watchpack Error
+      # (initial scan): ENOMEM: not enough memory, scandir" on some routes
+      # and, worse, fires spurious Fast Refresh rebuilds on plain navigation
+      # (no file changed). A component mid-render when one of these hits gets
+      # torn down and remounted — any async operation in flight at that
+      # moment (e.g. an image upload's success handler) loses its React
+      # state update, since the component instance that would have received
+      # it is gone. That's a real correctness bug, not just a dev-speed
+      # annoyance. Polling reads mtimes directly instead of relying on native
+      # fs events, which sidesteps the unreliable event delivery entirely.
+      # Trades some CPU for correctness — the right call for a dev container.
+      WATCHPACK_POLLING: "true"
+      WATCHPACK_POLLING_INTERVAL: "1000"
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "1000"
+    volumes:
+      - ../frontend/src:/app/src:ro
+      - ../frontend/public:/app/public:ro
+      - ../frontend/tsconfig.json:/app/tsconfig.json:ro
+      - ../frontend/next.config.ts:/app/next.config.ts:ro
+      # Without this, @tailwindcss/postcss never gets registered in the PostCSS
+      # pipeline: `@import "tailwindcss"` still resolves (Next's default CSS
+      # loader can see the package), but Tailwind's JIT engine never runs, so
+      # the compiled CSS ends up with theme variables/custom globals only and
+      # zero generated utility classes (.flex, .grid, .p-4, ...) — a fully
+      # unstyled page even though the stylesheet loads with a 200. Only bites
+      # on a from-scratch image build (no stale layer with an old copy of this
+      # file already baked in), e.g. after cloning/moving the repo to a new
+      # machine.
+      - ../frontend/postcss.config.mjs:/app/postcss.config.mjs:ro
+      - frontend_next_cache:/app/.next  # Named volume keeps build cache on WSL2 native ext4, not slow overlay2
+    networks:
+      - spark-internal
+
+  # ── Nginx gateway ─────────────────────────────────────────────────────────────
+
+  nginx:
+    build:
+      context: ../gateway
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "80:80"
+      - "9002:9002"
+    volumes:
+      - ../gateway/nginx.dev.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      resource-service:
+        condition: service_healthy
+      practice-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+      analytics-service:
+        condition: service_healthy
+      assessment-service:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    healthcheck:
+      # Unlike every other service, nginx previously had no healthcheck at
+      # all — a real incident this session left it completely unresponsive
+      # (even to itself) with no automated way to detect it short of a
+      # human noticing failed requests. Routes through a real backend
+      # (auth-service) so this also catches "nginx is up but can't reach
+      # anything" states, not just "the process is running."
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1/api/auth/health/"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - spark-internal
+
+  # ── Backup container ─────────────────────────────────────────────────────────
+
+  db-backup:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      DB_PASSWORD: dev_password
+      AUTH_DB_PASSWORD: auth_dev_password_2024
+      USER_DB_PASSWORD: user_dev_password_2024
+      RESOURCE_DB_PASSWORD: resource_dev_password_2024
+      PRACTICE_DB_PASSWORD: practice_dev_password_2024
+      NOTIFICATION_DB_PASSWORD: notification_dev_password_2024
+      ANALYTICS_DB_PASSWORD: analytics_dev_password_2024
+      ASSESSMENT_DB_PASSWORD: assessment_dev_password_2024
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      BACKUP_DIR: /backups
+    volumes:
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
+      - backup_data:/backups
+    entrypoint: >
+      /bin/sh -c "
+      cp /usr/local/bin/backup.sh /tmp/backup.sh &&
+      chmod +x /tmp/backup.sh &&
+      echo '0 2 * * * /tmp/backup.sh >> /backups/backup.log 2>&1' | crontab - &&
+      crond -f -l 8
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  backup_data:
+  frontend_next_cache:
+  clamav_data:
 
 networks:
   spark-internal:

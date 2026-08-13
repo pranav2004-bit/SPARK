@@ -65,7 +65,7 @@ export default function ContactPage() {
     setSubmitting(true);
     setError("");
     try {
-      await api.post<ApiSuccess<Inquiry>>("/students/inquiries/", { message: trimmed });
+      await api.post<ApiSuccess<Inquiry>>("/users/inquiries/", { message: trimmed });
       setSubmitted(true);
       setMessage("");
       toast.success("Inquiry submitted. We'll get back to you shortly.");

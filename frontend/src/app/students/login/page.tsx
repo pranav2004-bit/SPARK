@@ -69,9 +69,10 @@ export default function StudentLoginPage() {
     setLoading(true);
     setServerError("");
     try {
-      const response = await api.post<StudentLoginResponse>("/students/login/", {
+      const response = await api.post<StudentLoginResponse>("/auth/login/", {
         student_id: data.student_id.trim().toUpperCase(),
         password: data.password,
+        role: "student",
       });
       const { access_token, refresh_token, user } = response.data.data;
       setTokens(access_token, refresh_token, user);
@@ -130,40 +131,40 @@ export default function StudentLoginPage() {
             <Image
               src="/institution-logo.svg"
               alt="Institution"
-              width={56}
-              height={56}
-              className="h-14 w-auto object-contain"
+              width={44}
+              height={44}
+              className="h-11 w-auto object-contain"
               priority
             />
-            <div className="w-px h-10" style={{ backgroundColor: 'rgba(200,200,200,0.6)' }} />
+            <div className="w-px h-8" style={{ backgroundColor: 'rgba(200,200,200,0.5)' }} />
             <Image
               src="/spark-logo.svg"
               alt="SPARK"
               width={0}
               height={0}
-              style={{ height: 36, width: "auto" }}
+              style={{ height: 30, width: "auto" }}
               priority
             />
           </div>
 
-          <h1 className="text-4xl xl:text-5xl font-bold leading-tight mb-4">
+          <h1 className="text-4xl xl:text-5xl font-bold leading-tight tracking-tight mb-4">
             Welcome Back
           </h1>
-          <p className="text-white/60 text-lg mb-12 leading-relaxed max-w-sm">
+          <p className="text-white/70 text-lg mb-10 leading-relaxed max-w-sm">
             Prepare smarter. Get placed faster.<br />
             Everything you need, in one place.
           </p>
 
           {/* Feature list */}
-          <div className="space-y-7">
+          <div className="space-y-6">
             {FEATURES.map(({ icon: Icon, title, desc }) => (
               <div key={title} className="flex items-start gap-4">
-                <div className="w-10 h-10 rounded-full border border-white/25 flex items-center justify-center shrink-0 mt-0.5">
-                  <Icon size={17} className="text-white/75" />
+                <div className="w-10 h-10 rounded-full border border-white/20 bg-white/[0.07] flex items-center justify-center shrink-0 mt-0.5">
+                  <Icon size={17} className="text-white/80" />
                 </div>
                 <div>
-                  <p className="font-semibold text-[15px]">{title}</p>
-                  <p className="text-white/50 text-sm mt-0.5 leading-relaxed">{desc}</p>
+                  <p className="font-semibold text-[15px] text-white">{title}</p>
+                  <p className="text-white/60 text-sm mt-0.5 leading-relaxed">{desc}</p>
                 </div>
               </div>
             ))}
@@ -192,22 +193,22 @@ export default function StudentLoginPage() {
         <div className="flex-1 flex flex-col items-center justify-center">
 
         {/* Mobile logos — above card, desktop hidden */}
-        <div className="lg:hidden flex items-center gap-4 mb-8">
+        <div className="lg:hidden flex items-center gap-3 mb-7">
           <Image
             src="/institution-logo.svg"
             alt="Institution"
-            width={64}
-            height={64}
-            className="h-16 w-auto object-contain"
+            width={44}
+            height={44}
+            className="h-11 w-auto object-contain"
             priority
           />
-          <div className="w-px h-11" style={{ backgroundColor: 'var(--color-border)' }} />
+          <div className="w-px h-8" style={{ backgroundColor: 'var(--color-border)' }} />
           <Image
             src="/spark-logo.svg"
             alt="SPARK"
             width={0}
             height={0}
-            style={{ height: 40, width: "auto" }}
+            style={{ height: 30, width: "auto" }}
             priority
           />
         </div>
@@ -222,7 +223,7 @@ export default function StudentLoginPage() {
           </div>
 
           {/* Heading */}
-          <h2 className="text-[26px] font-bold text-[var(--color-text)] mb-0.5 leading-tight">
+          <h2 className="text-[26px] font-bold tracking-tight text-[var(--color-text)] mb-0.5 leading-tight">
             Sign In
           </h2>
           <p className="text-sm text-[var(--color-text-muted)] mb-5 leading-relaxed">
@@ -234,7 +235,7 @@ export default function StudentLoginPage() {
 
             {/* Student ID */}
             <div>
-              <label className="block text-sm font-bold text-[var(--color-text)] mb-1">
+              <label className="block text-sm font-semibold text-[var(--color-text)] mb-1">
                 Student ID
               </label>
               <input
@@ -261,7 +262,7 @@ export default function StudentLoginPage() {
 
             {/* Password */}
             <div>
-              <label className="block text-sm font-bold text-[var(--color-text)] mb-1">
+              <label className="block text-sm font-semibold text-[var(--color-text)] mb-1">
                 Password
               </label>
               <div className="relative">

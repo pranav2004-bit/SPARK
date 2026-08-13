@@ -91,7 +91,7 @@ export function ScrollingUpdates({ context = "student", stickyTop = 56, disableS
     hasFetched.current = true;
 
     // Uses /api/students/scroll/ which is now AllowAny
-    api.get("/students/scroll/").then((res) => {
+    api.get("/users/scroll/").then((res) => {
       setData(res.data.data);
     }).catch(() => {
       // Not critical — silently hide on any error

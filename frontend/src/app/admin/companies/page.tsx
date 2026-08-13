@@ -62,7 +62,7 @@ export default function CompaniesPage() {
   const fetchCompanies = useCallback(async () => {
     try {
       const { data } = await api.get<PaginatedResponse<Company>>(
-        "/admin/companies/"
+        "/resources/companies/"
       );
       setCompanies(data.results);
     } catch (err) {
@@ -97,7 +97,7 @@ export default function CompaniesPage() {
     try {
       if (editCompany) {
         const res = await api.patch<ApiSuccess<Company>>(
-          `/admin/companies/${editCompany.id}/`,
+          `/resources/companies/${editCompany.id}/`,
           data
         );
         setCompanies((prev) =>
@@ -105,7 +105,7 @@ export default function CompaniesPage() {
         );
         toastSuccess("Company updated.");
       } else {
-        const res = await api.post<ApiSuccess<Company>>("/admin/companies/", data);
+        const res = await api.post<ApiSuccess<Company>>("/resources/companies/", data);
         setCompanies((prev) => [...prev, res.data.data]);
         toastSuccess("Company created.");
       }
@@ -128,7 +128,7 @@ export default function CompaniesPage() {
     if (!deleteCompany) return;
     setDeleteLoading(true);
     try {
-      await api.delete(`/admin/companies/${deleteCompany.id}/`);
+      await api.delete(`/resources/companies/${deleteCompany.id}/`);
       setCompanies((prev) => prev.filter((c) => c.id !== deleteCompany.id));
       toastSuccess(`"${deleteCompany.company_name}" deleted.`);
       setDeleteCompany(null);
@@ -153,7 +153,7 @@ export default function CompaniesPage() {
 
     try {
       const res = await api.patch<ApiSuccess<Company>>(
-        `/admin/companies/${company.id}/toggle-publish/`
+        `/resources/companies/${company.id}/toggle-publish/`
       );
       // Confirm with server state (source of truth)
       setCompanies((prev) =>

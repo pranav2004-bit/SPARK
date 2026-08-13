@@ -1,5 +1,5 @@
 FROM nginx:1.25-alpine
 
-# Bake config into image — avoids Windows bind-mount I/O issues
-# and enables clean `nginx -s reload` from within the container.
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Replace the entire main config (gives us worker_processes, events{}, http{} control)
+COPY nginx.conf /etc/nginx/nginx.conf
+COPY proxy_params.conf /etc/nginx/proxy_params.conf

@@ -149,16 +149,19 @@ function ModuleCard({
             {isCopied ? <Check size={14} /> : <Link2 size={14} />}
           </button>
 
-          <button
-            onClick={onEdit}
-            className="w-8 h-8 rounded-[var(--radius-md)] flex items-center justify-center transition-colors cursor-pointer"
-            style={{ color: "var(--color-text-muted)" }}
-            title="Edit name"
-            onMouseEnter={e => { e.currentTarget.style.background = "var(--color-surface-hover)"; e.currentTarget.style.color = "var(--color-text)"; }}
-            onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--color-text-muted)"; }}
-          >
-            <Pencil size={14} />
-          </button>
+          {/* System modules are protected — no rename */}
+          {!module.is_system && (
+            <button
+              onClick={onEdit}
+              className="w-8 h-8 rounded-[var(--radius-md)] flex items-center justify-center transition-colors cursor-pointer"
+              style={{ color: "var(--color-text-muted)" }}
+              title="Edit name"
+              onMouseEnter={e => { e.currentTarget.style.background = "var(--color-surface-hover)"; e.currentTarget.style.color = "var(--color-text)"; }}
+              onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--color-text-muted)"; }}
+            >
+              <Pencil size={14} />
+            </button>
+          )}
 
           {/* System modules are protected — no delete */}
           {!module.is_system && (
@@ -247,6 +250,7 @@ export default function AdminResourcesPage() {
         `/resources/modules/${module.id}/`, { is_published: !module.is_published }
       );
       setModules(prev => prev.map(m => m.id === module.id ? res.data.data : m));
+      toast.success(res.data.data.is_published ? "Module published." : "Module unpublished.");
     } catch (err) {
       toast.error(getErrorMessage(err));
     } finally {

@@ -1,61 +1,109 @@
-# Production environment
+# SPARK — Production environment
 # Usage: infra/scripts/start-prod.sh
-# Full implementation completed in Task 7.1
+# All secrets must be provided via per-service .env files — see .env.example in each service directory.
+# Run validate-env.sh before deploying to verify all required variables are set.
 
 services:
+
+  # ── Infrastructure ───────────────────────────────────────────────────────────
 
   postgres:
     image: postgres:15-alpine
     restart: always
     env_file: .env
     environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    networks:
-      - spark-internal
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
+    networks:
+      - spark-internal
 
   redis:
     image: redis:7-alpine
     restart: always
     command: redis-server --maxmemory 200mb --maxmemory-policy allkeys-lru --save ""
-    networks:
-      - spark-internal
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-
-  nginx:
-    build:
-      context: ../gateway
-      dockerfile: Dockerfile
-    restart: always
-    ports:
-      - "80:80"
-    depends_on:
-      - auth-service
-      - user-service
-      - resource-service
-      - practice-service
-      - notification-service
-      - analytics-service
-      - frontend
     networks:
       - spark-internal
+
+  clamav:
+    image: clamav/clamav:stable
+    restart: always
+    # Caps clamd's memory footprint so it can't consume enough to
+    # starve/kill sibling containers on the host. mem_limit is the classic
+    # Compose key — applies under plain `docker compose up`, unlike
+    # `deploy.resources.limits` (swarm-only). Production hosts need at
+    # least ~1.5GB free for this alone — see PRODUCTION_CHECKLIST.md.
+    mem_limit: 1500m
+    mem_reservation: 768m
+    environment:
+      # Video/audio uploads go up to 500MB — clamd's INSTREAM defaults (25MB)
+      # would reject them outright. Raise the ceiling to match.
+      CLAMD_CONF_StreamMaxLength: "550M"
+      CLAMD_CONF_MaxFileSize: "550M"
+      CLAMD_CONF_MaxScanSize: "600M"
+    volumes:
+      - clamav_data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD", "clamdscan", "--ping", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+    networks:
+      - spark-internal
+
+  pgbouncer:
+    # Every service's own .env.example already documents DB_HOST=pgbouncer
+    # (confirmed: services/auth-service/.env.example,
+    # services/assessment-service/.env.example, etc.) — CONN_MAX_AGE=0
+    # (Section 2 of PRODUCTION_CHECKLIST.md) is only correct with a real
+    # connection pooler in front of Postgres. This container was missing
+    # entirely from this file, meaning production `.env` files pointed
+    # every service at a pgbouncer that never existed here — found and
+    # fixed during Phase 15 documentation/production-readiness pass.
+    image: edoburu/pgbouncer:latest
+    restart: always
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - spark-internal
+
+  # ── Services ─────────────────────────────────────────────────────────────────
 
   auth-service:
     build:
       context: ../services/auth-service
       dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/auth-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/auth-service/.env
     depends_on:
@@ -63,6 +111,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/auth/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
     networks:
       - spark-internal
 
@@ -70,12 +125,53 @@ services:
     build:
       context: ../services/user-service
       dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/user-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/user-service/.env
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/users/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - spark-internal
+
+  outbox-worker:
+    # user-service's own dead-letter outbox worker (PRODUCTION_CHECKLIST.md
+    # Section 12) — was missing from this file entirely, alongside
+    # pgbouncer/db-backup; found and fixed during Phase 15's
+    # production-readiness documentation pass. A student deleted from
+    # user-service with no running outbox-worker to clean up their
+    # auth-service account is exactly the security gap Section 12
+    # describes — this container is not optional.
+    build:
+      context: ../services/user-service
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/user-service:${GIT_SHA:-latest}
+    restart: always
+    env_file: ../services/user-service/.env
+    environment:
+      # Worker handles its own retry loop — auth_client should NOT also
+      # retry internally, or a transient failure causes two separate
+      # retry chains (matches infra/docker-compose.dev.yml's outbox-worker).
+      AUTH_SERVICE_TIMEOUT: "10"
+      AUTH_SERVICE_RETRIES: "1"
+      AUTH_SERVICE_RETRY_BACKOFF: "0"
+      OUTBOX_POLL_INTERVAL: "30"
+    entrypoint: ["python", "-u", "manage.py", "run_outbox_worker"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      auth-service:
         condition: service_healthy
     networks:
       - spark-internal
@@ -84,6 +180,7 @@ services:
     build:
       context: ../services/resource-service
       dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/resource-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/resource-service/.env
     depends_on:
@@ -91,6 +188,32 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/resources/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - spark-internal
+
+  resource-worker:
+    build:
+      context: ../services/resource-service
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/resource-service:${GIT_SHA:-latest}
+    restart: always
+    env_file: ../services/resource-service/.env
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=4", "-Q", "resource-service"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # NOT service_healthy — see infra/docker-compose.dev.yml for why.
+      clamav:
+        condition: service_started
     networks:
       - spark-internal
 
@@ -98,8 +221,57 @@ services:
     build:
       context: ../services/practice-service
       dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/practice-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/practice-service/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # NOT service_healthy — see infra/docker-compose.dev.yml for why.
+      clamav:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/practice/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - spark-internal
+
+  notification-service:
+    build:
+      context: ../services/notification-service
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/notification-service:${GIT_SHA:-latest}
+    restart: always
+    env_file: ../services/notification-service/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/notifications/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - spark-internal
+
+  notification-worker:
+    build:
+      context: ../services/notification-service
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/notification-service:${GIT_SHA:-latest}
+    restart: always
+    env_file: ../services/notification-service/.env
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=4", "-Q", "notification-service"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,12 +280,15 @@ services:
     networks:
       - spark-internal
 
-  notification-service:
+  notification-beat:
     build:
       context: ../services/notification-service
       dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/notification-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/notification-service/.env
+    entrypoint: ["celery", "-A", "core", "beat", "--loglevel=info",
+                 "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -126,8 +301,32 @@ services:
     build:
       context: ../services/analytics-service
       dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/analytics-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/analytics-service/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/analytics/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - spark-internal
+
+  analytics-worker:
+    build:
+      context: ../services/analytics-service
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/analytics-service:${GIT_SHA:-latest}
+    restart: always
+    env_file: ../services/analytics-service/.env
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=4", "-Q", "analytics-service"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -136,16 +335,163 @@ services:
     networks:
       - spark-internal
 
-  frontend:
+  analytics-beat:
     build:
-      context: ../frontend
+      context: ../services/analytics-service
       dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/analytics-service:${GIT_SHA:-latest}
     restart: always
+    env_file: ../services/analytics-service/.env
+    entrypoint: ["celery", "-A", "core", "beat", "--loglevel=info",
+                 "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  assessment-service:
+    build:
+      context: ../services/assessment-service
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/assessment-service:${GIT_SHA:-latest}
+    restart: always
+    env_file: ../services/assessment-service/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # NOT service_healthy — see infra/docker-compose.dev.yml for why
+      # (scanning happens synchronously in this service's own API process;
+      # it must still be able to start and serve non-image-upload traffic
+      # even if ClamAV is slow to come up or briefly unavailable).
+      clamav:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/assessments/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - spark-internal
+
+  assessment-worker:
+    build:
+      context: ../services/assessment-service
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/assessment-service:${GIT_SHA:-latest}
+    restart: always
+    env_file: ../services/assessment-service/.env
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=4", "-Q", "assessment-service"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  assessment-beat:
+    build:
+      context: ../services/assessment-service
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/assessment-service:${GIT_SHA:-latest}
+    restart: always
+    env_file: ../services/assessment-service/.env
+    # The auto-submit/auto-close sweep (ADR 001, Task 4.1) — must run in
+    # prod exactly as it does in dev; a missing beat container here would
+    # silently mean sessions past their deadline are never auto-finalized.
+    entrypoint: ["celery", "-A", "core", "beat", "--loglevel=info",
+                 "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  # ── Backup ───────────────────────────────────────────────────────────────────
+
+  db-backup:
+    # Was missing from this file entirely (alongside pgbouncer/outbox-worker)
+    # — found and fixed during Phase 15's production-readiness pass.
+    # infra/scripts/backup.sh still only writes to a local BACKUP_DIR volume
+    # (no R2/S3 upload logic yet — that's PRODUCTION_CHECKLIST.md Section
+    # 6's own separate, not-yet-done item: "Point backup.sh to Cloudflare
+    # R2 or AWS S3"). This block mirrors infra/docker-compose.dev.yml's
+    # db-backup exactly rather than inventing R2 env vars a script that
+    # doesn't read them yet — update this block's environment/volumes
+    # together with backup.sh when Section 6 is actually done, not before.
+    image: postgres:15-alpine
+    restart: always
+    env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      BACKUP_DIR: /backups
+    volumes:
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
+      - backup_data:/backups
+    entrypoint: >
+      /bin/sh -c "
+      cp /usr/local/bin/backup.sh /tmp/backup.sh &&
+      chmod +x /tmp/backup.sh &&
+      echo '0 2 * * * /tmp/backup.sh >> /backups/backup.log 2>&1' | crontab - &&
+      crond -f -l 8
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  # ── Nginx gateway ─────────────────────────────────────────────────────────────
+  # Frontend is deployed on Vercel — nginx serves API routes only.
+
+  nginx:
+    build:
+      context: ../gateway
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/nginx:${GIT_SHA:-latest}
+    restart: always
+    ports:
+      - "80:80"
+      - "9002:9002"
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      resource-service:
+        condition: service_healthy
+      practice-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+      analytics-service:
+        condition: service_healthy
+      assessment-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1/api/auth/health/"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     networks:
       - spark-internal
 
 volumes:
   postgres_data:
+  redis_data:
+  clamav_data:
+  backup_data:
 
 networks:
   spark-internal:

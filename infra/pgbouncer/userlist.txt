@@ -1,0 +1,8 @@
+"auth_db_user"         "auth_dev_password_2024"
+"user_db_user"         "user_dev_password_2024"
+"resource_db_user"     "resource_dev_password_2024"
+"practice_db_user"     "practice_dev_password_2024"
+"notification_db_user" "notification_dev_password_2024"
+"analytics_db_user"    "analytics_dev_password_2024"
+"assessment_db_user"   "assessment_dev_password_2024"
+"postgres"             "dev_password"

@@ -247,7 +247,7 @@ export default function StudentPracticeSectionPage() {
     let node = leaf;
     while (node.parent) {
       try {
-        const res = await api.get(`/students/practice/modules/${node.parent}/`);
+        const res = await api.get(`/practice/student/modules/${node.parent}/`);
         const parent = res.data.data?.module as PracticeModule | undefined;
         if (!parent) break;
         chain.unshift(parent);
@@ -260,7 +260,7 @@ export default function StudentPracticeSectionPage() {
   // ── Fetch ───────────────────────────────────────────────────────────────────
   const fetchSection = (silent = false) => {
     if (!silent) setLoading(true);
-    api.get(`/students/practice/sections/${section_id}/`)
+    api.get(`/practice/student/sections/${section_id}/`)
       .then(res => {
         const data = res.data.data as SectionDetailData;
         setDetail(data);

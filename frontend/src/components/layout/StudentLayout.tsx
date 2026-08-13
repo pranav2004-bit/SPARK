@@ -44,7 +44,7 @@ const NAV_ITEMS = [
     mobileLabel: "Assessments",
     icon: ClipboardList,
     match: "/students/assessments",
-    comingSoon: true,
+    comingSoon: false,
   },
   {
     href: "/students/contests",
@@ -104,7 +104,6 @@ export function StudentLayout({
               width={0}
               height={0}
               className="h-[38px] sm:h-[44px] w-auto"
-              priority
             />
             <div className="w-px h-7 sm:h-8 bg-[var(--color-border)]" />
             <Image
@@ -113,7 +112,6 @@ export function StudentLayout({
               width={0}
               height={0}
               className="h-[26px] sm:h-[30px] w-auto"
-              priority
             />
           </Link>
 

@@ -170,9 +170,9 @@ function SectionContent() {
     }
     try {
       const [companyRes, uploadsRes] = await Promise.all([
-        api.get<ApiSuccess<Company>>(`/students/companies/${company_id}/`),
+        api.get<ApiSuccess<Company>>(`/resources/student/companies/${company_id}/`),
         api.get<PaginatedResponse<Upload>>(
-          `/students/companies/${company_id}/sections/${section_id}/uploads/`
+          `/resources/student/companies/${company_id}/sections/${section_id}/uploads/`
         ),
       ]);
       setCompany(companyRes.data.data);

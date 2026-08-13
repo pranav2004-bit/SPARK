@@ -184,7 +184,7 @@ export default function AdminPracticePage() {
 
   // ── Load ───────────────────────────────────────────────────────────────────
   useEffect(() => {
-    api.get("/admin/practice/")
+    api.get("/practice/")
       .then(res => {
         setModules(res.data.data.modules);
         setSections(res.data.data.sections);
@@ -218,19 +218,19 @@ export default function AdminPracticePage() {
     setSaving(true); setModalError("");
     try {
       if (modal === "add-module") {
-        const res = await api.post<ApiSuccess<PracticeModule>>("/admin/practice/modules/", { name });
+        const res = await api.post<ApiSuccess<PracticeModule>>("/practice/modules/", { name });
         setModules(prev => [...prev, res.data.data]);
         toast.success("Module created.");
       } else if (modal === "add-section") {
-        const res = await api.post<ApiSuccess<PracticeSection>>("/admin/practice/sections/", { name });
+        const res = await api.post<ApiSuccess<PracticeSection>>("/practice/sections/", { name });
         setSections(prev => [...prev, res.data.data]);
         toast.success("Section created.");
       } else if (modal !== null && typeof modal === "object" && modal.mode === "edit-module") {
-        const res = await api.patch<ApiSuccess<PracticeModule>>(`/admin/practice/modules/${modal.item.id}/`, { name });
+        const res = await api.patch<ApiSuccess<PracticeModule>>(`/practice/modules/${modal.item.id}/`, { name });
         setModules(prev => prev.map(m => m.id === modal.item.id ? res.data.data : m));
         toast.success("Module updated.");
       } else if (modal !== null && typeof modal === "object" && modal.mode === "edit-section") {
-        const res = await api.patch<ApiSuccess<PracticeSection>>(`/admin/practice/sections/${modal.item.id}/`, { name });
+        const res = await api.patch<ApiSuccess<PracticeSection>>(`/practice/sections/${modal.item.id}/`, { name });
         setSections(prev => prev.map(s => s.id === modal.item.id ? res.data.data : s));
         toast.success("Section updated.");
       }
@@ -243,7 +243,7 @@ export default function AdminPracticePage() {
   async function handleToggleModule(item: PracticeModule) {
     setPublishing(item.id);
     try {
-      const res = await api.patch<ApiSuccess<PracticeModule>>(`/admin/practice/modules/${item.id}/`, { is_published: !item.is_published });
+      const res = await api.patch<ApiSuccess<PracticeModule>>(`/practice/modules/${item.id}/`, { is_published: !item.is_published });
       setModules(prev => prev.map(m => m.id === item.id ? res.data.data : m));
     } catch (err) { toast.error(getErrorMessage(err)); }
     finally { setPublishing(null); }
@@ -252,7 +252,7 @@ export default function AdminPracticePage() {
   async function handleToggleSection(item: PracticeSection) {
     setPublishing(item.id);
     try {
-      const res = await api.patch<ApiSuccess<PracticeSection>>(`/admin/practice/sections/${item.id}/`, { is_published: !item.is_published });
+      const res = await api.patch<ApiSuccess<PracticeSection>>(`/practice/sections/${item.id}/`, { is_published: !item.is_published });
       setSections(prev => prev.map(s => s.id === item.id ? res.data.data : s));
     } catch (err) { toast.error(getErrorMessage(err)); }
     finally { setPublishing(null); }
@@ -264,10 +264,10 @@ export default function AdminPracticePage() {
     setDeleting(true);
     try {
       if (deleteTarget.type === "module") {
-        await api.delete(`/admin/practice/modules/${deleteTarget.id}/`);
+        await api.delete(`/practice/modules/${deleteTarget.id}/`);
         setModules(prev => prev.filter(m => m.id !== deleteTarget.id));
       } else {
-        await api.delete(`/admin/practice/sections/${deleteTarget.id}/`);
+        await api.delete(`/practice/sections/${deleteTarget.id}/`);
         setSections(prev => prev.filter(s => s.id !== deleteTarget.id));
       }
       setDeleteTarget(null);

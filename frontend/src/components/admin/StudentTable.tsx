@@ -7,7 +7,6 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { TableRowSkeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
@@ -30,8 +29,6 @@ interface StudentTableProps {
 }
 
 interface EditForm {
-  fullname: string;
-  college_email_id: string;
   department: string;
   batch_id: string;
 }
@@ -60,7 +57,6 @@ export function StudentTable({
     register,
     handleSubmit,
     reset,
-    setError,
     formState: { errors },
   } = useForm<EditForm>();
 
@@ -68,8 +64,6 @@ export function StudentTable({
 
   function openEdit(s: Student) {
     reset({
-      fullname: s.fullname,
-      college_email_id: s.college_email_id,
       department: s.department,
       batch_id: s.batch_id,
     });
@@ -81,14 +75,14 @@ export function StudentTable({
     setActionLoading("edit");
     try {
       const res = await api.patch<ApiSuccess<Student>>(
-        `/admin/students/${editStudent.id}/`,
+        `/users/students/${editStudent.id}/`,
         data
       );
       onStudentUpdated(res.data.data);
       toastSuccess("Student updated.");
       setEditStudent(null);
     } catch (err) {
-      setError("fullname", { message: getErrorMessage(err) });
+      toastError(getErrorMessage(err));
     } finally {
       setActionLoading(null);
     }
@@ -98,7 +92,7 @@ export function StudentTable({
     setActionLoading(student.id);
     try {
       const res = await api.patch<ApiSuccess<{ is_active: boolean }>>(
-        `/admin/students/${student.id}/toggle-status/`
+        `/users/students/${student.id}/toggle-status/`
       );
       onStudentUpdated({ ...student, is_active: res.data.data.is_active });
       toastSuccess(
@@ -115,7 +109,7 @@ export function StudentTable({
     if (!resetStudent) return;
     setActionLoading("reset");
     try {
-      await api.post(`/admin/students/${resetStudent.id}/reset-password/`);
+      await api.post(`/auth/student/${resetStudent.student_id}/reset-password/`);
       toastSuccess(
         `Password reset to ANITS@123 for ${resetStudent.student_id}.`
       );
@@ -132,7 +126,7 @@ export function StudentTable({
     if (!deleteStudent) return;
     setActionLoading("delete");
     try {
-      await api.delete(`/admin/students/${deleteStudent.id}/`);
+      await api.delete(`/users/students/${deleteStudent.id}/`);
       onStudentDeleted(deleteStudent.id);
       toastSuccess("Student deleted.");
       setDeleteStudent(null);
@@ -405,28 +399,15 @@ export function StudentTable({
         title="Edit Student"
       >
         <form onSubmit={handleSubmit(onEditSubmit)}>
-          <div className="space-y-1">
-            <Input
-              label="Full name"
-              error={errors.fullname?.message}
-              {...register("fullname", { required: "Name is required." })}
-            />
-            <Input
-              label="College email"
-              type="email"
-              error={errors.college_email_id?.message}
-              {...register("college_email_id", {
-                required: "Email is required.",
-              })}
-            />
+          <div className="space-y-4">
+            {/* Editable: department */}
             <Select
               label="Department"
               options={deptOptions}
               error={errors.department?.message}
-              {...register("department", {
-                required: "Department is required.",
-              })}
+              {...register("department", { required: "Department is required." })}
             />
+            {/* Editable: batch */}
             {showBatchColumn && (
               <Select
                 label="Batch"
@@ -466,8 +447,8 @@ export function StudentTable({
         onClose={() => setDeleteStudent(null)}
         onConfirm={handleDelete}
         title="Delete Student"
-        message={`Delete ${deleteStudent?.student_id} (${deleteStudent?.fullname})? This cannot be undone.`}
-        confirmLabel="Delete"
+        message={`This will permanently delete ${deleteStudent?.student_id}${deleteStudent?.fullname ? ` (${deleteStudent.fullname})` : ""} and their login access. This cannot be undone.`}
+        confirmLabel="Permanently Delete"
         loading={actionLoading === "delete"}
       />
     </>

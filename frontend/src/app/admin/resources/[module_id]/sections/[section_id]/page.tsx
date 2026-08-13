@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import axios from "axios";
 import {
   Upload as UploadIcon,
   Trash2,
@@ -30,6 +29,7 @@ import { Badge } from "@/components/ui/Badge";
 import { UploadListSkeleton, Skeleton } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
+import { putFileWithRetry } from "@/lib/uploadRetry";
 import {
   UPLOAD_TYPE_LABELS,
   UPLOAD_ACCEPT_MAP,
@@ -233,13 +233,10 @@ export default function ResourceSectionUploadsPage() {
       );
       const presignedData = presignedResponse.data;
 
-      // Step 2 — PUT directly to R2/MinIO (no auth header)
-      await axios.put(presignedData.upload_url, selectedFile, {
-        headers: { "Content-Type": selectedFile.type || "application/octet-stream" },
-        onUploadProgress: (e) => {
-          if (e.total) setUploadProgress(Math.round((e.loaded / e.total) * 100));
-        },
-      });
+      // Step 2 — PUT directly to R2/MinIO (no auth header). Retries on
+      // transient network drops — the presigned URL stays valid for its
+      // full expiry window, so re-sending the same PUT is safe.
+      await putFileWithRetry(presignedData.upload_url, selectedFile, setUploadProgress);
 
       // Step 3 — confirm / create DB record
       const { data: confirmResponse } = await api.post<ApiSuccess<Upload>>(
@@ -656,6 +653,16 @@ export default function ResourceSectionUploadsPage() {
                             {upload.file_size_bytes && (
                               <span className="text-xs text-[var(--color-text-muted)]">
                                 {formatBytes(upload.file_size_bytes)}
+                              </span>
+                            )}
+                            {upload.scan_status === "pending" && (
+                              <span className="inline-flex items-center gap-1 text-xs font-medium" style={{ color: "var(--color-text-subtle)" }}>
+                                <Loader2 size={10} className="animate-spin" /> Scanning…
+                              </span>
+                            )}
+                            {upload.scan_status === "error" && (
+                              <span className="text-xs font-medium" style={{ color: "var(--color-danger)" }}>
+                                Scan failed — hidden from students
                               </span>
                             )}
                           </div>

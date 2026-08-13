@@ -88,10 +88,10 @@ export default function UploadsPage() {
     if (!company_id) return;
     try {
       const [companyRes, sectionRes, uploadsRes] = await Promise.all([
-        api.get<ApiSuccess<Company>>(`/admin/companies/${company_id}/`),
-        api.get<ApiSuccess<Section>>(`/admin/companies/${company_id}/sections/${section_id}/`),
+        api.get<ApiSuccess<Company>>(`/resources/companies/${company_id}/`),
+        api.get<ApiSuccess<Section>>(`/resources/companies/${company_id}/sections/${section_id}/`),
         api.get<PaginatedResponse<Upload>>(
-          `/admin/companies/${company_id}/sections/${section_id}/uploads/`
+          `/resources/companies/${company_id}/sections/${section_id}/uploads/`
         ),
       ]);
       setCompany(companyRes.data.data);
@@ -151,7 +151,7 @@ export default function UploadsPage() {
         upload_url: string;
         file_key: string;
       }>>(
-        `/admin/companies/${company_id}/sections/${section_id}/uploads/get-upload-url/`,
+        `/resources/companies/${company_id}/sections/${section_id}/uploads/presign/`,
         {
           upload_type: uploadType,
           filename: selectedFile.name,
@@ -173,7 +173,7 @@ export default function UploadsPage() {
 
       // Step 3: confirm (create DB record)
       const { data: confirmResponse } = await api.post<ApiSuccess<Upload>>(
-        `/admin/companies/${company_id}/sections/${section_id}/uploads/confirm/`,
+        `/resources/companies/${company_id}/sections/${section_id}/uploads/confirm/`,
         {
           file_key: presignedData.file_key,
           upload_type: uploadType,
@@ -208,7 +208,7 @@ export default function UploadsPage() {
     setLinkLoading(true);
     try {
       const { data: linkResponse } = await api.post<ApiSuccess<Upload>>(
-        `/admin/companies/${company_id}/sections/${section_id}/uploads/add-link/`,
+        `/resources/companies/${company_id}/sections/${section_id}/uploads/add-link/`,
         {
           upload_type: uploadType,
           file_url: linkUrl.trim(),
@@ -230,7 +230,7 @@ export default function UploadsPage() {
     setDeleteLoading(true);
     try {
       await api.delete(
-        `/admin/companies/${company_id}/sections/${section_id}/uploads/${deleteUpload.id}/`
+        `/resources/companies/${company_id}/sections/${section_id}/uploads/${deleteUpload.id}/`
       );
       setUploads((prev) => prev.filter((u) => u.id !== deleteUpload.id));
       toast.success("Upload deleted.");

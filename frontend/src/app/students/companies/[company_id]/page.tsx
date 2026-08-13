@@ -170,8 +170,8 @@ export default function CompanySectionsPage() {
     if (!company_id) { router.replace("/students/companies"); return; }
     try {
       const [companyRes, sectionsRes] = await Promise.all([
-        api.get<ApiSuccess<Company>>(`/students/companies/${company_id}/`),
-        api.get<PaginatedResponse<Section>>(`/students/companies/${company_id}/sections/`),
+        api.get<ApiSuccess<Company>>(`/resources/student/companies/${company_id}/`),
+        api.get<PaginatedResponse<Section>>(`/resources/student/companies/${company_id}/sections/`),
       ]);
       setCompany(companyRes.data.data);
       setSections(sectionsRes.data.results);

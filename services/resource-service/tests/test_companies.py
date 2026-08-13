@@ -158,7 +158,51 @@ class TestUploads:
         )
         assert resp.status_code == 400
 
-    def test_confirm_upload(self, admin_client, company, section):
+    def test_presign_dropped_extensions_rejected(self, admin_client, company, section):
+        """.svg (XSS vector), .wav (size mismatch) and .avi/.mov/.mkv (unplayable
+        in-browser) were deliberately dropped from the allowlist."""
+        cases = [
+            ("logo.svg", "image/svg+xml", "image"),
+            ("recording.wav", "audio/wav", "audio"),
+            ("clip.avi", "video/avi", "video"),
+            ("clip.mov", "video/quicktime", "video"),
+            ("clip.mkv", "video/x-matroska", "video"),
+        ]
+        for filename, content_type, upload_type in cases:
+            resp = admin_client.post(
+                f"/api/resources/companies/{company.pk}/sections/{section.pk}/uploads/presign/",
+                {"filename": filename, "content_type": content_type, "upload_type": upload_type},
+                format="json",
+            )
+            assert resp.status_code == 400, filename
+
+    def test_presign_mime_type_mismatch(self, admin_client, company, section):
+        resp = admin_client.post(
+            f"/api/resources/companies/{company.pk}/sections/{section.pk}/uploads/presign/",
+            {"filename": "report.pdf", "content_type": "text/html", "upload_type": "pdf"},
+            format="json",
+        )
+        assert resp.status_code == 400
+
+    def test_confirm_storage_not_configured(self, admin_client, company, section):
+        # R2 credentials are unset in test settings — verify_uploaded_object
+        # raises RuntimeError, same contract as the presign endpoint.
+        resp = admin_client.post(
+            f"/api/resources/companies/{company.pk}/sections/{section.pk}/uploads/confirm/",
+            {
+                "file_key": "uploads/pdf/some-uuid.pdf",
+                "original_filename": "report.pdf",
+                "file_size_bytes": 2048,
+                "upload_type": "pdf",
+            },
+            format="json",
+        )
+        assert resp.status_code == 503
+
+    @patch("resources.tasks.scan_uploaded_file.delay")
+    @patch("core.storage.verify_uploaded_object")
+    def test_confirm_upload(self, mock_verify, mock_scan_delay, admin_client, company, section):
+        mock_verify.return_value = (2048, None)
         resp = admin_client.post(
             f"/api/resources/companies/{company.pk}/sections/{section.pk}/uploads/confirm/",
             {
@@ -171,6 +215,79 @@ class TestUploads:
         )
         assert resp.status_code == 201
         assert resp.json()["data"]["upload_type"] == "pdf"
+        # real HEAD size is trusted, not the client-reported value
+        assert resp.json()["data"]["file_size_bytes"] == 2048
+        assert resp.json()["data"]["scan_status"] == "pending"
+        mock_scan_delay.assert_called_once()
+
+    @patch("core.storage.delete_file")
+    @patch("core.storage.verify_uploaded_object")
+    def test_confirm_rejects_oversized_or_mismatched_file(self, mock_verify, mock_delete, admin_client, company, section):
+        # Server-side ground truth (HEAD + magic bytes) rejects the object —
+        # e.g. real size exceeds the cap, or bytes don't match the claimed type.
+        mock_verify.return_value = (None, "File exceeds the 25 MB limit for 'pdf'.")
+        resp = admin_client.post(
+            f"/api/resources/companies/{company.pk}/sections/{section.pk}/uploads/confirm/",
+            {
+                "file_key": "uploads/pdf/some-uuid.pdf",
+                "original_filename": "report.pdf",
+                "file_size_bytes": 2048,
+                "upload_type": "pdf",
+            },
+            format="json",
+        )
+        assert resp.status_code == 400
+        mock_delete.assert_called_once_with("uploads/pdf/some-uuid.pdf")
+        from resources.models import Upload
+        assert not Upload.objects.filter(file_url="uploads/pdf/some-uuid.pdf").exists()
+
+    @patch("core.storage.delete_file")
+    @patch("core.storage.verify_uploaded_object")
+    def test_confirm_rejects_when_object_never_uploaded(self, mock_verify, mock_delete, admin_client, company, section):
+        mock_verify.return_value = (None, "File was not found in storage. Upload it before confirming.")
+        resp = admin_client.post(
+            f"/api/resources/companies/{company.pk}/sections/{section.pk}/uploads/confirm/",
+            {
+                "file_key": "uploads/pdf/never-uploaded.pdf",
+                "original_filename": "report.pdf",
+                "file_size_bytes": 2048,
+                "upload_type": "pdf",
+            },
+            format="json",
+        )
+        assert resp.status_code == 400
+
+    @patch("core.storage.delete_file")
+    @patch("core.storage.verify_uploaded_object")
+    def test_confirm_rejects_over_section_quota(self, mock_verify, mock_delete, admin_client, company, section, db):
+        from resources.models import Upload
+        from core.upload_constraints import MAX_BYTES_PER_SECTION
+        Upload.objects.create(
+            section=section, upload_type="pdf", file_url="uploads/pdf/big1.pdf",
+            file_size_bytes=MAX_BYTES_PER_SECTION - 1024, scan_status="clean",
+        )
+        mock_verify.return_value = (2048, None)  # pushes total over the cap
+        resp = admin_client.post(
+            f"/api/resources/companies/{company.pk}/sections/{section.pk}/uploads/confirm/",
+            {
+                "file_key": "uploads/pdf/some-uuid.pdf",
+                "original_filename": "report.pdf",
+                "file_size_bytes": 2048,
+                "upload_type": "pdf",
+            },
+            format="json",
+        )
+        assert resp.status_code == 400
+        mock_delete.assert_called_once_with("uploads/pdf/some-uuid.pdf")
+
+    def test_add_link_is_immediately_clean(self, admin_client, company, section):
+        resp = admin_client.post(
+            f"/api/resources/companies/{company.pk}/sections/{section.pk}/uploads/add-link/",
+            {"upload_type": "video_link", "file_url": "https://youtube.com/watch?v=xyz"},
+            format="json",
+        )
+        assert resp.status_code == 201
+        assert resp.json()["data"]["scan_status"] == "clean"
 
     def test_rename_upload(self, admin_client, company, section, upload):
         resp = admin_client.patch(
@@ -231,12 +348,25 @@ class TestStudentCompanyViews:
     def test_student_uploads_published_company(self, student_client, published_company, db):
         from resources.models import Section, Upload
         sec = Section.objects.create(company=published_company, section_name="Tech")
-        Upload.objects.create(section=sec, upload_type="external_link", file_url="https://example.com")
+        Upload.objects.create(section=sec, upload_type="external_link", file_url="https://example.com", scan_status="clean")
         resp = student_client.get(
             f"/api/resources/student/companies/{published_company.pk}/sections/{sec.pk}/uploads/"
         )
         assert resp.status_code == 200
         assert resp.json()["count"] == 1
+
+    def test_student_does_not_see_unscanned_upload(self, student_client, published_company, db):
+        from resources.models import Section, Upload
+        sec = Section.objects.create(company=published_company, section_name="Tech")
+        Upload.objects.create(
+            section=sec, upload_type="pdf", file_url="uploads/pdf/pending.pdf",
+            original_filename="pending.pdf", file_size_bytes=1024, scan_status="pending",
+        )
+        resp = student_client.get(
+            f"/api/resources/student/companies/{published_company.pk}/sections/{sec.pk}/uploads/"
+        )
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 0
 
     def test_student_institution_idor(self, admin_b_client, db):
         from resources.models import Company

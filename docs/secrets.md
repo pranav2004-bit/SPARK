@@ -2,7 +2,7 @@
 
 ## Overview
 
-SPARK has 6 microservices, each requiring its own set of secrets. This document covers how to manage secrets securely in production.
+SPARK has 7 microservices, each requiring its own set of secrets. This document covers how to manage secrets securely in production.
 
 **Never store secrets in:**
 - Source code
@@ -16,13 +16,13 @@ SPARK has 6 microservices, each requiring its own set of secrets. This document 
 
 | Variable | Services | Description |
 |----------|----------|-------------|
-| `SECRET_KEY` | All 6 | Django secret key — minimum 50 characters, unique per service |
-| `DB_PASSWORD` | All 6 | PostgreSQL password for the service's dedicated user |
-| `JWT_SIGNING_KEY` | All 6 | Shared JWT signing/verification key — SAME value in all services |
-| `SERVICE_KEY` | notification, analytics | Shared secret for internal service-to-service calls |
-| `R2_ACCESS_KEY_ID` | resource, practice | Cloudflare R2 API key |
-| `R2_SECRET_ACCESS_KEY` | resource, practice | Cloudflare R2 secret |
-| `SENTRY_DSN` | All 6 | Sentry project DSN for error tracking |
+| `SECRET_KEY` | All 7 | Django secret key — minimum 50 characters, unique per service |
+| `DB_PASSWORD` | All 7 | PostgreSQL password for the service's dedicated user |
+| `JWT_SIGNING_KEY` | All 7 | Shared JWT signing/verification key — SAME value in all services |
+| `SERVICE_KEY` | notification, analytics | Shared secret for internal service-to-service calls. assessment-service does **not** need this — its `core/user_service_client.py` forwards the requesting admin's own JWT (`Authorization` header) to user-service rather than using a shared service secret, so this row is deliberately not "All 7." |
+| `R2_ACCESS_KEY_ID` | resource, practice, assessment | Cloudflare R2 API key (assessment-service added Phase 1 of `LIVETRACKER2_V1.md` — question images) |
+| `R2_SECRET_ACCESS_KEY` | resource, practice, assessment | Cloudflare R2 secret |
+| `SENTRY_DSN` | All 7 | Sentry project DSN for error tracking |
 
 ---
 
@@ -140,7 +140,7 @@ When rotating secrets, follow this order to avoid downtime:
    - Add new key to all services alongside old key (dual-key validation)
    - Wait for all active tokens to expire (max 15 minutes for access, 7 days for refresh)
    - Remove old key after refresh window expires
-   - In V1, simpler approach: schedule maintenance window, update all 6 services simultaneously
+   - In V1, simpler approach: schedule maintenance window, update all 7 services simultaneously
 
 2. **Database passwords**:
    - Change password in PostgreSQL: `ALTER USER auth_db_user WITH PASSWORD 'new-password';`
@@ -153,7 +153,7 @@ When rotating secrets, follow this order to avoid downtime:
 
 4. **R2 API keys**:
    - Generate new key in Cloudflare dashboard
-   - Update secret, restart resource-service and practice-service
+   - Update secret, restart resource-service, practice-service, and assessment-service
 
 ---
 
@@ -161,7 +161,7 @@ When rotating secrets, follow this order to avoid downtime:
 
 - [ ] All `SECRET_KEY` values are unique per service (not shared between services)
 - [ ] All `SECRET_KEY` values are ≥50 characters
-- [ ] `JWT_SIGNING_KEY` is the SAME value in all 6 services
+- [ ] `JWT_SIGNING_KEY` is the SAME value in all 7 services
 - [ ] `SERVICE_KEY` is the same in notification-service and analytics-service
 - [ ] No secret contains the word "dev", "test", "example", or "replace"
 - [ ] Run `trufflehog git file://.` — zero findings

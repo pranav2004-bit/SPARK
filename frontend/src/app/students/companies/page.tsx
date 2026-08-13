@@ -138,7 +138,7 @@ export default function StudentCompaniesPage() {
 
   const fetchCompanies = useCallback(async () => {
     try {
-      const res = await api.get<PaginatedResponse<Company>>("/students/companies/");
+      const res = await api.get<PaginatedResponse<Company>>("/resources/student/companies/");
       setCompanies(res.data.results);
     } catch (err) {
       toast.error(getErrorMessage(err));

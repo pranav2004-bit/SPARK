@@ -44,12 +44,15 @@ INSTALLED_APPS = [
     "django.contrib.auth",
     "rest_framework",
     "rest_framework_simplejwt",
+    "resources",
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
 ]
+
+APPEND_SLASH = False
 
 ROOT_URLCONF = "core.urls"
 WSGI_APPLICATION = "core.wsgi.application"
@@ -62,7 +65,7 @@ DATABASES = {
         "PASSWORD": os.environ.get("DB_PASSWORD", ""),
         "HOST": os.environ.get("DB_HOST", "localhost"),
         "PORT": os.environ.get("DB_PORT", "5432"),
-        "CONN_MAX_AGE": 60,
+        "CONN_MAX_AGE": int(os.environ.get("CONN_MAX_AGE", "0")),
         "OPTIONS": {"connect_timeout": 10},
     }
 }
@@ -75,10 +78,35 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "core.authentication.ServiceJWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
+    "EXCEPTION_HANDLER": "core.exceptions.custom_exception_handler",
+    # Defense-in-depth: nginx (gateway/nginx.conf, nginx.dev.conf) is the
+    # primary rate limiter. These DRF-level throttles exist for the case
+    # where a request reaches this service WITHOUT going through nginx
+    # (internal network access, a misrouted request, a future gateway
+    # misconfig) — not as the main control. Uses the "default" cache, which
+    # is Redis (see CACHES below), so counts are shared across all worker
+    # processes/replicas rather than each process keeping its own counter.
+    # There is exactly one trusted reverse proxy in front of this service
+    # (nginx — see gateway/proxy_params.conf, which sets X-Forwarded-For).
+    # Without this, DRF's throttle IP-extraction trusts the *entire* XFF
+    # header value as sent, so a client could bypass per-IP throttling just
+    # by sending a different fake X-Forwarded-For prefix on every request
+    # (nginx appends its own $remote_addr rather than overwriting a
+    # client-supplied header). NUM_PROXIES=1 tells DRF to take the second-to
+    # -last entry (i.e. what nginx itself appended) as the real client IP.
+    "NUM_PROXIES": 1,
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "60/min",
+        "user": "300/min",
+    },
 }
 
 SIMPLE_JWT = {
@@ -105,12 +133,56 @@ R2_ENDPOINT_URL = os.environ.get(
     "R2_ENDPOINT_URL",
     f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com" if R2_ACCOUNT_ID else "http://localhost:9000",
 )
+# Endpoint handed to the browser for presigned PUT URLs — may differ from
+# R2_ENDPOINT_URL (the internal boto3 connection) when the service and the
+# storage backend are reached via different hostnames, e.g. Docker-internal
+# "minio:9000" vs. the browser-facing "localhost:9002" nginx CORS proxy.
+R2_PUBLIC_ENDPOINT_URL = os.environ.get("R2_PUBLIC_ENDPOINT_URL", "")
 R2_CDN_DOMAIN = os.environ.get("R2_CDN_DOMAIN", "")
 R2_PRESIGNED_URL_EXPIRY = 3600
 
-# Celery (async file deletion)
+# ClamAV — malware scanning for confirmed file uploads (resources/tasks.py).
+# Empty CLAMAV_HOST disables scanning (local dev without the clamav
+# container); uploads then stay scan_status="pending" until scanned.
+CLAMAV_HOST = os.environ.get("CLAMAV_HOST", "")
+CLAMAV_PORT = int(os.environ.get("CLAMAV_PORT", "3310"))
+
+# Celery (async file deletion + malware scan)
 CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_TIMEZONE = "UTC"
+# Every service in this stack shares one Redis instance as its Celery
+# broker. Celery's default queue name is the literal string "celery" for
+# every app regardless of Celery(<app-name>) — so without an explicit,
+# per-service queue, resource-service's tasks (e.g. scan_uploaded_file) can
+# be picked up by analytics-service's or notification-service's worker,
+# which has never heard of them: instant celery.exceptions.NotRegistered,
+# the message gets acked, and the task is silently lost forever. The worker
+# process must be started with `-Q resource-service` (see docker-compose)
+# to only consume from this queue.
+CELERY_TASK_DEFAULT_QUEUE = "resource-service"
+# Default Celery behavior acks a task the moment it's *delivered* to a worker,
+# not when it finishes — so if the worker process dies mid-task (deploy,
+# restart, OOM), the message is already gone and the task is silently lost
+# forever (e.g. an upload stuck at scan_status="pending" with nothing left
+# to retry it). acks_late=True re-delivers to another worker instead.
+# prefetch_multiplier=1 pairs with it so a busy/dying worker doesn't hoard
+# multiple not-yet-acked tasks.
+CELERY_TASK_ACKS_LATE = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+
+# ── Sentry ────────────────────────────────────────────────────────────────────
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+if SENTRY_DSN:
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            environment=ENVIRONMENT,
+            traces_sample_rate=0.1,
+            send_default_pii=False,
+        )
+    except ImportError:
+        pass

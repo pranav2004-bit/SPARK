@@ -3,7 +3,6 @@
 *.pyo
 *.pyd
 .git/
-tests/
 docs/
 *.md
 .env

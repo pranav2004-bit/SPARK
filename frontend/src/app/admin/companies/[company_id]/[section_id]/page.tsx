@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import axios from "axios";
 import {
   Upload as UploadIcon,
   Trash2,
@@ -30,6 +29,7 @@ import { Badge } from "@/components/ui/Badge";
 import { UploadListSkeleton, Skeleton } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
+import { putFileWithRetry } from "@/lib/uploadRetry";
 import {
   UPLOAD_TYPE_LABELS,
   UPLOAD_ACCEPT_MAP,
@@ -116,10 +116,10 @@ export default function UploadsPage() {
   const fetchData = useCallback(async () => {
     try {
       const [companyRes, sectionRes, uploadsRes] = await Promise.all([
-        api.get<ApiSuccess<Company>>(`/admin/companies/${company_id}/`),
-        api.get<ApiSuccess<Section>>(`/admin/companies/${company_id}/sections/${section_id}/`),
+        api.get<ApiSuccess<Company>>(`/resources/companies/${company_id}/`),
+        api.get<ApiSuccess<Section>>(`/resources/companies/${company_id}/sections/${section_id}/`),
         api.get<PaginatedResponse<Upload>>(
-          `/admin/companies/${company_id}/sections/${section_id}/uploads/`
+          `/resources/companies/${company_id}/sections/${section_id}/uploads/`
         ),
       ]);
       setCompany(companyRes.data.data);
@@ -241,7 +241,7 @@ export default function UploadsPage() {
         upload_url: string;
         file_key: string;
       }>>(
-        `/admin/companies/${company_id}/sections/${section_id}/uploads/get-upload-url/`,
+        `/resources/companies/${company_id}/sections/${section_id}/uploads/presign/`,
         {
           upload_type: uploadType,
           filename: selectedFile.name,
@@ -251,19 +251,14 @@ export default function UploadsPage() {
 
       const presignedData = presignedResponse.data;
 
-      // Step 2: PUT file directly to R2/MinIO (raw axios, no auth header)
-      await axios.put(presignedData.upload_url, selectedFile, {
-        headers: { "Content-Type": selectedFile.type || "application/octet-stream" },
-        onUploadProgress: (e) => {
-          if (e.total) {
-            setUploadProgress(Math.round((e.loaded / e.total) * 100));
-          }
-        },
-      });
+      // Step 2: PUT file directly to R2/MinIO (raw axios, no auth header).
+      // Retries on transient network drops — the presigned URL stays valid
+      // for its full expiry window, so re-sending the same PUT is safe.
+      await putFileWithRetry(presignedData.upload_url, selectedFile, setUploadProgress);
 
       // Step 3: confirm (create DB record)
       const { data: confirmResponse } = await api.post<ApiSuccess<Upload>>(
-        `/admin/companies/${company_id}/sections/${section_id}/uploads/confirm/`,
+        `/resources/companies/${company_id}/sections/${section_id}/uploads/confirm/`,
         {
           file_key: presignedData.file_key,
           upload_type: uploadType,
@@ -299,7 +294,7 @@ export default function UploadsPage() {
     setLinkLoading(true);
     try {
       const { data: linkResponse } = await api.post<ApiSuccess<Upload>>(
-        `/admin/companies/${company_id}/sections/${section_id}/uploads/add-link/`,
+        `/resources/companies/${company_id}/sections/${section_id}/uploads/add-link/`,
         {
           upload_type: uploadType,
           file_url: linkUrl.trim(),
@@ -321,7 +316,7 @@ export default function UploadsPage() {
     setDeleteLoading(true);
     try {
       await api.delete(
-        `/admin/companies/${company_id}/sections/${section_id}/uploads/${deleteUpload.id}/`
+        `/resources/companies/${company_id}/sections/${section_id}/uploads/${deleteUpload.id}/`
       );
       setUploads((prev) => prev.filter((u) => u.id !== deleteUpload.id));
       toastSuccess("Upload deleted.");
@@ -404,7 +399,7 @@ export default function UploadsPage() {
     setRenameError("");
     try {
       const { data } = await api.patch<ApiSuccess<Upload>>(
-        `/admin/companies/${company_id}/sections/${section_id}/uploads/${upload.id}/`,
+        `/resources/companies/${company_id}/sections/${section_id}/uploads/${upload.id}/`,
         { original_filename: fullName }
       );
       setUploads((prev) => prev.map((u) => (u.id === upload.id ? data.data : u)));
@@ -751,6 +746,16 @@ export default function UploadsPage() {
                                 {formatBytes(upload.file_size_bytes)}
                               </span>
                             )}
+                            {upload.scan_status === "pending" && (
+                              <span className="inline-flex items-center gap-1 text-xs font-medium" style={{ color: "var(--color-text-subtle)" }}>
+                                <Loader2 size={10} className="animate-spin" /> Scanning…
+                              </span>
+                            )}
+                            {upload.scan_status === "error" && (
+                              <span className="text-xs font-medium" style={{ color: "var(--color-danger)" }}>
+                                Scan failed — hidden from students
+                              </span>
+                            )}
                           </div>
                         </>
                       )}
@@ -811,6 +816,7 @@ export default function UploadsPage() {
                               (e.currentTarget as HTMLButtonElement).style.color = "var(--color-text-subtle)";
                             }}
                             aria-label="Rename upload"
+                            title="Rename"
                           >
                             <Pencil size={14} />
                           </button>
@@ -848,6 +854,7 @@ export default function UploadsPage() {
                               rel="noopener noreferrer"
                               className="p-1.5 rounded-[var(--radius-sm)] text-[var(--color-text-muted)] hover:bg-[var(--color-info-bg)] hover:text-[var(--color-info)] transition-colors"
                               aria-label="Open file"
+                              title="Open in new tab"
                             >
                               <ExternalLink size={14} />
                             </a>
@@ -865,6 +872,7 @@ export default function UploadsPage() {
                               (e.currentTarget as HTMLButtonElement).style.color = "var(--color-text-subtle)";
                             }}
                             aria-label="Delete upload"
+                            title="Delete"
                           >
                             <Trash2 size={14} />
                           </button>

@@ -40,7 +40,7 @@ export default function BatchDetailPage() {
       if (department) params.set("department", department);
 
       const { data } = await api.get<PaginatedResponse<Student>>(
-        `/admin/batches/${batch_id}/students/?${params}`
+        `/users/batches/${batch_id}/students/?${params}`
       );
       setStudents(data.results);
       setTotalCount(data.count);
@@ -55,7 +55,7 @@ export default function BatchDetailPage() {
   // Fetch batch name once
   useEffect(() => {
     api
-      .get<ApiSuccess<Batch>>(`/admin/batches/${batch_id}/`)
+      .get<ApiSuccess<Batch>>(`/users/batches/${batch_id}/`)
       .then(({ data }) => setBatch(data.data))
       .catch(() => {});
   }, [batch_id]);

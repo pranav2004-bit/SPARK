@@ -1,0 +1,649 @@
+import logging
+from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.db import connection
+from rest_framework.views import APIView
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import TokenError
+from django.core.cache import cache
+
+from core.responses import success_response, error_response
+from core.permissions import IsAdminUser, IsStudentUser, IsSuperAdminUser, IsInternalService
+from .serializers import (
+    LoginSerializer, LogoutSerializer,
+    StudentPasswordResetSerializer, AdminPasswordResetSerializer,
+    AdminSerializer, AdminCreateSerializer,
+    AdminUpdateExtendedSerializer,
+    AdminPasswordResetByIdSerializer,
+    AdminSelfUpdateSerializer, AdminChangePasswordSerializer,
+    StudentChangePasswordSerializer,
+)
+from .tokens import get_tokens_for_user
+from .throttling import LoginAttemptThrottle
+
+User = get_user_model()
+logger = logging.getLogger(__name__)
+
+INVALID_CREDENTIALS_MSG = "Invalid credentials"
+
+
+def _get_client_ip(request) -> str:
+    xff = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.META.get("REMOTE_ADDR", "unknown")
+
+
+# ── Health ─────────────────────────────────────────────────────────────────────
+
+class HealthView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = []  # never throttle — polled at high frequency by health checks
+
+    def get(self, request):
+        import os
+        db_ok = "ok"
+        redis_ok = "ok"
+        institution_ok = "ok" if os.environ.get("INSTITUTION_ID", "").strip() else "missing"
+        try:
+            connection.ensure_connection()
+        except Exception:
+            db_ok = "error"
+        try:
+            cache.set("health_check", "1", timeout=5)
+            cache.get("health_check")
+        except Exception:
+            redis_ok = "error"
+        overall = "ok" if all(v == "ok" for v in [db_ok, redis_ok, institution_ok]) else "degraded"
+        return success_response(
+            data={
+                "status": overall,
+                "service": "auth-service",
+                "db": db_ok,
+                "redis": redis_ok,
+                "institution_id": institution_ok,
+            }
+        )
+
+
+# ── Unified Login ──────────────────────────────────────────────────────────────
+
+class LoginView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [LoginAttemptThrottle]
+
+    def post(self, request):
+        serializer = LoginSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation failed", errors=serializer.errors, status_code=400)
+
+        role = serializer.validated_data["role"]
+        password = serializer.validated_data["password"]
+
+        if role == "student":
+            student_id = serializer.validated_data.get("student_id")
+            try:
+                user = User.objects.get(student_id=student_id, role="student")
+            except User.DoesNotExist:
+                logger.warning("Student login failed — unknown student_id: %s", student_id)
+                return error_response(INVALID_CREDENTIALS_MSG, status_code=401)
+            except User.MultipleObjectsReturned:
+                logger.critical("Data integrity error: multiple auth records for student_id=%s", student_id)
+                return error_response(INVALID_CREDENTIALS_MSG, status_code=401)
+        else:
+            email = serializer.validated_data.get("email")
+            try:
+                user = User.objects.get(email=email, role=role)
+            except User.DoesNotExist:
+                logger.warning("Login failed — unknown email: %s role: %s", email, role)
+                return error_response(INVALID_CREDENTIALS_MSG, status_code=401)
+            except User.MultipleObjectsReturned:
+                logger.critical("Data integrity error: multiple auth records for email=%s role=%s", email, role)
+                return error_response(INVALID_CREDENTIALS_MSG, status_code=401)
+
+        if not user.check_password(password):
+            logger.warning("Login failed — wrong password for user: %s", user.email)
+            return error_response(INVALID_CREDENTIALS_MSG, status_code=401)
+
+        if not user.is_active:
+            return error_response("Account is disabled. Contact administrator.", status_code=403)
+
+        tokens = get_tokens_for_user(user)
+        user_data = {"role": user.role, "email": user.email}
+        if role == "student":
+            user_data["student_id"] = user.student_id
+            user_data["fullname"] = user.name or ""
+            user_data["is_profile_completed"] = user.is_profile_completed
+        if role in ("admin", "super_admin"):
+            user_data["id"] = str(user.id)
+            user_data["name"] = user.name
+        if user.institution_id:
+            user_data["institution_id"] = str(user.institution_id)
+        user_data["force_password_change"] = user.force_password_change
+
+        logger.info("Login successful: role=%s user=%s", role, user.email)
+        return success_response(data={**tokens, "user": user_data}, message="Login successful")
+
+
+# ── Logout ─────────────────────────────────────────────────────────────────────
+
+class LogoutView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = LogoutSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("refresh_token is required", status_code=400)
+        try:
+            token = RefreshToken(serializer.validated_data["refresh_token"])
+            token.blacklist()
+        except TokenError:
+            return error_response("Invalid or already blacklisted token", status_code=400)
+        return success_response(message="Logged out successfully")
+
+
+# ── Password Reset ─────────────────────────────────────────────────────────────
+
+class StudentPasswordResetView(APIView):
+    """Admin resets a student's password to default (no email required)."""
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, student_id):
+        try:
+            user = User.objects.get(student_id=student_id, role="student")
+        except User.DoesNotExist:
+            return error_response("Student not found", status_code=404)
+        except User.MultipleObjectsReturned:
+            logger.critical("Data integrity error: multiple auth records for student_id=%s", student_id)
+            return error_response("System error", status_code=500)
+
+        # IDOR check: admin can only reset students within their own institution.
+        # The leading `and` is intentionally removed — if the admin has no institution_id
+        # (misconfigured account), the check must still fire, not be skipped.
+        if user.institution_id != request.user.institution_id:
+            return error_response("Access denied", status_code=403)
+
+        user.set_password(settings.STUDENT_DEFAULT_PASSWORD)
+        user.force_password_change = True
+        user.token_version += 1  # invalidate existing tokens immediately
+        user.save(update_fields=["password", "force_password_change", "token_version"])
+        logger.info(
+            "Student %s password reset to default by admin=%s from IP=%s",
+            user.student_id, request.user.email, _get_client_ip(request),
+        )
+        return success_response(message="Password reset to default successfully")
+
+
+class AdminPasswordResetView(APIView):
+    """Super Admin resets an admin's password (legacy endpoint — kept for compat)."""
+    permission_classes = [IsSuperAdminUser]
+
+    def post(self, request, pk):
+        serializer = AdminPasswordResetSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation failed", errors=serializer.errors, status_code=400)
+        try:
+            user = User.objects.get(pk=pk, role="admin")
+        except User.DoesNotExist:
+            return error_response("Admin not found", status_code=404)
+
+        user.set_password(serializer.validated_data["new_password"])
+        user.force_password_change = False
+        user.token_version += 1
+        user.save(update_fields=["password", "force_password_change", "token_version"])
+        logger.info(
+            "Admin %s password reset by super_admin=%s IP=%s",
+            user.email, request.user.email, _get_client_ip(request),
+        )
+        return success_response(message="Admin password reset successfully")
+
+
+class StudentProfileCompletedView(APIView):
+    """
+    Internal endpoint — user-service calls this after profile update
+    to sync is_profile_completed back to auth-service.
+    """
+    permission_classes = [IsStudentUser]
+
+    def patch(self, request):
+        user = request.user
+        if not isinstance(user, User):
+            return error_response("Not allowed", status_code=403)
+        fullname = request.data.get("fullname", "").strip()
+        update_fields = ["is_profile_completed"]
+        user.is_profile_completed = True
+        if fullname:
+            user.name = fullname
+            update_fields.append("name")
+        user.save(update_fields=update_fields)
+        tokens = get_tokens_for_user(user)
+        return success_response(data=tokens, message="Profile marked complete, tokens refreshed")
+
+
+# ── Student: self-service password change ──────────────────────────────────────
+
+class StudentChangePasswordView(APIView):
+    """Authenticated student changes their own password. Returns fresh tokens."""
+    permission_classes = [IsStudentUser]
+
+    def post(self, request):
+        serializer = StudentChangePasswordSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation failed", errors=serializer.errors, status_code=400)
+
+        user = request.user
+        if not isinstance(user, User):
+            return error_response("Not allowed", status_code=403)
+
+        if not user.check_password(serializer.validated_data["current_password"]):
+            return error_response(
+                "Current password is incorrect.", status_code=400
+            )
+
+        user.set_password(serializer.validated_data["new_password"])
+        user.force_password_change = False
+        user.token_version += 1  # invalidate all old tokens
+        user.save(update_fields=["password", "force_password_change", "token_version", "updated_at"])
+
+        tokens = get_tokens_for_user(user)
+        logger.info(
+            "Student %s changed their password from IP=%s",
+            user.student_id or user.email, _get_client_ip(request),
+        )
+        return success_response(data=tokens, message="Password changed successfully.")
+
+
+# ── Admin: self-service profile ────────────────────────────────────────────────
+
+def _admin_profile_data(user) -> dict:
+    """Shared serialisation for admin self-profile responses."""
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "name": user.name,
+        "is_active": user.is_active,
+        # ISO-8601 timestamp so the frontend can display "Member since …"
+        "date_joined": user.created_at.isoformat() if user.created_at else None,
+    }
+
+
+class AdminSelfProfileView(APIView):
+    """Admin views or updates their own profile (name only; email is immutable)."""
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        user = request.user
+        if not isinstance(user, User):
+            return error_response("Not allowed", status_code=403)
+        return success_response(data=_admin_profile_data(user))
+
+    def patch(self, request):
+        serializer = AdminSelfUpdateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation failed", errors=serializer.errors, status_code=400)
+
+        user = request.user
+        if not isinstance(user, User):
+            return error_response("Not allowed", status_code=403)
+
+        user.name = serializer.validated_data.get("name", user.name)
+        user.save(update_fields=["name", "updated_at"])
+        logger.info("Admin %s updated their profile name", user.email)
+        return success_response(
+            data=_admin_profile_data(user),
+            message="Profile updated successfully.",
+        )
+
+
+class AdminChangePasswordView(APIView):
+    """Admin changes their own password."""
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        serializer = AdminChangePasswordSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation failed", errors=serializer.errors, status_code=400)
+
+        user = request.user
+        if not isinstance(user, User):
+            return error_response("Not allowed", status_code=403)
+
+        if not user.check_password(serializer.validated_data["current_password"]):
+            return error_response("Current password is incorrect.", status_code=400)
+
+        new_pw = serializer.validated_data["new_password"]
+        if user.check_password(new_pw):
+            return error_response(
+                "New password must be different from the current password.", status_code=400
+            )
+
+        user.set_password(new_pw)
+        user.force_password_change = False
+        user.token_version += 1  # invalidate all old tokens — new login required
+        user.save(update_fields=["password", "force_password_change", "token_version", "updated_at"])
+        logger.info(
+            "Admin %s changed their password from IP=%s",
+            user.email, _get_client_ip(request),
+        )
+        tokens = get_tokens_for_user(user)
+        return success_response(data=tokens, message="Password changed successfully.")
+
+
+# ── Admin Management (Super Admin only) ────────────────────────────────────────
+
+class AdminListCreateView(APIView):
+    """List all admin accounts or create a new one. Super Admin only."""
+    permission_classes = [IsSuperAdminUser]
+
+    def get(self, request):
+        admins = User.objects.filter(role="admin").order_by("-created_at")
+        return success_response(data=AdminSerializer(admins, many=True).data)
+
+    def post(self, request):
+        serializer = AdminCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation failed", errors=serializer.errors, status_code=400)
+
+        data = serializer.validated_data
+
+        # institution_id flows from the super admin's own account — they belong
+        # to one college and every faculty they create is scoped to that same college.
+        institution_id = request.user.institution_id
+        if not institution_id:
+            logger.error(
+                "Super admin %s has no institution_id — cannot create faculty account.",
+                request.user.email,
+            )
+            return error_response(
+                "Super admin account is not linked to an institution. "
+                "Contact the platform IT team to assign an institution.",
+                status_code=500,
+            )
+
+        if User.objects.filter(email=data["email"]).exists():
+            return error_response(
+                "An account with this email already exists.", status_code=409
+            )
+
+        admin = User(
+            email=data["email"],
+            role="admin",
+            name=data.get("name", ""),
+            institution_id=institution_id,
+            force_password_change=True,  # must change password on first login
+        )
+        admin.set_password(settings.ADMIN_DEFAULT_PASSWORD)
+        admin.save()
+        logger.info(
+            "Admin account created: %s by super_admin=%s institution_id=%s IP=%s",
+            admin.email, request.user.email, institution_id, _get_client_ip(request),
+        )
+        return success_response(
+            data=AdminSerializer(admin).data,
+            message="Admin account created successfully.",
+            status_code=201,
+        )
+
+
+class AdminDetailView(APIView):
+    """Retrieve, update (name / is_active), or delete an admin account. Super Admin only."""
+    permission_classes = [IsSuperAdminUser]
+
+    def _get_admin(self, pk):
+        try:
+            return User.objects.get(pk=pk, role="admin")
+        except User.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        admin = self._get_admin(pk)
+        if not admin:
+            return error_response("Admin not found.", status_code=404)
+        return success_response(data=AdminSerializer(admin).data)
+
+    def patch(self, request, pk):
+        admin = self._get_admin(pk)
+        if not admin:
+            return error_response("Admin not found.", status_code=404)
+
+        serializer = AdminUpdateExtendedSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation failed", errors=serializer.errors, status_code=400)
+
+        data = serializer.validated_data
+        update_fields = ["updated_at"]
+
+        if "name" in data:
+            admin.name = data["name"]
+            update_fields.append("name")
+        if "is_active" in data:
+            admin.is_active = data["is_active"]
+            update_fields.append("is_active")
+
+        admin.save(update_fields=update_fields)
+        logger.info(
+            "Admin %s updated by super_admin=%s — fields: %s",
+            admin.email, request.user.email, update_fields,
+        )
+        return success_response(
+            data=AdminSerializer(admin).data,
+            message="Admin updated successfully.",
+        )
+
+    def delete(self, request, pk):
+        admin = self._get_admin(pk)
+        if not admin:
+            return error_response("Admin not found.", status_code=404)
+
+        email = admin.email
+        admin.delete()
+        logger.info("Admin %s permanently deleted by super_admin=%s", email, request.user.email)
+        return success_response(message="Admin account deleted permanently.")
+
+
+class AdminResetDefaultPasswordView(APIView):
+    """Super Admin resets an admin's password back to the default (spark@123)."""
+    permission_classes = [IsSuperAdminUser]
+
+    def post(self, request, pk):
+        try:
+            admin = User.objects.get(pk=pk, role="admin")
+        except User.DoesNotExist:
+            return error_response("Admin not found.", status_code=404)
+
+        admin.set_password(settings.ADMIN_DEFAULT_PASSWORD)
+        admin.force_password_change = True
+        admin.token_version += 1  # invalidate existing tokens immediately
+        admin.save(update_fields=["password", "force_password_change", "token_version", "updated_at"])
+        logger.info(
+            "Admin %s password reset to default by super_admin=%s IP=%s",
+            admin.email, request.user.email, _get_client_ip(request),
+        )
+        return success_response(message="Password reset to default successfully.")
+
+
+class AdminPasswordResetByIdView(APIView):
+    """Reset an admin's password to a custom value using admin_id in the body. Super Admin only."""
+    permission_classes = [IsSuperAdminUser]
+
+    def post(self, request):
+        serializer = AdminPasswordResetByIdSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation failed", errors=serializer.errors, status_code=400)
+
+        try:
+            admin = User.objects.get(
+                pk=serializer.validated_data["admin_id"], role="admin"
+            )
+        except User.DoesNotExist:
+            return error_response("Admin not found.", status_code=404)
+
+        admin.set_password(serializer.validated_data["new_password"])
+        admin.force_password_change = False
+        admin.token_version += 1
+        admin.save(update_fields=["password", "force_password_change", "token_version", "updated_at"])
+        logger.info(
+            "Admin %s password reset by super_admin=%s IP=%s",
+            admin.email, request.user.email, _get_client_ip(request),
+        )
+        return success_response(message="Admin password reset successfully.")
+
+
+# ── Internal service-to-service endpoints (user-service → auth-service) ────────
+# Accessible only within the Docker network via http://auth-service:8000.
+# Protected by X-Service-Key header — never routed through nginx from outside.
+
+class InternalStudentCreateView(APIView):
+    """
+    Called by user-service when a new student is created.
+    Creates the corresponding auth User so the student can log in.
+    """
+    permission_classes = [IsInternalService]
+    authentication_classes = []  # No JWT — service key auth only
+    # Legitimate high-frequency internal traffic (bypasses nginx entirely —
+    # called directly on the Docker network) must not share the anon/user
+    # DRF throttle buckets meant for external-facing endpoints.
+    throttle_classes = []
+
+    def post(self, request):
+        user_id = request.data.get("user_id")
+        student_id = request.data.get("student_id")
+        institution_id = request.data.get("institution_id")
+
+        if not user_id or not student_id:
+            return error_response("user_id and student_id are required.", status_code=400)
+        if not institution_id:
+            return error_response("institution_id is required.", status_code=400)
+
+        # ── Idempotency check on user_id (primary key) ────────────────────────
+        # If the client timed out after auth-service already processed a prior
+        # attempt, the same user_id arrives again.  Treat it as success rather
+        # than crashing on a primary-key conflict.
+        existing_by_pk = User.objects.filter(pk=user_id).first()
+        if existing_by_pk:
+            if existing_by_pk.student_id == student_id:
+                logger.info(
+                    "Idempotent create: auth account for student_id=%s already exists "
+                    "(user_id=%s) — returning success.",
+                    student_id, user_id,
+                )
+                return success_response(
+                    data={"id": str(existing_by_pk.id), "student_id": existing_by_pk.student_id},
+                    message="Auth account created.",
+                    status_code=201,
+                )
+            else:
+                return error_response(
+                    f"User ID '{user_id}' is already assigned to a different student.",
+                    status_code=409,
+                )
+
+        # ── Check for existing account by student_id ───────────────────────
+        existing = User.objects.filter(student_id=student_id).first()
+        if existing:
+            # An existing record with a DIFFERENT user_id means the old student
+            # was deleted in user-service but auth cleanup failed (non-fatal path).
+            # user-service is the source of truth for student existence; if it is
+            # issuing a create with a new user_id, the old auth record is an orphan
+            # regardless of its is_active flag.
+            existing.delete()
+            logger.info(
+                "Removed orphan auth account (is_active=%s) for student_id=%s before re-creation",
+                existing.is_active,
+                student_id,
+            )
+
+        try:
+            user = User(
+                id=user_id,
+                student_id=student_id,
+                # Students log in via student_id, not email.
+                # A deterministic internal address satisfies the unique constraint
+                # without exposing a real email address.
+                email=f"{student_id.lower()}@students.internal",
+                role="student",
+                institution_id=institution_id,
+                force_password_change=True,  # must change password on first login
+            )
+            user.set_password(settings.STUDENT_DEFAULT_PASSWORD)
+            user.save()
+        except Exception as exc:
+            logger.error("Internal student create failed for student_id=%s: %s", student_id, exc)
+            return error_response("Failed to create auth account.", status_code=500)
+
+        logger.info("Auth account created for student_id=%s by internal service", student_id)
+        return success_response(
+            data={"id": str(user.id), "student_id": user.student_id},
+            message="Auth account created.",
+            status_code=201,
+        )
+
+
+class InternalStudentUpdateView(APIView):
+    """
+    Called by user-service when a student's is_active status changes
+    (deactivate / reactivate).
+    """
+    permission_classes = [IsInternalService]
+    authentication_classes = []
+    throttle_classes = []
+
+    def patch(self, request, student_id):
+        is_active = request.data.get("is_active")
+        if is_active is None:
+            return error_response("is_active is required.", status_code=400)
+
+        try:
+            user = User.objects.get(student_id=student_id, role="student")
+        except User.DoesNotExist:
+            return error_response("Student auth account not found.", status_code=404)
+        except User.MultipleObjectsReturned:
+            logger.critical("Data integrity error: multiple auth records for student_id=%s", student_id)
+            return error_response("System error", status_code=500)
+
+        user.is_active = bool(is_active)
+        user.save(update_fields=["is_active"])
+        logger.info(
+            "Student %s is_active=%s set by internal service", student_id, user.is_active
+        )
+        return success_response(message="Student auth account updated.")
+
+
+class InternalStudentDeleteView(APIView):
+    """
+    Called by user-service when a student record is permanently removed.
+    Deletes the corresponding auth User.
+    """
+    permission_classes = [IsInternalService]
+    authentication_classes = []
+    throttle_classes = []
+
+    def delete(self, request, student_id):
+        expected_user_id = (request.data or {}).get("expected_user_id")
+
+        try:
+            user = User.objects.get(student_id=student_id, role="student")
+        except User.DoesNotExist:
+            # Already gone — idempotent success.
+            return success_response(message="Student auth account not found (already deleted).")
+        except User.MultipleObjectsReturned:
+            logger.critical("Data integrity error: multiple auth records for student_id=%s", student_id)
+            return error_response("System error", status_code=500)
+
+        if expected_user_id and str(user.id) != str(expected_user_id):
+            # The student was deleted and then immediately re-added with a new
+            # user_id.  The outbox event targets the OLD account; the new one
+            # must never be touched.
+            logger.info(
+                "Delete skipped for student_id=%s: existing id=%s does not match "
+                "expected=%s (student was re-created with a new account).",
+                student_id, user.id, expected_user_id,
+            )
+            return success_response(
+                message="Auth account belongs to a re-created student — skipped."
+            )
+
+        user.delete()
+        logger.info("Auth account for student_id=%s deleted by internal service", student_id)
+        return success_response(message="Student auth account deleted.")

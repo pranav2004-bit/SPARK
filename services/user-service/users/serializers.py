@@ -40,7 +40,16 @@ class StudentListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Student
         fields = [
-            "id", "student_id", "fullname", "college_email_id",
+            # user_id (the auth-service account UUID, i.e. the JWT's
+            # user_id claim) is additive here for assessment-service's
+            # roster-snapshot call (LIVETRACKER2_V1.md Task 3.1) — it needs
+            # this exact value so StudentSetAllocation.student_id matches
+            # request.user.id when the student later authenticates, the
+            # same convention analytics-service already uses. "id" (this
+            # Student row's own PK) is unrelated and insufficient for that
+            # purpose. Purely additive: existing consumers of this endpoint
+            # are unaffected by one more key in each result object.
+            "id", "user_id", "student_id", "fullname", "college_email_id",
             "department", "batch_id", "batch_name",
             "is_active", "is_profile_completed", "created_at",
         ]

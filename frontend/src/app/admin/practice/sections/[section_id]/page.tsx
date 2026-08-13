@@ -34,20 +34,18 @@ const palette = (i: number) => PALETTE[i % PALETTE.length];
 
 // ── Question card ─────────────────────────────────────────────────────────────
 interface QuestionCardProps {
-  question:        PracticeQuestion;
-  index:           number;
-  isPublished:     boolean;
-  publishing:      boolean;
-  isCopied:        boolean;
-  onNavigate:      () => void;
-  onDelete:        () => void;
-  onTogglePublish: () => void;
-  onCopyLink:      () => void;
+  question:    PracticeQuestion;
+  index:       number;
+  isPublished: boolean;
+  isCopied:    boolean;
+  onNavigate:  () => void;
+  onDelete:    () => void;
+  onCopyLink:  () => void;
 }
 
 function QuestionCard({
-  question, index, isPublished, publishing, isCopied,
-  onNavigate, onDelete, onTogglePublish, onCopyLink,
+  question, index, isPublished, isCopied,
+  onNavigate, onDelete, onCopyLink,
 }: QuestionCardProps) {
   const { bg, color } = palette(index);
   const isMcq      = question.question_type === "mcq";
@@ -92,19 +90,18 @@ function QuestionCard({
 
       {/* Footer */}
       <div className="flex items-center justify-between px-4 py-3 gap-2" style={{ borderTop: "1px solid var(--color-border)" }}>
-        <button
-          onClick={onTogglePublish} disabled={publishing}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all disabled:opacity-60 cursor-pointer"
+        {/* Read-only status — publish/unpublish now lives only in the question
+            editor, where the admin can see (and fix) exactly why a publish
+            attempt was rejected. Toggling from this list was a dead end. */}
+        <span
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold"
           style={isPublished
             ? { background: "var(--color-success-bg)", color: "var(--color-success)", border: "1px solid rgba(22,163,74,0.2)" }
             : { background: "var(--color-surface-secondary)", color: "var(--color-text-subtle)", border: "1px solid var(--color-border)" }
           }
         >
-          {publishing ? <Loader2 size={11} className="animate-spin" />
-            : isPublished ? <><Globe size={11} /> Published</>
-            : <><EyeOff size={11} /> Unpublished</>
-          }
-        </button>
+          {isPublished ? <><Globe size={11} /> Published</> : <><EyeOff size={11} /> Unpublished</>}
+        </span>
 
         <div className="flex items-center gap-1">
           <button onClick={onCopyLink}
@@ -151,7 +148,6 @@ export default function PracticeSectionPage() {
   const [loading,       setLoading]       = useState(true);
   const [modal,         setModal]         = useState<ModalState>(null);
   const [creatingType,  setCreatingType]  = useState<QuestionType | null>(null);
-  const [publishing,    setPublishing]    = useState<string | null>(null);
   const [deleteTarget,  setDeleteTarget]  = useState<PracticeQuestion | null>(null);
   const [deleting,      setDeleting]      = useState(false);
   // ── Filter / search state ──────────────────────────────────────────────────
@@ -160,7 +156,7 @@ export default function PracticeSectionPage() {
 
   // ── Load ───────────────────────────────────────────────────────────────────
   useEffect(() => {
-    api.get(`/admin/practice/sections/${section_id}/`)
+    api.get(`/practice/sections/${section_id}/`)
       .then(res => setDetail(res.data.data))
       .catch(() => toast.error("Failed to load section."))
       .finally(() => setLoading(false));
@@ -172,7 +168,7 @@ export default function PracticeSectionPage() {
     setCreatingType(questionType);
     try {
       const res = await api.post<ApiSuccess<PracticeQuestion>>(
-        `/admin/practice/sections/${section_id}/questions/`,
+        `/practice/sections/${section_id}/questions/`,
         { question_type: questionType }
       );
       setDetail(prev => prev ? { ...prev, questions: [...prev.questions, res.data.data] } : prev);
@@ -185,27 +181,14 @@ export default function PracticeSectionPage() {
     }
   }
 
-  // ── Toggle publish ─────────────────────────────────────────────────────────
-  async function handleTogglePublish(item: PracticeQuestion) {
-    setPublishing(item.id);
-    try {
-      const res = await api.patch<ApiSuccess<PracticeQuestion>>(
-        `/admin/practice/questions/${item.id}/`, { is_published: !item.is_published }
-      );
-      setDetail(prev => prev ? {
-        ...prev,
-        questions: prev.questions.map(q => q.id === item.id ? res.data.data : q),
-      } : prev);
-    } catch (err) { toast.error(getErrorMessage(err)); }
-    finally { setPublishing(null); }
-  }
+
 
   // ── Delete ─────────────────────────────────────────────────────────────────
   async function handleDelete() {
     if (!deleteTarget) return;
     setDeleting(true);
     try {
-      await api.delete(`/admin/practice/questions/${deleteTarget.id}/`);
+      await api.delete(`/practice/questions/${deleteTarget.id}/`);
       setDetail(prev => prev ? {
         ...prev,
         questions: prev.questions.filter(q => q.id !== deleteTarget.id),
@@ -337,11 +320,9 @@ export default function PracticeSectionPage() {
                 question={q}
                 index={i}
                 isPublished={q.is_published}
-                publishing={publishing === q.id}
                 isCopied={copiedId === `${typeof window !== "undefined" ? window.location.origin : ""}/students/practice/questions/${q.id}`}
                 onNavigate={() => router.push(`/admin/practice/questions/${q.id}`)}
                 onDelete={() => setDeleteTarget(q)}
-                onTogglePublish={() => handleTogglePublish(q)}
                 onCopyLink={() => {
                   copyLink(`${window.location.origin}/students/practice/questions/${q.id}`);
                   toast.success("Student link copied.");

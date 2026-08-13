@@ -10,9 +10,11 @@ import {
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
 import { useToast } from "@/components/ui/Toast";
 import { ImageLoader } from "@/components/ui/ImageLoader";
 import api, { getErrorMessage } from "@/lib/api";
+import { putFileWithRetry } from "@/lib/uploadRetry";
 import type {
   PracticeQuestion, PracticeSection, PracticeModule,
   PracticeQuestionOption, ExplanationType, QuestionContentType, McqType,
@@ -30,12 +32,15 @@ const T = {
 };
 
 // ── Allowed image MIME types ───────────────────────────────────────────────────
+// Mirrors services/practice-service/core/upload_constraints.py — keep both
+// in sync. .svg is deliberately excluded: it can carry inline
+// <script>/event-handler payloads, making it a stored-XSS vector.
 const ALLOWED_IMAGE_TYPES = [
   "image/jpeg", "image/png", "image/webp",
-  "image/gif",  "image/svg+xml", "image/avif",
+  "image/gif", "image/avif",
 ];
-const ALLOWED_IMAGE_LABEL = "JPEG, PNG, WebP, GIF, SVG, AVIF — max 10 MB";
-const MAX_IMAGE_BYTES      = 10 * 1024 * 1024;
+const ALLOWED_IMAGE_LABEL = "JPEG, PNG, WebP, GIF, AVIF — max 5 MB";
+const MAX_IMAGE_BYTES      = 5 * 1024 * 1024;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface QuestionDetail {
@@ -406,7 +411,7 @@ export default function PracticeQuestionEditorPage() {
   // ── Load ──────────────────────────────────────────────────────────────────
   const loadQuestion = useCallback(() => {
     setLoading(true);
-    api.get(`/admin/practice/questions/${question_id}/`)
+    api.get(`/practice/questions/${question_id}/`)
       .then(res => {
         const { question, section, module, options: opts } = res.data.data as QuestionDetail;
         setDetail({ question, section, module, options: opts ?? [] });
@@ -433,52 +438,119 @@ export default function PracticeQuestionEditorPage() {
 
   const dirty = form && original ? isDirty(original, form) : false;
 
+  // ── Leave-with-unsaved-changes guard ──────────────────────────────────────
+  // Every in-app "back" trigger (arrow button, breadcrumbs) routes through
+  // this instead of calling router.push directly. If there are unsaved
+  // edits, navigation is held and a confirm dialog offers Save & Leave /
+  // Leave without saving / Cancel instead of silently discarding the work.
+  const [pendingHref, setPendingHref] = useState<string | null>(null);
+
+  const guardedNavigate = useCallback((href: string) => {
+    if (dirty) {
+      setPendingHref(href);
+    } else {
+      router.push(href);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty]);
+
+  const handleLeaveWithoutSaving = () => {
+    if (pendingHref) router.push(pendingHref);
+    setPendingHref(null);
+  };
+
+  const handleSaveAndLeave = async () => {
+    const ok = await handleSave();
+    if (ok && pendingHref) {
+      router.push(pendingHref);
+      setPendingHref(null);
+    }
+  };
+
+  // Covers the browser's own back/forward, refresh, and tab-close — the
+  // in-app dialog above only intercepts clicks on this page's own back
+  // controls, not the browser chrome, so this is the standard native
+  // fallback for that case.
+  useEffect(() => {
+    if (!dirty) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty]);
+
+  // ── Shared field payload (text/image fields + mcq_type/fib_answer) ────────
+  // Used by both handleSave and handlePublishToggle so a publish click
+  // always carries the form's current values, not whatever the backend
+  // last had saved.
+  const buildFieldPayload = (f: QuestionForm): Record<string, unknown> => {
+    const payload: Record<string, unknown> = {
+      question_content_type: f.question_content_type,
+      question_text:         f.question_text,
+      question_image_key:    f.question_image_key,
+      explanation_type:      f.explanation_type,
+      explanation_text:      f.explanation_text,
+      explanation_image_key: f.explanation_image_key,
+    };
+    if (detail?.question.question_type === "fib") {
+      payload.fib_answer = f.fib_answer;
+    }
+    if (detail?.question.question_type === "mcq") {
+      payload.mcq_type = f.mcq_type;
+    }
+    return payload;
+  };
+
+  const applyUpdatedQuestion = (updated: PracticeQuestion) => {
+    const snap = formFromQuestion(updated);
+    setForm(snap);
+    setOriginal(snap);
+    setQPreviewUrl(updated.question_image_url ?? null);
+    setEPreviewUrl(updated.explanation_image_url ?? null);
+  };
+
   // ── Save question (text/image fields + mcq_type) ──────────────────────────
-  const handleSave = async () => {
-    if (!form || !dirty) return;
+  // Returns whether the save actually succeeded — callers that need to chain
+  // an action afterward (e.g. "Save & Leave") can't rely on reading `dirty`
+  // right after awaiting this, since the state update that clears it hasn't
+  // necessarily flowed through a re-render yet.
+  const handleSave = async (): Promise<boolean> => {
+    if (!form || !dirty) return true; // nothing pending — treat as success
     setSaving(true);
     try {
-      const payload: Record<string, unknown> = {
-        question_content_type: form.question_content_type,
-        question_text:         form.question_text,
-        question_image_key:    form.question_image_key,
-        explanation_type:      form.explanation_type,
-        explanation_text:      form.explanation_text,
-        explanation_image_key: form.explanation_image_key,
-      };
-      // FIB-specific
-      if (detail?.question.question_type === "fib") {
-        payload.fib_answer = form.fib_answer;
-      }
-      // MCQ-specific
-      if (detail?.question.question_type === "mcq") {
-        payload.mcq_type = form.mcq_type;
-      }
-      const res = await api.patch(`/admin/practice/questions/${question_id}/`, payload);
-      const updated: PracticeQuestion = res.data.data;
-      const snap = formFromQuestion(updated);
-      setForm(snap);
-      setOriginal(snap);
-      setQPreviewUrl(updated.question_image_url ?? null);
-      setEPreviewUrl(updated.explanation_image_url ?? null);
+      const res = await api.patch(`/practice/questions/${question_id}/`, buildFieldPayload(form));
+      applyUpdatedQuestion(res.data.data);
       toast.success("Question saved.");
+      return true;
     } catch (err) {
       toast.error(getErrorMessage(err));
+      return false;
     } finally {
       setSaving(false);
     }
   };
 
   // ── Publish toggle ────────────────────────────────────────────────────────
+  // Sends any unsaved field edits together with is_published in a single
+  // atomic PATCH — otherwise a click here would check the publish
+  // requirements against whatever was last saved, not what's on screen,
+  // and could reject (or wrongly allow) publishing based on stale data.
   const handlePublishToggle = async () => {
     if (!form) return;
     const newVal = !form.is_published;
+    const hadUnsavedEdits = dirty;
     setToggling(true);
     try {
-      await api.patch(`/admin/practice/questions/${question_id}/`, { is_published: newVal });
-      patch("is_published", newVal);
-      setOriginal(prev => prev ? { ...prev, is_published: newVal } : prev);
-      toast.success(newVal ? "Question published." : "Question unpublished.");
+      const payload = { ...buildFieldPayload(form), is_published: newVal };
+      const res = await api.patch(`/practice/questions/${question_id}/`, payload);
+      applyUpdatedQuestion(res.data.data);
+      toast.success(
+        newVal
+          ? hadUnsavedEdits ? "Changes saved and question published." : "Question published."
+          : hadUnsavedEdits ? "Changes saved and question unpublished." : "Question unpublished."
+      );
     } catch (err) {
       toast.error(getErrorMessage(err));
     } finally {
@@ -502,7 +574,7 @@ export default function PracticeQuestionEditorPage() {
       return;
     }
     if (file.size > MAX_IMAGE_BYTES) {
-      toast.error("Image exceeds 10 MB limit.");
+      toast.error("Image exceeds 5 MB limit.");
       return;
     }
 
@@ -515,10 +587,9 @@ export default function PracticeQuestionEditorPage() {
       });
       const { upload_url, file_key, cdn_url } = presignRes.data.data;
 
-      const putRes = await fetch(upload_url, {
-        method: "PUT", headers: { "Content-Type": file.type }, body: file,
-      });
-      if (!putRes.ok) throw new Error(`Storage PUT failed: ${putRes.status}`);
+      // Retries on transient network drops — the presigned URL stays valid
+      // for its full expiry window, so re-sending the same PUT is safe.
+      await putFileWithRetry(upload_url, file, () => {});
 
       setPreview(cdn_url);
       setUploadState("done");
@@ -534,7 +605,7 @@ export default function PracticeQuestionEditorPage() {
   const handleQImageSelect = (file: File) =>
     handleImageUpload({
       file,
-      presignUrl:     `/admin/practice/questions/${question_id}/question-image/presign/`,
+      presignUrl:     `/practice/questions/${question_id}/question-image/presign/`,
       setUploadState: setQImgState,
       setPreview:     setQPreviewUrl,
       onSuccess:      (key) => patch("question_image_key", key),
@@ -550,7 +621,7 @@ export default function PracticeQuestionEditorPage() {
   const handleEImageSelect = (file: File) =>
     handleImageUpload({
       file,
-      presignUrl:     `/admin/practice/questions/${question_id}/explanation-image/presign/`,
+      presignUrl:     `/practice/questions/${question_id}/explanation-image/presign/`,
       setUploadState: setEImgState,
       setPreview:     setEPreviewUrl,
       onSuccess:      (key) => patch("explanation_image_key", key),
@@ -568,7 +639,7 @@ export default function PracticeQuestionEditorPage() {
     patch("mcq_type", newType);
     // Persist immediately (so backend enforces correct constraints)
     try {
-      await api.patch(`/admin/practice/questions/${question_id}/`, { mcq_type: newType });
+      await api.patch(`/practice/questions/${question_id}/`, { mcq_type: newType });
       setOriginal(prev => prev ? { ...prev, mcq_type: newType } : prev);
     } catch (err) {
       toast.error(getErrorMessage(err));
@@ -579,7 +650,7 @@ export default function PracticeQuestionEditorPage() {
   const handleAddOption = async () => {
     setAddingOpt(true);
     try {
-      const res = await api.post(`/admin/practice/questions/${question_id}/options/`, {
+      const res = await api.post(`/practice/questions/${question_id}/options/`, {
         text:       "",
         is_correct: false,
       });
@@ -594,7 +665,7 @@ export default function PracticeQuestionEditorPage() {
   // Used by OptionRow paste handler — creates a new option pre-filled with text.
   const handleAddOptionWithText = async (text: string) => {
     try {
-      const res = await api.post(`/admin/practice/questions/${question_id}/options/`, {
+      const res = await api.post(`/practice/questions/${question_id}/options/`, {
         text,
         is_correct: false,
       });
@@ -607,7 +678,7 @@ export default function PracticeQuestionEditorPage() {
   const handleOptionTextSave = async (optionId: string, text: string) => {
     try {
       const res = await api.patch(
-        `/admin/practice/questions/${question_id}/options/${optionId}/`,
+        `/practice/questions/${question_id}/options/${optionId}/`,
         { text }
       );
       setOptions(prev => prev.map(o => o.id === optionId ? res.data.data : o));
@@ -620,12 +691,12 @@ export default function PracticeQuestionEditorPage() {
     const newValue = !currentlyCorrect;
     try {
       const res = await api.patch(
-        `/admin/practice/questions/${question_id}/options/${optionId}/`,
+        `/practice/questions/${question_id}/options/${optionId}/`,
         { is_correct: newValue }
       );
       // For single-correct MCQ, backend deselected others — reload all options
       if (form?.mcq_type === "single" && newValue) {
-        const listRes = await api.get(`/admin/practice/questions/${question_id}/options/`);
+        const listRes = await api.get(`/practice/questions/${question_id}/options/`);
         setOptions(listRes.data.data);
       } else {
         setOptions(prev => prev.map(o => o.id === optionId ? res.data.data : o));
@@ -637,7 +708,7 @@ export default function PracticeQuestionEditorPage() {
 
   const handleOptionDelete = async (optionId: string) => {
     try {
-      await api.delete(`/admin/practice/questions/${question_id}/options/${optionId}/`);
+      await api.delete(`/practice/questions/${question_id}/options/${optionId}/`);
       setOptions(prev => prev.filter(o => o.id !== optionId));
     } catch (err) {
       toast.error(getErrorMessage(err));
@@ -685,13 +756,13 @@ export default function PracticeQuestionEditorPage() {
       <PageWrapper className="max-w-5xl">
 
         {/* ── Breadcrumb ──────────────────────────────────────────────────── */}
-        <Breadcrumb detail={detail} router={router} backHref={backHref} />
+        <Breadcrumb detail={detail} onNavigate={guardedNavigate} backHref={backHref} />
 
         {/* ── Title row ───────────────────────────────────────────────────── */}
         <div className="flex items-center justify-between gap-4 mb-6 flex-wrap">
           <div className="flex items-center gap-3 min-w-0">
             <button
-              onClick={() => router.push(backHref)}
+              onClick={() => guardedNavigate(backHref)}
               className="p-1.5 rounded-[var(--radius-sm)] transition-colors shrink-0"
               style={{ color: T.muted }}
               onMouseEnter={e => (e.currentTarget.style.background = "var(--color-surface-hover)")}
@@ -1025,20 +1096,45 @@ export default function PracticeQuestionEditorPage() {
           </div>
         )}
 
+        {/* ── Unsaved-changes guard ────────────────────────────────────────── */}
+        <Modal
+          isOpen={pendingHref !== null}
+          onClose={() => setPendingHref(null)}
+          title="Unsaved changes"
+          maxWidth="sm"
+        >
+          <p className="text-sm leading-relaxed" style={{ color: T.muted }}>
+            You have unsaved changes on this question. Save them before leaving,
+            or they&apos;ll be lost.
+          </p>
+          <div className="flex items-center justify-end gap-3 mt-6">
+            <Button variant="ghost" onClick={() => setPendingHref(null)} disabled={saving}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={handleLeaveWithoutSaving} disabled={saving}>
+              Leave without saving
+            </Button>
+            <Button variant="primary" onClick={handleSaveAndLeave} loading={saving}
+              leftIcon={<Save size={14} />}>
+              Save &amp; Leave
+            </Button>
+          </div>
+        </Modal>
+
       </PageWrapper>
     </AdminLayout>
   );
 }
 
 // ── Breadcrumb ────────────────────────────────────────────────────────────────
-function Breadcrumb({ detail, router, backHref }: {
+function Breadcrumb({ detail, onNavigate, backHref }: {
   detail: QuestionDetail | null;
-  router: ReturnType<typeof useRouter>;
+  onNavigate: (href: string) => void;
   backHref: string;
 }) {
   return (
     <div className="flex items-center gap-1.5 text-xs font-medium mb-5" style={{ color: T.muted }}>
-      <button onClick={() => router.push("/admin/practice")} className="transition-colors shrink-0"
+      <button onClick={() => onNavigate("/admin/practice")} className="transition-colors shrink-0"
         onMouseEnter={e => (e.currentTarget.style.color = T.text)}
         onMouseLeave={e => (e.currentTarget.style.color = T.muted)}>
         Practice
@@ -1046,7 +1142,7 @@ function Breadcrumb({ detail, router, backHref }: {
       {detail?.module && (
         <>
           <ChevronRight size={12} style={{ color: T.subtle, flexShrink: 0 }} />
-          <button onClick={() => router.push(`/admin/practice/${detail.module!.id}`)}
+          <button onClick={() => onNavigate(`/admin/practice/${detail.module!.id}`)}
             className="transition-colors truncate"
             onMouseEnter={e => (e.currentTarget.style.color = T.text)}
             onMouseLeave={e => (e.currentTarget.style.color = T.muted)}>
@@ -1057,7 +1153,7 @@ function Breadcrumb({ detail, router, backHref }: {
       {detail?.section && (
         <>
           <ChevronRight size={12} style={{ color: T.subtle, flexShrink: 0 }} />
-          <button onClick={() => router.push(backHref)} className="transition-colors truncate"
+          <button onClick={() => onNavigate(backHref)} className="transition-colors truncate"
             onMouseEnter={e => (e.currentTarget.style.color = T.text)}
             onMouseLeave={e => (e.currentTarget.style.color = T.muted)}>
             {detail.section.name}

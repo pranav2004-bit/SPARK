@@ -137,9 +137,9 @@ function triggerCSVDownload(content: string, filename: string) {
 function downloadTemplate() {
   const csv =
     "student_id\n" +
-    "A23126551001\n" +
-    "A23126551002\n" +
-    "A23126551003\n";
+    "A23126551030\n" +
+    "A23126551031\n" +
+    "A23126551032\n";
   triggerCSVDownload(csv, "student_import_template.csv");
 }
 
@@ -318,7 +318,7 @@ export function BulkImportModal({
 
     try {
       const res = await api.post<{ data: BulkImportResult }>(
-        "/admin/students/bulk-create/",
+        "/users/students/import/",
         {
           student_ids: parseResult.validIds,
           department,

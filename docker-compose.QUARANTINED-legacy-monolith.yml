@@ -1,0 +1,150 @@
+services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    restart: always
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - aptlogic_net
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save ""
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - aptlogic_net
+
+  # ── Django Backend ───────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: always
+    env_file: .env
+    environment:
+      DJANGO_SETTINGS_MODULE: aptlogic.settings.development
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - aptlogic_net
+
+  # ── Celery Worker ────────────────────────────────────────────────────────────
+  celery:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: always
+    env_file: .env
+    environment:
+      DJANGO_SETTINGS_MODULE: aptlogic.settings.development
+    entrypoint: ["celery", "-A", "aptlogic", "worker", "--loglevel=info", "--concurrency=4"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aptlogic_net
+
+  # ── MinIO (S3-compatible local storage — swap for R2 in production) ──────────
+  minio:
+    image: minio/minio:latest
+    hostname: minio
+    restart: always
+    env_file: .env
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API — presigned URLs + file access from browser
+      - "9001:9001"   # MinIO web console (admin UI)
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - aptlogic_net
+
+  # ── MinIO bucket initializer (runs once, creates the aptlogic bucket) ─────────
+  minio-init:
+    image: minio/mc:latest
+    restart: on-failure
+    env_file: .env
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do
+        echo 'Waiting for MinIO...'; sleep 2;
+      done;
+      mc mb --ignore-existing local/$${R2_BUCKET_NAME};
+      mc anonymous set download local/$${R2_BUCKET_NAME};
+      echo 'MinIO bucket ready.';
+      "
+    networks:
+      - aptlogic_net
+
+  # ── Nginx ────────────────────────────────────────────────────────────────────
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "80:80"
+      - "9002:9002"   # MinIO CORS proxy — browser presigned-URL uploads
+    depends_on:
+      - backend
+      - minio
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - aptlogic_net
+
+volumes:
+  postgres_data:
+    external: true
+    name: aptlogic_postgres_data
+  redis_data:
+    external: true
+    name: aptlogic_redis_data
+  minio_data:
+    external: true
+    name: aptlogic_minio_data
+
+networks:
+  aptlogic_net:
+    driver: bridge

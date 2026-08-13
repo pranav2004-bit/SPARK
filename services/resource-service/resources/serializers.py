@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from .models import Company, Section, Upload, Module, ModuleSection, ModuleUpload
+from core.upload_constraints import ALLOWED_EXTENSIONS, ALLOWED_MIME_TYPES, MAX_FILE_SIZES
 
 
 # ── General module serializers ─────────────────────────────────────────────────
@@ -38,9 +39,9 @@ class ModuleUploadSerializer(serializers.ModelSerializer):
         fields = [
             "id", "section_id", "upload_type",
             "file_url", "read_url", "original_filename",
-            "file_size_bytes", "created_at",
+            "file_size_bytes", "scan_status", "created_at",
         ]
-        read_only_fields = ["id", "section_id", "read_url", "created_at"]
+        read_only_fields = ["id", "section_id", "read_url", "scan_status", "created_at"]
 
     def get_read_url(self, obj):
         from core.storage import get_cdn_url, is_file_type
@@ -105,9 +106,9 @@ class UploadSerializer(serializers.ModelSerializer):
         model = Upload
         fields = [
             "id", "upload_type", "file_url", "original_filename",
-            "file_size_bytes", "read_url", "created_at",
+            "file_size_bytes", "scan_status", "read_url", "created_at",
         ]
-        read_only_fields = ["id", "created_at", "read_url"]
+        read_only_fields = ["id", "created_at", "read_url", "scan_status"]
 
     def get_read_url(self, obj):
         from core.storage import get_cdn_url, is_file_type
@@ -121,22 +122,23 @@ class PresignedUploadRequestSerializer(serializers.Serializer):
     content_type = serializers.CharField(max_length=100)
     upload_type = serializers.ChoiceField(choices=["pdf", "audio", "video", "image"])
 
-    ALLOWED_EXTENSIONS = {
-        "pdf": [".pdf"],
-        "audio": [".mp3", ".wav", ".ogg", ".m4a", ".aac"],
-        "video": [".mp4", ".mov", ".avi", ".mkv", ".webm"],
-        "image": [".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"],
-    }
-
     def validate(self, attrs):
         import os
         filename = attrs["filename"]
+        content_type = attrs["content_type"]
         upload_type = attrs["upload_type"]
+
         ext = os.path.splitext(filename)[1].lower()
-        allowed = self.ALLOWED_EXTENSIONS.get(upload_type, [])
-        if ext not in allowed:
+        allowed_ext = ALLOWED_EXTENSIONS.get(upload_type, [])
+        if ext not in allowed_ext:
             raise serializers.ValidationError(
-                {"filename": f"Extension '{ext}' not allowed for '{upload_type}'. Allowed: {allowed}"}
+                {"filename": f"Extension '{ext}' not allowed for '{upload_type}'. Allowed: {allowed_ext}"}
+            )
+
+        allowed_mime = ALLOWED_MIME_TYPES.get(upload_type, [])
+        if content_type not in allowed_mime:
+            raise serializers.ValidationError(
+                {"content_type": f"Content type '{content_type}' not allowed for '{upload_type}'. Allowed: {allowed_mime}"}
             )
         return attrs
 
@@ -144,8 +146,20 @@ class PresignedUploadRequestSerializer(serializers.Serializer):
 class ConfirmUploadSerializer(serializers.Serializer):
     file_key = serializers.CharField(max_length=1000)
     original_filename = serializers.CharField(max_length=500)
+    # Client-reported size — used only as a cheap early rejection before the
+    # real HEAD-based check against storage (see views.py). Never trusted as
+    # the final file_size_bytes value stored on the record.
     file_size_bytes = serializers.IntegerField(min_value=1)
     upload_type = serializers.ChoiceField(choices=["pdf", "audio", "video", "image"])
+
+    def validate(self, attrs):
+        upload_type = attrs["upload_type"]
+        max_size = MAX_FILE_SIZES.get(upload_type)
+        if max_size and attrs["file_size_bytes"] > max_size:
+            raise serializers.ValidationError(
+                {"file_size_bytes": f"File exceeds the {max_size // (1024*1024)} MB limit for '{upload_type}'."}
+            )
+        return attrs
 
 
 class AddLinkSerializer(serializers.Serializer):

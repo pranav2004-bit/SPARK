@@ -43,12 +43,15 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework_simplejwt",
     "django_celery_beat",
+    "analytics",
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
 ]
+
+APPEND_SLASH = False
 
 ROOT_URLCONF = "core.urls"
 WSGI_APPLICATION = "core.wsgi.application"
@@ -61,7 +64,7 @@ DATABASES = {
         "PASSWORD": os.environ.get("DB_PASSWORD", ""),
         "HOST": os.environ.get("DB_HOST", "localhost"),
         "PORT": os.environ.get("DB_PORT", "5432"),
-        "CONN_MAX_AGE": 60,
+        "CONN_MAX_AGE": int(os.environ.get("CONN_MAX_AGE", "0")),
         "OPTIONS": {"connect_timeout": 10},
     }
 }
@@ -74,10 +77,35 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "core.authentication.ServiceJWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
+    "EXCEPTION_HANDLER": "core.exceptions.custom_exception_handler",
+    # Defense-in-depth: nginx (gateway/nginx.conf, nginx.dev.conf) is the
+    # primary rate limiter. These DRF-level throttles exist for the case
+    # where a request reaches this service WITHOUT going through nginx
+    # (internal network access, a misrouted request, a future gateway
+    # misconfig) — not as the main control. Uses the "default" cache, which
+    # is Redis (see CACHES below), so counts are shared across all worker
+    # processes/replicas rather than each process keeping its own counter.
+    # There is exactly one trusted reverse proxy in front of this service
+    # (nginx — see gateway/proxy_params.conf, which sets X-Forwarded-For).
+    # Without this, DRF's throttle IP-extraction trusts the *entire* XFF
+    # header value as sent, so a client could bypass per-IP throttling just
+    # by sending a different fake X-Forwarded-For prefix on every request
+    # (nginx appends its own $remote_addr rather than overwriting a
+    # client-supplied header). NUM_PROXIES=1 tells DRF to take the second-to
+    # -last entry (i.e. what nginx itself appended) as the real client IP.
+    "NUM_PROXIES": 1,
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "60/min",
+        "user": "300/min",
+    },
 }
 
 SIMPLE_JWT = {
@@ -102,9 +130,30 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_TIMEZONE = "UTC"
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+# Every service in this stack shares one Redis instance as its Celery
+# broker. Without an explicit per-service queue, this service's worker can
+# silently steal and drop another service's task (celery.exceptions.
+# NotRegistered — instant, unlogged, permanent). The worker process must be
+# started with `-Q analytics-service` (see docker-compose) to only consume
+# from this queue.
+CELERY_TASK_DEFAULT_QUEUE = "analytics-service"
 
 # Shared service key — internal event endpoints require this header
 SERVICE_KEY = os.environ.get("SERVICE_KEY", "")
 
 # Read replica for analytics queries (stub — connect when replica is provisioned)
 DATABASE_REPLICA_URL = os.environ.get("DATABASE_REPLICA_URL", "")
+
+# ── Sentry ────────────────────────────────────────────────────────────────────
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+if SENTRY_DSN:
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            environment=ENVIRONMENT,
+            traces_sample_rate=0.1,
+            send_default_pii=False,
+        )
+    except ImportError:
+        pass

@@ -105,8 +105,8 @@ export default function AdminScrollPage() {
     async function load() {
       try {
         const [cfgRes, updRes] = await Promise.all([
-          api.get("/admin/students/scroll/config/"),
-          api.get("/admin/students/scroll/updates/"),
+          api.get("/users/scroll/config/"),
+          api.get("/users/scroll/updates/"),
         ]);
         setConfig(cfgRes.data.data);
         setUpdates(updRes.data.data ?? []);
@@ -127,7 +127,7 @@ export default function AdminScrollPage() {
     setConfig(optimistic);
     setConfigSaving(true);
     try {
-      const res = await api.patch("/admin/students/scroll/config/", patch);
+      const res = await api.patch("/users/scroll/config/", patch);
       setConfig(res.data.data);
     } catch {
       setConfig(config); // rollback
@@ -143,7 +143,7 @@ export default function AdminScrollPage() {
     if (!newText.trim()) return;
     setAdding(true);
     try {
-      const res = await api.post("/admin/students/scroll/updates/", {
+      const res = await api.post("/users/scroll/updates/", {
         text: newText.trim(),
         link: newLink.trim(),
         show_new_badge: newBadge,
@@ -176,7 +176,7 @@ export default function AdminScrollPage() {
     if (!draft.text.trim()) return;
     setEditSaving(true);
     try {
-      const res = await api.patch(`/admin/students/scroll/updates/${id}/`, {
+      const res = await api.patch(`/users/scroll/updates/${id}/`, {
         text: draft.text.trim(),
         link: draft.link.trim(),
         show_new_badge: draft.show_new_badge,
@@ -198,7 +198,7 @@ export default function AdminScrollPage() {
   async function handleDelete(id: string) {
     setDeletingId(id);
     try {
-      await api.delete(`/admin/students/scroll/updates/${id}/`);
+      await api.delete(`/users/scroll/updates/${id}/`);
       setUpdates((prev) => prev.filter((u) => u.id !== id));
       showToast("success", "Update deleted.");
     } catch {
@@ -218,7 +218,7 @@ export default function AdminScrollPage() {
     setUpdates(newArr);
     setReordering(true);
     try {
-      const res = await api.post("/admin/students/scroll/updates/reorder/", {
+      const res = await api.post("/users/scroll/reorder/", {
         ids: newArr.map((u) => u.id),
       });
       setUpdates(res.data.data ?? newArr);

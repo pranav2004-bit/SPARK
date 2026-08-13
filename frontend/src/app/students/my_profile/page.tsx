@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
-import { Eye, EyeOff, User, Mail, BookOpen, GraduationCap, Info, KeyRound, ArrowLeft, Pencil, Check, X as XIcon, Loader2 } from "lucide-react";
+import { Eye, EyeOff, User, Mail, Building2, GraduationCap, Info, KeyRound, ArrowLeft, Pencil, Check, X as XIcon, Loader2 } from "lucide-react";
 import { StudentLayout } from "@/components/layout/StudentLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -17,7 +17,6 @@ import { consumeScrollRedirect } from "@/lib/scrollRedirect";
 import api, { getErrorMessage } from "@/lib/api";
 import type {
   StudentProfile,
-  StudentProfileUpdateResponse,
   StudentUser,
   ApiSuccess,
 } from "@/types";
@@ -35,9 +34,9 @@ function InfoField({
   loading: boolean;
 }) {
   return (
-    <div className="flex items-start gap-3 py-3.5 border-b border-[var(--color-border)] last:border-0">
+    <div className="flex items-start gap-3 py-3 border-b border-[var(--color-border)] last:border-0">
       <div className="w-8 h-8 rounded-[var(--radius-md)] bg-[var(--color-surface-hover)] flex items-center justify-center shrink-0 mt-0.5">
-        <Icon size={15} className="text-[var(--color-text-muted)]" />
+        <Icon size={17} className="text-[var(--color-text-muted)]" />
       </div>
       <div className="flex-1 min-w-0">
         <p className="text-xs text-[var(--color-text-muted)] mb-0.5">{label}</p>
@@ -77,7 +76,7 @@ interface ChangePasswordForm {
 export default function MyProfilePage() {
   const router = useRouter();
   const toast = useToast();
-  const { user, setTokens } = useAuthStore();
+  const { user, setTokens, accessToken: currentAccessToken, refreshToken: currentRefreshToken } = useAuthStore();
   const studentUser = user as StudentUser | null;
 
   const isFirstLogin = studentUser?.is_profile_completed === false;
@@ -101,6 +100,7 @@ export default function MyProfilePage() {
   } = useForm<SetupForm>({ mode: "onBlur" });
 
   const setupNewPass = watchSetup("new_password");
+  const setupCurrentPass = watchSetup("current_password");
 
   // ── Profile edit (returning users) ────────────────────────────────────────
   const [backLoading, setBackLoading] = useState(false);
@@ -132,19 +132,18 @@ export default function MyProfilePage() {
     setEditSaving(true);
     setEditError("");
     try {
-      const res = await api.patch<ApiSuccess<StudentProfileUpdateResponse>>(
-        "/students/profile/",
+      const res = await api.patch<ApiSuccess<StudentProfile>>(
+        "/users/me/",
         { fullname: name, college_email_id: email }
       );
-      const { profile: updated, access_token, refresh_token } = res.data.data;
+      const updated = res.data.data;
       setProfile(updated);
       // Update auth store so avatar initial + dropdown name refresh immediately
       const updatedUser: StudentUser = {
         ...(studentUser as StudentUser),
         fullname: updated.fullname ?? "",
       };
-      setTokens(access_token, refresh_token, updatedUser);
-      setAuthCookies("student", access_token);
+      setTokens(currentAccessToken!, currentRefreshToken!, updatedUser);
       setIsEditing(false);
       toast.success("Profile updated successfully.");
     } catch (err) {
@@ -157,6 +156,7 @@ export default function MyProfilePage() {
   // ── Password-only form (returning users) ───────────────────────────────────
   const [pwSaving, setPwSaving] = useState(false);
   const [pwError, setPwError] = useState("");
+  const [pwErrorKey, setPwErrorKey] = useState(0);
   const [showPwCurrent, setShowPwCurrent] = useState(false);
   const [showPwNew, setShowPwNew] = useState(false);
   const [showPwConfirm, setShowPwConfirm] = useState(false);
@@ -170,11 +170,12 @@ export default function MyProfilePage() {
   } = useForm<ChangePasswordForm>({ mode: "onBlur" });
 
   const pwNewPass = watchPw("new_password");
+  const pwCurrentPass = watchPw("current_password");
 
   // ── Fetch profile ──────────────────────────────────────────────────────────
   const fetchProfile = useCallback(async () => {
     try {
-      const res = await api.get<ApiSuccess<StudentProfile>>("/students/profile/");
+      const res = await api.get<ApiSuccess<StudentProfile>>("/users/me/");
       setProfile(res.data.data);
     } catch (err) {
       toast.error(getErrorMessage(err));
@@ -195,7 +196,7 @@ export default function MyProfilePage() {
     try {
       // Step 1: change password if requested (optional but encouraged)
       if (wantsPasswordChange && data.new_password) {
-        await api.post("/students/change-password/", {
+        await api.post("/auth/student/change-password/", {
           current_password: data.current_password,
           new_password: data.new_password,
           repeat_new_password: data.confirm_password,
@@ -203,15 +204,15 @@ export default function MyProfilePage() {
       }
 
       // Step 2: update profile (mandatory — this is what marks is_profile_completed=true)
-      const res = await api.put<ApiSuccess<StudentProfileUpdateResponse>>(
-        "/students/profile/",
+      const res = await api.put<ApiSuccess<StudentProfile>>(
+        "/users/me/",
         {
           fullname: data.fullname.trim(),
           college_email_id: data.college_email_id.trim().toLowerCase(),
         }
       );
 
-      const { profile: updatedProfile, access_token, refresh_token } = res.data.data;
+      const updatedProfile = res.data.data;
       setProfile(updatedProfile);
 
       const updatedUser: StudentUser = {
@@ -220,6 +221,15 @@ export default function MyProfilePage() {
         is_profile_completed: updatedProfile.is_profile_completed,
         fullname: updatedProfile.fullname ?? "",
       };
+
+      // Step 3: Sync auth-service — marks is_profile_completed=True in auth_db
+      // and returns fresh tokens with the correct JWT claim baked in.
+      // Without this every subsequent login re-issues tokens with is_profile_completed=False.
+      const syncRes = await api.patch<ApiSuccess<{ access_token: string; refresh_token: string }>>(
+        "/auth/profile/complete/",
+        { fullname: data.fullname.trim() }
+      );
+      const { access_token, refresh_token } = syncRes.data.data;
       setTokens(access_token, refresh_token, updatedUser);
       setAuthCookies("student", access_token);
 
@@ -246,12 +256,13 @@ export default function MyProfilePage() {
 
   // ── Change password submit (returning users) ───────────────────────────────
   async function onPasswordSubmit(data: ChangePasswordForm) {
+    setPwErrorKey((k) => k + 1);
     setPwSaving(true);
     setPwError("");
 
     try {
       const res = await api.post<ApiSuccess<{ access_token: string; refresh_token: string }>>(
-        "/students/change-password/",
+        "/auth/student/change-password/",
         {
           current_password: data.current_password,
           new_password: data.new_password,
@@ -294,7 +305,7 @@ export default function MyProfilePage() {
           "bg-[var(--color-danger-bg)] border border-red-100 transition-all duration-200",
           message
             ? "mt-4 p-3 opacity-100 max-h-20"
-            : "mt-0 p-0 opacity-0 max-h-0 overflow-hidden border-transparent",
+            : "!mt-0 p-0 opacity-0 max-h-0 overflow-hidden border-transparent",
         ].join(" ")}
         role="alert"
         aria-live="polite"
@@ -331,7 +342,7 @@ export default function MyProfilePage() {
   if (isFirstLogin) {
     return (
       <StudentLayout hideNav>
-        <PageWrapper className="max-w-xl py-8">
+        <PageWrapper className="max-w-xl pt-8 pb-0">
           {/* Welcome banner */}
           <div className="flex items-start gap-3 mb-6 p-4 bg-[var(--color-info-bg)] border border-[var(--color-accent)]/30 rounded-[var(--radius-lg)]">
             <Info size={17} className="text-[var(--color-accent)] shrink-0 mt-0.5" />
@@ -409,7 +420,7 @@ export default function MyProfilePage() {
                     <Input
                       label="Current password"
                       type={showSetupCurrent ? "text" : "password"}
-                      placeholder="Default: ANITS@123"
+                      placeholder="Enter your current password"
                       autoComplete="current-password"
                       error={setupErrors.current_password?.message}
                       rightElement={
@@ -443,6 +454,11 @@ export default function MyProfilePage() {
                           : false,
                         minLength: wantsPasswordChange
                           ? { value: 8, message: "Minimum 8 characters." }
+                          : undefined,
+                        validate: wantsPasswordChange
+                          ? (val) =>
+                              val !== setupCurrentPass ||
+                              "New password must be different from your current password."
                           : undefined,
                       })}
                     />
@@ -496,7 +512,7 @@ export default function MyProfilePage() {
   // ═══════════════════════════════════════════════════════════════════════════
   return (
     <StudentLayout>
-      <PageWrapper className="max-w-4xl py-8">
+      <PageWrapper className="max-w-4xl pt-8 pb-0">
 
         {/* Back to Home */}
         <button
@@ -608,7 +624,7 @@ export default function MyProfilePage() {
                 <InfoField icon={Mail} label="College Email" value={profile?.college_email_id} loading={profileLoading} />
               )}
 
-              <InfoField icon={BookOpen} label="Department" value={profile?.department} loading={profileLoading} />
+              <InfoField icon={Building2} label="Department" value={profile?.department} loading={profileLoading} />
               <InfoField icon={GraduationCap} label="Batch" value={profile?.batch_name} loading={profileLoading} />
             </div>
 
@@ -641,8 +657,9 @@ export default function MyProfilePage() {
                 </div>
               </div>
             ) : (
-              <div className="px-6 pb-5 pt-2">
-                <p className="text-xs text-[var(--color-text-subtle)]">
+              <div className="px-6 pb-5 pt-2 flex items-start gap-2">
+                <Info size={13} className="text-[var(--color-text-muted)] shrink-0 mt-0.5" />
+                <p className="text-[13px] text-[var(--color-text-muted)]">
                   Name and email are editable. Contact your administrator for other changes.
                 </p>
               </div>
@@ -650,17 +667,17 @@ export default function MyProfilePage() {
           </div>
 
           {/* ── Change Password Card ───────────────────────────────────────── */}
-          <div className="bg-white border border-[var(--color-border)] rounded-[var(--radius-xl)] overflow-hidden shadow-[var(--shadow-sm)]">
+          <div className="bg-white border border-[var(--color-border)] rounded-[var(--radius-xl)] overflow-hidden shadow-[var(--shadow-sm)] self-start">
             <div className="px-6 py-5 border-b border-[var(--color-border)]">
               <h2 className="text-[15px] font-semibold text-[var(--color-text)]">
                 Change Password
               </h2>
-              <p className="text-sm text-[var(--color-text-muted)] mt-0.5">
+              <p className="text-sm text-neutral-500 mt-0.5">
                 Keep your account secure with a strong password.
               </p>
             </div>
 
-            <div className="px-6 py-6">
+            <div className="px-6 pt-5 pb-4">
               <form onSubmit={handlePw(onPasswordSubmit)} noValidate className="space-y-4">
                 <Input
                   label="Current password"
@@ -692,6 +709,9 @@ export default function MyProfilePage() {
                   {...regPw("new_password", {
                     required: "New password is required.",
                     minLength: { value: 8, message: "Minimum 8 characters." },
+                    validate: (val) =>
+                      val !== pwCurrentPass ||
+                      "New password must be different from your current password.",
                   })}
                 />
 
@@ -714,12 +734,13 @@ export default function MyProfilePage() {
                 />
 
                 <div
+                  key={pwErrorKey}
                   className={[
                     "rounded-[var(--radius-md)] text-sm text-[var(--color-danger)]",
                     "bg-[var(--color-danger-bg)] border border-red-100 transition-all duration-200",
                     pwError
                       ? "p-3 opacity-100 max-h-20"
-                      : "p-0 opacity-0 max-h-0 overflow-hidden border-transparent",
+                      : "p-0 opacity-0 max-h-0 overflow-hidden border-transparent !mt-0",
                   ].join(" ")}
                   role="alert"
                   aria-live="polite"

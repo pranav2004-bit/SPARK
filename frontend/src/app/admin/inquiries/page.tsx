@@ -63,7 +63,7 @@ export default function InquiriesPage() {
       if (unreadOnly) params.set("unread", "true");
       params.set("page", String(page));
       const res = await api.get<PaginatedResponse<Inquiry>>(
-        `/admin/students/inquiries/?${params.toString()}`
+        `/users/inquiries/?${params.toString()}`
       );
       setInquiries(res.data.results);
       setTotalCount(res.data.count);
@@ -83,7 +83,7 @@ export default function InquiriesPage() {
   async function markRead(id: string) {
     setMarkingId(id);
     try {
-      await api.patch(`/admin/students/inquiries/${id}/mark-read/`);
+      await api.patch(`/users/inquiries/${id}/mark-read/`);
       setInquiries((prev) =>
         prev.map((inq) => (inq.id === id ? { ...inq, is_read: true } : inq))
       );

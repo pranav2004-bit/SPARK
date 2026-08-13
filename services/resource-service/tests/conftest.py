@@ -88,4 +88,5 @@ def upload(db, section):
         file_url="uploads/pdf/test-file.pdf",
         original_filename="test.pdf",
         file_size_bytes=1024,
+        scan_status="clean",
     )

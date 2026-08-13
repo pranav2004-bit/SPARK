@@ -48,9 +48,9 @@ export default function SectionsPage() {
   const fetchSections = useCallback(async () => {
     try {
       const [companyRes, sectionsRes] = await Promise.all([
-        api.get<ApiSuccess<Company>>(`/admin/companies/${company_id}/`),
+        api.get<ApiSuccess<Company>>(`/resources/companies/${company_id}/`),
         api.get<PaginatedResponse<Section>>(
-          `/admin/companies/${company_id}/sections/`
+          `/resources/companies/${company_id}/sections/`
         ),
       ]);
       setCompany(companyRes.data.data);
@@ -87,7 +87,7 @@ export default function SectionsPage() {
     try {
       if (editSection) {
         const res = await api.patch<ApiSuccess<Section>>(
-          `/admin/companies/${company_id}/sections/${editSection.id}/`,
+          `/resources/companies/${company_id}/sections/${editSection.id}/`,
           data
         );
         setSections((prev) =>
@@ -96,7 +96,7 @@ export default function SectionsPage() {
         toastSuccess("Section updated.");
       } else {
         const res = await api.post<ApiSuccess<Section>>(
-          `/admin/companies/${company_id}/sections/`,
+          `/resources/companies/${company_id}/sections/`,
           data
         );
         setSections((prev) => [...prev, res.data.data]);
@@ -122,7 +122,7 @@ export default function SectionsPage() {
     setDeleteLoading(true);
     try {
       await api.delete(
-        `/admin/companies/${company_id}/sections/${deleteSection.id}/`
+        `/resources/companies/${company_id}/sections/${deleteSection.id}/`
       );
       setSections((prev) => prev.filter((s) => s.id !== deleteSection.id));
       toastSuccess(`Section "${deleteSection.section_name}" deleted.`);

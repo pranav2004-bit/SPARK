@@ -52,7 +52,7 @@ export default function StudentPracticeHubPage() {
   };
 
   useEffect(() => {
-    api.get("/students/practice/")
+    api.get("/practice/student/")
       .then(res => setData(res.data.data ?? { modules: [], sections: [] }))
       .catch(err => toastError(getErrorMessage(err)))
       .finally(() => setLoading(false));

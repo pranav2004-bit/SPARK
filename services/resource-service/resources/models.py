@@ -11,12 +11,19 @@ class UploadType(models.TextChoices):
     EXTERNAL_LINK = "external_link", "External Link"
 
 
+class ScanStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    CLEAN = "clean", "Clean"
+    INFECTED = "infected", "Infected"
+    ERROR = "error", "Error"
+
+
 # ── General study-material models (migrated from user-service) ─────────────────
 
 class Module(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=200)
-    institution_id = models.UUIDField(null=True, blank=True, db_index=True)
+    institution_id = models.UUIDField(db_index=True)
     is_published = models.BooleanField(default=False)
     is_system = models.BooleanField(default=False)
     parent = models.ForeignKey(
@@ -77,6 +84,7 @@ class ModuleUpload(models.Model):
     file_url = models.TextField()
     original_filename = models.CharField(max_length=500, blank=True, null=True)
     file_size_bytes = models.BigIntegerField(blank=True, null=True)
+    scan_status = models.CharField(max_length=20, choices=ScanStatus.choices, default=ScanStatus.PENDING, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -85,6 +93,7 @@ class ModuleUpload(models.Model):
         ordering = ["created_at"]
         indexes = [
             models.Index(fields=["section"], name="idx_module_uploads_section"),
+            models.Index(fields=["scan_status"], name="idx_module_uploads_scan_status"),
         ]
 
     def __str__(self):
@@ -96,7 +105,7 @@ class ModuleUpload(models.Model):
 class Company(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company_name = models.CharField(max_length=255)
-    institution_id = models.UUIDField(null=True, blank=True, db_index=True)
+    institution_id = models.UUIDField(db_index=True)
     is_published = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -150,6 +159,7 @@ class Upload(models.Model):
     file_url = models.TextField()
     original_filename = models.CharField(max_length=500, blank=True, null=True)
     file_size_bytes = models.BigIntegerField(blank=True, null=True)
+    scan_status = models.CharField(max_length=20, choices=ScanStatus.choices, default=ScanStatus.PENDING, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -159,6 +169,7 @@ class Upload(models.Model):
         indexes = [
             models.Index(fields=["section"], name="idx_uploads_section_id"),
             models.Index(fields=["upload_type"], name="idx_uploads_upload_type"),
+            models.Index(fields=["scan_status"], name="idx_uploads_scan_status"),
         ]
 
     def __str__(self):

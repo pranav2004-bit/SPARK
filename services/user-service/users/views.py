@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 class HealthView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = []  # never throttle — polled at high frequency by health checks
 
     def get(self, request):
         from django.db import connection
@@ -495,17 +496,17 @@ class AdminInquiryMarkReadView(APIView):
 class AdminScrollConfigView(APIView):
     permission_classes = [IsAdminUser]
 
-    def _get_config(self):
-        config = ScrollConfig.objects.filter(pk=1).first()
-        if config is None:
-            config = ScrollConfig.objects.create()  # save() override forces pk=1
+    def _get_config(self, institution_id):
+        config, _ = ScrollConfig.objects.get_or_create(institution_id=institution_id)
         return config
 
     def get(self, request):
-        return success_response(data=ScrollConfigSerializer(self._get_config()).data)
+        institution_id = getattr(request.user, "institution_id", None)
+        return success_response(data=ScrollConfigSerializer(self._get_config(institution_id)).data)
 
     def patch(self, request):
-        config = self._get_config()
+        institution_id = getattr(request.user, "institution_id", None)
+        config = self._get_config(institution_id)
         serializer = ScrollConfigSerializer(config, data=request.data, partial=True)
         if not serializer.is_valid():
             return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
@@ -517,30 +518,34 @@ class AdminScrollUpdateListCreateView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        updates = ScrollUpdate.objects.all()
+        institution_id = getattr(request.user, "institution_id", None)
+        updates = ScrollUpdate.objects.filter(institution_id=institution_id)
         return success_response(data=ScrollUpdateSerializer(updates, many=True).data)
 
     def post(self, request):
-        max_order = ScrollUpdate.objects.aggregate(m=models.Max("order"))["m"] or 0
+        institution_id = getattr(request.user, "institution_id", None)
+        max_order = ScrollUpdate.objects.filter(institution_id=institution_id).aggregate(m=models.Max("order"))["m"] or 0
         data = {**request.data, "order": max_order + 1}
         serializer = ScrollUpdateSerializer(data=data)
         if not serializer.is_valid():
             return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
-        update = serializer.save()
+        update = serializer.save(institution_id=institution_id)
         return success_response(data=ScrollUpdateSerializer(update).data, status_code=201, message="Scroll update created.")
 
 
 class AdminScrollUpdateDetailView(APIView):
     permission_classes = [IsAdminUser]
 
-    def _get(self, pk):
-        return get_object_or_404(ScrollUpdate, pk=pk)
+    def _get(self, pk, institution_id):
+        return get_object_or_404(ScrollUpdate, pk=pk, institution_id=institution_id)
 
     def get(self, request, pk):
-        return success_response(data=ScrollUpdateSerializer(self._get(pk)).data)
+        institution_id = getattr(request.user, "institution_id", None)
+        return success_response(data=ScrollUpdateSerializer(self._get(pk, institution_id)).data)
 
     def patch(self, request, pk):
-        item = self._get(pk)
+        institution_id = getattr(request.user, "institution_id", None)
+        item = self._get(pk, institution_id)
         serializer = ScrollUpdateSerializer(item, data=request.data, partial=True)
         if not serializer.is_valid():
             return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
@@ -548,7 +553,8 @@ class AdminScrollUpdateDetailView(APIView):
         return success_response(data=serializer.data, message="Scroll update saved.")
 
     def delete(self, request, pk):
-        self._get(pk).delete()
+        institution_id = getattr(request.user, "institution_id", None)
+        self._get(pk, institution_id).delete()
         return success_response(message="Scroll update deleted.")
 
 
@@ -556,11 +562,12 @@ class AdminScrollReorderView(APIView):
     permission_classes = [IsAdminUser]
 
     def post(self, request):
+        institution_id = getattr(request.user, "institution_id", None)
         serializer = ScrollReorderSerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
         ids = serializer.validated_data["ids"]
-        updates = {str(u.pk): u for u in ScrollUpdate.objects.filter(pk__in=ids)}
+        updates = {str(u.pk): u for u in ScrollUpdate.objects.filter(pk__in=ids, institution_id=institution_id)}
         if len(updates) != len(ids):
             return error_response(message="One or more IDs not found.", status_code=400)
         to_save = []
@@ -569,20 +576,28 @@ class AdminScrollReorderView(APIView):
             item.order = position
             to_save.append(item)
         ScrollUpdate.objects.bulk_update(to_save, ["order"])
-        return success_response(data=ScrollUpdateSerializer(ScrollUpdate.objects.all(), many=True).data, message="Order saved.")
+        scoped = ScrollUpdate.objects.filter(institution_id=institution_id)
+        return success_response(data=ScrollUpdateSerializer(scoped, many=True).data, message="Order saved.")
 
 
 class StudentScrollView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        config = ScrollConfig.objects.filter(pk=1).first()
-        if config is None:
-            config = ScrollConfig.objects.create()
-        updates = ScrollUpdate.objects.all() if config.is_enabled else ScrollUpdate.objects.none()
+        institution_id = getattr(request.user, "institution_id", None)
+        try:
+            config = ScrollConfig.objects.get(institution_id=institution_id)
+        except ScrollConfig.DoesNotExist:
+            config = None
+        is_enabled = config.is_enabled if config else False
+        direction = config.direction if config else "left"
+        updates = (
+            ScrollUpdate.objects.filter(institution_id=institution_id)
+            if is_enabled else ScrollUpdate.objects.none()
+        )
         return success_response(data={
-            "is_enabled": config.is_enabled,
-            "direction": config.direction,
+            "is_enabled": is_enabled,
+            "direction": direction,
             "updates": ScrollUpdateSerializer(updates, many=True).data,
         })
 

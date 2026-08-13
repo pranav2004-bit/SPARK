@@ -4,6 +4,7 @@ Mirrors the coverage previously held in user-service test_scroll_and_resources.p
 """
 
 import pytest
+from unittest.mock import patch
 from tests.conftest import INSTITUTION_A, INSTITUTION_B
 
 
@@ -47,6 +48,20 @@ class TestModuleAdmin:
         pk = create_resp.json()["data"]["id"]
         resp = admin_client.delete(f"/api/resources/modules/{pk}/")
         assert resp.status_code == 200
+
+    def test_cannot_delete_module_with_sections(self, admin_client, db):
+        module_resp = admin_client.post("/api/resources/modules/", {"name": "Has Section"}, format="json")
+        module_pk = module_resp.json()["data"]["id"]
+        admin_client.post(f"/api/resources/modules/{module_pk}/sections/", {"name": "Sec"}, format="json")
+        resp = admin_client.delete(f"/api/resources/modules/{module_pk}/")
+        assert resp.status_code == 400
+
+    def test_cannot_delete_module_with_sub_modules(self, admin_client, db):
+        parent_resp = admin_client.post("/api/resources/modules/", {"name": "Has Child"}, format="json")
+        parent_pk = parent_resp.json()["data"]["id"]
+        admin_client.post(f"/api/resources/modules/{parent_pk}/children/", {"name": "Child"}, format="json")
+        resp = admin_client.delete(f"/api/resources/modules/{parent_pk}/")
+        assert resp.status_code == 400
 
     def test_cannot_delete_system_module(self, admin_client, db):
         from resources.models import Module
@@ -105,6 +120,102 @@ class TestModuleAdmin:
         resp = admin_client.patch(f"/api/resources/modules/{pk}/", {"is_published": True}, format="json")
         assert resp.status_code == 200
         assert resp.json()["data"]["is_published"] is True
+
+
+@pytest.fixture
+def module_section(db):
+    from resources.models import Module, ModuleSection
+    module = Module.objects.create(name="Prep", institution_id=INSTITUTION_A)
+    return ModuleSection.objects.create(module=module, name="Recordings", order=0)
+
+
+@pytest.mark.django_db
+class TestModuleUploads:
+    """Same _confirm_verified_upload security path as company uploads
+    (real HEAD size, magic bytes, quota, malware-scan gate) — verified here
+    for the Module-upload flow specifically since it's a separate URL tree."""
+
+    def test_presign_dropped_extension_rejected(self, admin_client, module_section):
+        module_id, section_id = module_section.module_id, module_section.pk
+        resp = admin_client.post(
+            f"/api/resources/modules/{module_id}/sections/{section_id}/presign/",
+            {"filename": "logo.svg", "content_type": "image/svg+xml", "upload_type": "image"},
+            format="json",
+        )
+        assert resp.status_code == 400
+
+    def test_confirm_storage_not_configured(self, admin_client, module_section):
+        module_id, section_id = module_section.module_id, module_section.pk
+        resp = admin_client.post(
+            f"/api/resources/modules/{module_id}/sections/{section_id}/confirm/",
+            {
+                "file_key": "uploads/pdf/x.pdf", "original_filename": "x.pdf",
+                "file_size_bytes": 2048, "upload_type": "pdf",
+            },
+            format="json",
+        )
+        assert resp.status_code == 503
+
+    @patch("resources.tasks.scan_uploaded_file.delay")
+    @patch("core.storage.verify_uploaded_object")
+    def test_confirm_upload_trusts_real_size_and_queues_scan(self, mock_verify, mock_scan_delay, admin_client, module_section):
+        mock_verify.return_value = (4096, None)
+        module_id, section_id = module_section.module_id, module_section.pk
+        resp = admin_client.post(
+            f"/api/resources/modules/{module_id}/sections/{section_id}/confirm/",
+            {
+                "file_key": "uploads/pdf/x.pdf", "original_filename": "x.pdf",
+                "file_size_bytes": 999,  # client-reported — must be ignored
+                "upload_type": "pdf",
+            },
+            format="json",
+        )
+        assert resp.status_code == 201
+        assert resp.json()["data"]["file_size_bytes"] == 4096
+        assert resp.json()["data"]["scan_status"] == "pending"
+        mock_scan_delay.assert_called_once()
+
+    @patch("core.storage.delete_file")
+    @patch("core.storage.verify_uploaded_object")
+    def test_confirm_rejects_and_cleans_up_on_verification_failure(self, mock_verify, mock_delete, admin_client, module_section):
+        mock_verify.return_value = (None, "File contents do not match the expected format for 'pdf'.")
+        module_id, section_id = module_section.module_id, module_section.pk
+        resp = admin_client.post(
+            f"/api/resources/modules/{module_id}/sections/{section_id}/confirm/",
+            {
+                "file_key": "uploads/pdf/fake.pdf", "original_filename": "fake.pdf",
+                "file_size_bytes": 2048, "upload_type": "pdf",
+            },
+            format="json",
+        )
+        assert resp.status_code == 400
+        mock_delete.assert_called_once_with("uploads/pdf/fake.pdf")
+
+    def test_add_link_is_immediately_clean(self, admin_client, module_section):
+        module_id, section_id = module_section.module_id, module_section.pk
+        resp = admin_client.post(
+            f"/api/resources/modules/{module_id}/sections/{section_id}/add-link/",
+            {"upload_type": "external_link", "file_url": "https://example.com/guide"},
+            format="json",
+        )
+        assert resp.status_code == 201
+        assert resp.json()["data"]["scan_status"] == "clean"
+
+    def test_student_does_not_see_unscanned_module_upload(self, student_client, module_section):
+        from resources.models import ModuleUpload
+        module_section.is_published = True
+        module_section.save(update_fields=["is_published"])
+        module_section.module.is_published = True
+        module_section.module.save(update_fields=["is_published"])
+        ModuleUpload.objects.create(
+            section=module_section, upload_type="pdf", file_url="uploads/pdf/pending.pdf",
+            original_filename="pending.pdf", file_size_bytes=1024, scan_status="pending",
+        )
+        resp = student_client.get(
+            f"/api/resources/student/modules/{module_section.module_id}/sections/{module_section.pk}/"
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"]["uploads"] == []
 
 
 @pytest.mark.django_db

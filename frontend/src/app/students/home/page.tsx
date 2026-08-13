@@ -18,43 +18,18 @@ function StatCard({
   label,
   value,
   loading,
-  color = "blue",
 }: {
   icon: React.ElementType;
   label: string;
   value?: string | number;
   loading: boolean;
-  color?: "blue" | "indigo" | "teal";
 }) {
-  const colorMap = {
-    blue: {
-      bg: "bg-[var(--color-accent-light)]",
-      icon: "text-[var(--color-accent)]",
-      border: "border-[var(--color-accent)]/20",
-    },
-    indigo: {
-      bg: "bg-[var(--color-primary-light)]",
-      icon: "text-[var(--color-primary)]",
-      border: "border-[var(--color-primary)]/15",
-    },
-    teal: {
-      bg: "bg-emerald-50",
-      icon: "text-emerald-600",
-      border: "border-emerald-100",
-    },
-  };
-  const c = colorMap[color];
-
   return (
     <div
-      className={[
-        "bg-white border rounded-[var(--radius-xl)] p-5 flex items-center gap-4",
-        "shadow-[var(--shadow-sm)]",
-        c.border,
-      ].join(" ")}
+      className="bg-white border border-[var(--color-primary)]/15 rounded-[var(--radius-xl)] p-5 flex items-center gap-4 shadow-[var(--shadow-sm)]"
     >
-      <div className={["w-11 h-11 rounded-[var(--radius-lg)] flex items-center justify-center shrink-0", c.bg].join(" ")}>
-        <Icon size={20} className={c.icon} />
+      <div className="w-10 h-10 rounded-[var(--radius-lg)] flex items-center justify-center shrink-0 bg-indigo-100">
+        <Icon size={18} className="text-indigo-600" />
       </div>
       <div className="flex-1 min-w-0">
         <p className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wider mb-0.5">
@@ -95,8 +70,8 @@ export default function StudentHomePage() {
   const fetchData = useCallback(async () => {
     try {
       const [profileRes, companiesRes] = await Promise.all([
-        api.get<ApiSuccess<StudentProfile>>("/students/profile/"),
-        api.get<PaginatedResponse<Company>>("/students/companies/"),
+        api.get<ApiSuccess<StudentProfile>>("/users/me/"),
+        api.get<PaginatedResponse<Company>>("/resources/student/companies/"),
       ]);
       setProfile(profileRes.data.data);
       setCompaniesCount(companiesRes.data.count);
@@ -144,21 +119,18 @@ Prepare smart. Show up confident. Get placed.
             label="Name"
             value={profile?.fullname}
             loading={loading}
-            color="blue"
           />
           <StatCard
             icon={GraduationCap}
             label="Batch"
             value={profile?.batch_name}
             loading={loading}
-            color="indigo"
           />
           <StatCard
             icon={Building2}
             label="Department"
             value={profile?.department}
             loading={loading}
-            color="teal"
           />
         </div>
 
@@ -179,10 +151,10 @@ Prepare smart. Show up confident. Get placed.
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-[15px] font-semibold text-[var(--color-text)] group-hover:text-[var(--color-accent)] transition-colors leading-snug">
-                  Browse company materials
+                  Browse materials
                 </p>
                 <p className="text-sm text-[var(--color-text-muted)] mt-0.5 leading-snug select-none">
-                  Aptitude, technical &amp; HR resources, organised by company.
+                  Aptitude, technical &amp; HR
                 </p>
               </div>
               <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 transition-colors duration-200 ${navigatingTo === "companies" ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-hover)] group-hover:bg-[var(--color-accent)]"}`}>
@@ -202,15 +174,15 @@ Prepare smart. Show up confident. Get placed.
           >
             <div className="h-0.5 w-full bg-[var(--color-accent)] opacity-0 group-hover:opacity-100 transition-opacity duration-200" />
             <div className="px-5 py-5 flex items-center gap-4">
-              <div className="w-10 h-10 rounded-[var(--radius-lg)] bg-[var(--color-primary-light)] flex items-center justify-center shrink-0">
-                <BookOpen size={18} className="text-[var(--color-primary)]" />
+              <div className="w-10 h-10 rounded-[var(--radius-lg)] bg-[var(--color-accent-light)] flex items-center justify-center shrink-0">
+                <BookOpen size={18} className="text-[var(--color-accent)]" />
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-[15px] font-semibold text-[var(--color-text)] group-hover:text-[var(--color-accent)] transition-colors leading-snug">
                   Start practicing
                 </p>
                 <p className="text-sm text-[var(--color-text-muted)] mt-0.5 leading-snug select-none">
-                  Topic-wise &amp; difficulty-graded aptitude and technical questions.
+                  Aptitude &amp; tech topics
                 </p>
               </div>
               <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 transition-colors duration-200 ${navigatingTo === "practice" ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-hover)] group-hover:bg-[var(--color-accent)]"}`}>
@@ -228,8 +200,8 @@ Prepare smart. Show up confident. Get placed.
           <div className="mt-6 flex items-start gap-3 p-4 bg-[var(--color-warning-bg)] border border-amber-200 rounded-[var(--radius-lg)]">
             <span className="text-amber-500 mt-0.5 shrink-0 text-base">⏳</span>
             <p className="text-sm text-amber-700">
-              No companies have been published yet. Check back soon — your
-              administrator will publish materials before your placement drive.
+              No materials have been published yet. Check back soon — your
+              administrator will add them before your placement drive.
             </p>
           </div>
         )}
@@ -248,7 +220,7 @@ Prepare smart. Show up confident. Get placed.
           `}</style>
 
           <div className="flex items-center gap-3 mb-5">
-            <p className="text-xs font-semibold text-[var(--color-text-muted)] uppercase tracking-wider whitespace-nowrap">
+            <p className="text-sm font-bold text-[var(--color-text)] uppercase tracking-wider whitespace-nowrap">
               Your preparation path
             </p>
             <div className="flex-1 h-px bg-[var(--color-border)]" />
@@ -281,7 +253,7 @@ Prepare smart. Show up confident. Get placed.
                 style={{ opacity: navigatingTo && navigatingTo !== "companies" ? 0.4 : 1 }}
               >
                 {/* Step number */}
-                <p className="text-[10px] font-black tracking-[0.18em] mb-3 select-none" style={{ color: "rgba(255,140,0,0.6)" }}>01</p>
+                <p className="text-[12px] font-black tracking-[0.18em] mb-3 select-none" style={{ color: "rgba(255,140,0,0.6)" }}>01</p>
 
                 {/* Fixed-height row so connectors align on the circle center */}
                 <div className="relative w-full flex justify-center" style={{ height: 52 }}>
@@ -320,8 +292,8 @@ Prepare smart. Show up confident. Get placed.
                   <p className="text-[13px] font-semibold leading-tight mb-1.5 select-none group-hover:text-[var(--color-accent)] transition-colors duration-200" style={{ color: "rgba(255,255,255,0.92)" }}>
                     Browse resources
                   </p>
-                  <p className="text-[11px] leading-relaxed select-none" style={{ color: "rgba(255,255,255,0.38)" }}>
-                    Company-wise aptitude, technical &amp; HR materials
+                  <p className="text-[12px] leading-relaxed select-none" style={{ color: "rgba(255,255,255,0.38)" }}>
+                    Aptitude, technical &amp; HR materials
                   </p>
                 </div>
               </button>
@@ -333,7 +305,7 @@ Prepare smart. Show up confident. Get placed.
                 className="group cursor-pointer relative flex flex-col items-center focus-visible:outline-none disabled:cursor-wait transition-opacity duration-200"
                 style={{ opacity: navigatingTo && navigatingTo !== "practice" ? 0.4 : 1 }}
               >
-                <p className="text-[10px] font-black tracking-[0.18em] mb-3 select-none" style={{ color: "rgba(255,140,0,0.6)" }}>02</p>
+                <p className="text-[12px] font-black tracking-[0.18em] mb-3 select-none" style={{ color: "rgba(255,140,0,0.6)" }}>02</p>
 
                 <div className="relative w-full flex justify-center" style={{ height: 52 }}>
                   {/* Left connector — solid orange */}
@@ -361,7 +333,7 @@ Prepare smart. Show up confident. Get placed.
                   <p className="text-[13px] font-semibold leading-tight mb-1.5 select-none group-hover:text-[var(--color-accent)] transition-colors duration-200" style={{ color: "rgba(255,255,255,0.92)" }}>
                     Practice questions
                   </p>
-                  <p className="text-[11px] leading-relaxed select-none" style={{ color: "rgba(255,255,255,0.38)" }}>
+                  <p className="text-[12px] leading-relaxed select-none" style={{ color: "rgba(255,255,255,0.38)" }}>
                     Aptitude &amp; technical practice, by topic and difficulty
                   </p>
                 </div>
@@ -369,7 +341,7 @@ Prepare smart. Show up confident. Get placed.
 
               {/* ③ Assessments — locked, v2 */}
               <div className="relative flex flex-col items-center cursor-default" aria-disabled="true">
-                <p className="text-[10px] font-black tracking-[0.18em] mb-3 select-none" style={{ color: "rgba(255,255,255,0.2)" }}>03</p>
+                <p className="text-[12px] font-black tracking-[0.18em] mb-3 select-none" style={{ color: "rgba(255,255,255,0.2)" }}>03</p>
 
                 <div className="relative w-full flex justify-center" style={{ height: 52 }}>
                   {/* Left connector — glass */}
@@ -402,7 +374,7 @@ Prepare smart. Show up confident. Get placed.
                       <span className="text-[8px] font-bold uppercase tracking-wide select-none" style={{ color: "rgba(255,255,255,0.3)" }}>v2</span>
                     </span>
                   </div>
-                  <p className="text-[11px] leading-relaxed select-none" style={{ color: "rgba(255,255,255,0.26)" }}>
+                  <p className="text-[12px] leading-relaxed select-none" style={{ color: "rgba(255,255,255,0.26)" }}>
                     Timed mock tests &amp; performance analytics
                   </p>
                 </div>
@@ -410,7 +382,7 @@ Prepare smart. Show up confident. Get placed.
 
               {/* ④ Compete & rank — locked, v2 */}
               <div className="relative flex flex-col items-center cursor-default" aria-disabled="true">
-                <p className="text-[10px] font-black tracking-[0.18em] mb-3 select-none" style={{ color: "rgba(255,255,255,0.2)" }}>04</p>
+                <p className="text-[12px] font-black tracking-[0.18em] mb-3 select-none" style={{ color: "rgba(255,255,255,0.2)" }}>04</p>
 
                 <div className="relative w-full flex justify-center" style={{ height: 52 }}>
                   {/* Left connector — dashed glass */}
@@ -441,7 +413,7 @@ Prepare smart. Show up confident. Get placed.
                       <span className="text-[8px] font-bold uppercase tracking-wide select-none" style={{ color: "rgba(255,255,255,0.3)" }}>v2</span>
                     </span>
                   </div>
-                  <p className="text-[11px] leading-relaxed select-none" style={{ color: "rgba(255,255,255,0.26)" }}>
+                  <p className="text-[12px] leading-relaxed select-none" style={{ color: "rgba(255,255,255,0.26)" }}>
                     Live competitive rounds &amp; leaderboards
                   </p>
                 </div>
@@ -478,9 +450,9 @@ Prepare smart. Show up confident. Get placed.
                   : <Briefcase size={16} color="white" strokeWidth={2} />}
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-[10px] font-black uppercase tracking-[0.14em] select-none mb-0.5" style={{ color: "rgba(255,140,0,0.7)" }}>Step 01</p>
+                <p className="text-[11px] font-black uppercase tracking-[0.14em] select-none mb-0.5" style={{ color: "rgba(255,140,0,0.7)" }}>Step 01</p>
                 <p className="text-[13px] font-semibold select-none group-hover:text-[var(--color-accent)] transition-colors duration-200" style={{ color: "rgba(255,255,255,0.88)" }}>Browse resources</p>
-                <p className="text-[11px] mt-0.5 select-none line-clamp-1" style={{ color: "rgba(255,255,255,0.38)" }}>Company-wise aptitude, technical &amp; HR materials</p>
+                <p className="text-[12px] mt-0.5 select-none line-clamp-2" style={{ color: "rgba(255,255,255,0.38)" }}>Company-wise aptitude, technical &amp; HR materials</p>
               </div>
               {navigatingTo === "companies"
                 ? <LoadingSpinner size={14} color="rgba(255,255,255,0.7)" />
@@ -509,9 +481,9 @@ Prepare smart. Show up confident. Get placed.
                   : <BookOpen size={16} color="white" strokeWidth={2} />}
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-[10px] font-black uppercase tracking-[0.14em] select-none mb-0.5" style={{ color: "rgba(255,140,0,0.7)" }}>Step 02</p>
+                <p className="text-[11px] font-black uppercase tracking-[0.14em] select-none mb-0.5" style={{ color: "rgba(255,140,0,0.7)" }}>Step 02</p>
                 <p className="text-[13px] font-semibold select-none group-hover:text-[var(--color-accent)] transition-colors duration-200" style={{ color: "rgba(255,255,255,0.88)" }}>Practice questions</p>
-                <p className="text-[11px] mt-0.5 select-none line-clamp-1" style={{ color: "rgba(255,255,255,0.38)" }}>Aptitude &amp; technical practice, by topic and difficulty</p>
+                <p className="text-[12px] mt-0.5 select-none line-clamp-2" style={{ color: "rgba(255,255,255,0.38)" }}>Aptitude &amp; technical practice, by topic and difficulty</p>
               </div>
               {navigatingTo === "practice"
                 ? <LoadingSpinner size={14} color="rgba(255,255,255,0.7)" />
@@ -531,9 +503,9 @@ Prepare smart. Show up confident. Get placed.
                 <ClipboardList size={16} color="rgba(255,255,255,0.25)" strokeWidth={1.75} />
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-[10px] font-black uppercase tracking-[0.14em] select-none mb-0.5" style={{ color: "rgba(255,255,255,0.2)" }}>Step 03</p>
+                <p className="text-[11px] font-black uppercase tracking-[0.14em] select-none mb-0.5" style={{ color: "rgba(255,255,255,0.2)" }}>Step 03</p>
                 <p className="text-[13px] font-semibold select-none" style={{ color: "rgba(255,255,255,0.28)" }}>Assessments</p>
-                <p className="text-[11px] mt-0.5 select-none line-clamp-1" style={{ color: "rgba(255,255,255,0.26)" }}>Timed mock tests &amp; performance analytics</p>
+                <p className="text-[12px] mt-0.5 select-none line-clamp-2" style={{ color: "rgba(255,255,255,0.26)" }}>Timed mock tests &amp; performance analytics</p>
               </div>
               <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full shrink-0" style={{ background: "rgba(255,255,255,0.07)" }}>
                 <Lock size={7} color="rgba(255,255,255,0.3)" />
@@ -550,9 +522,9 @@ Prepare smart. Show up confident. Get placed.
                 <Trophy size={16} color="rgba(255,255,255,0.25)" strokeWidth={1.75} />
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-[10px] font-black uppercase tracking-[0.14em] select-none mb-0.5" style={{ color: "rgba(255,255,255,0.2)" }}>Step 04</p>
+                <p className="text-[11px] font-black uppercase tracking-[0.14em] select-none mb-0.5" style={{ color: "rgba(255,255,255,0.2)" }}>Step 04</p>
                 <p className="text-[13px] font-semibold select-none" style={{ color: "rgba(255,255,255,0.28)" }}>Compete &amp; rank</p>
-                <p className="text-[11px] mt-0.5 select-none line-clamp-1" style={{ color: "rgba(255,255,255,0.26)" }}>Live competitive rounds &amp; leaderboards</p>
+                <p className="text-[12px] mt-0.5 select-none line-clamp-2" style={{ color: "rgba(255,255,255,0.26)" }}>Live competitive rounds &amp; leaderboards</p>
               </div>
               <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full shrink-0" style={{ background: "rgba(255,255,255,0.07)" }}>
                 <Lock size={7} color="rgba(255,255,255,0.3)" />

@@ -87,7 +87,7 @@ export default function StudentPracticeModulePage() {
     let node = current;
     while (node.parent) {
       try {
-        const res = await api.get(`/students/practice/modules/${node.parent}/`);
+        const res = await api.get(`/practice/student/modules/${node.parent}/`);
         const parentMod = res.data.data?.module as PracticeModule | undefined;
         if (!parentMod) break;
         chain.unshift(parentMod);
@@ -101,7 +101,7 @@ export default function StudentPracticeModulePage() {
 
   const fetchModule = (silent = false) => {
     if (!silent) setLoading(true);
-    api.get(`/students/practice/modules/${module_id}/`)
+    api.get(`/practice/student/modules/${module_id}/`)
       .then(res => {
         const data = res.data.data as ModuleDetailData;
         setDetail(data);

@@ -3,6 +3,31 @@
 import { useState, useEffect, useRef } from "react";
 import { Search, X } from "lucide-react";
 
+/**
+ * Controlled search input with built-in debounce.
+ *
+ * IMPORTANT — two rules every caller must follow:
+ *
+ * 1. Always pass a controlled `value` prop (string state from the parent).
+ *    The component syncs its internal display value when `value` changes
+ *    externally (e.g. when the parent resets filters). Without this the
+ *    input will appear stale after a "Clear filters" action.
+ *
+ * 2. Do NOT add a separate debounce (useRef/setTimeout) in the parent.
+ *    This component already debounces `onChange` by `debounceMs` (default
+ *    300 ms). Adding a second debounce doubles the delay and creates
+ *    stale-closure bugs. Just call `setValue` + `setPage(1)` directly
+ *    inside the `onChange` handler.
+ *
+ * @example
+ *   const [search, setSearch] = useState("");
+ *
+ *   <SearchInput
+ *     value={search}
+ *     onChange={(val) => { setSearch(val); setPage(1); }}
+ *     placeholder="Search by name..."
+ *   />
+ */
 interface SearchInputProps {
   value: string;
   onChange: (value: string) => void;

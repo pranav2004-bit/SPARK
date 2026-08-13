@@ -29,10 +29,27 @@ def _invalidate_company_cache(institution_id):
     cache.delete(_company_cache_key(institution_id))
 
 
+def _first_serializer_error(errors: dict) -> str:
+    """
+    Extract the first human-readable message from serializer.errors so the
+    API response carries a plain-English message instead of "Validation failed".
+    Handles both field-level errors ({"field": ["msg"]}) and nested dicts.
+    """
+    for messages in errors.values():
+        if isinstance(messages, list) and messages:
+            return str(messages[0])
+        if isinstance(messages, dict):
+            for sub in messages.values():
+                if isinstance(sub, list) and sub:
+                    return str(sub[0])
+    return "Validation failed."
+
+
 # ── Health ─────────────────────────────────────────────────────────────────────
 
 class HealthView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = []  # never throttle — polled at high frequency by health checks
 
     def get(self, request):
         from django.db import connection
@@ -91,6 +108,61 @@ def _get_section_scoped(company_id, section_id, institution_id):
     return get_object_or_404(Section, pk=section_id, company=company)
 
 
+def _confirm_verified_upload(section, model_cls, validated_data):
+    """
+    Shared confirm logic for Upload and ModuleUpload. Verifies the object
+    that actually landed in storage (real size via HEAD + magic-byte check —
+    never the client-reported size/type), enforces the per-section storage
+    quota, and only then creates the record. Rejects and deletes the
+    orphaned storage object on any failure. Newly confirmed file uploads
+    start as scan_status="pending" and are queued for an async malware scan;
+    they stay hidden from students until that scan reports "clean".
+    Returns (instance_or_None, error_response_or_None).
+    """
+    from django.db.models import Sum
+    from core.storage import verify_uploaded_object, delete_file
+    from core.upload_constraints import MAX_BYTES_PER_SECTION
+
+    file_key = validated_data["file_key"]
+    upload_type = validated_data["upload_type"]
+
+    try:
+        real_size, error = verify_uploaded_object(file_key, upload_type)
+    except RuntimeError as exc:
+        logger.error("Storage not configured for confirm: %s", exc)
+        return None, error_response(message="File storage is not configured.", status_code=503)
+
+    if error:
+        try:
+            delete_file(file_key)
+        except Exception:
+            logger.warning("Failed to clean up rejected upload key=%s", file_key)
+        return None, error_response(message=error, status_code=400)
+
+    existing_total = model_cls.objects.filter(section=section).aggregate(total=Sum("file_size_bytes"))["total"] or 0
+    if existing_total + real_size > MAX_BYTES_PER_SECTION:
+        try:
+            delete_file(file_key)
+        except Exception:
+            logger.warning("Failed to clean up over-quota upload key=%s", file_key)
+        return None, error_response(
+            message="This section has reached its storage limit. Delete some files before adding more.",
+            status_code=400,
+        )
+
+    instance = model_cls.objects.create(
+        section=section,
+        upload_type=upload_type,
+        file_url=file_key,
+        original_filename=validated_data["original_filename"],
+        file_size_bytes=real_size,
+        scan_status="pending",
+    )
+    from .tasks import scan_uploaded_file
+    scan_uploaded_file.delay(str(instance.pk), model_cls.__name__)
+    return instance, None
+
+
 # ── Admin: Company ─────────────────────────────────────────────────────────────
 
 class CompanyListCreateView(APIView):
@@ -113,7 +185,7 @@ class CompanyListCreateView(APIView):
         institution_id = getattr(request.user, "institution_id", None)
         serializer = CompanySerializer(data=request.data, context={"institution_id": institution_id})
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         company = serializer.save(institution_id=institution_id)
         _invalidate_company_cache(institution_id)
         return success_response(
@@ -135,7 +207,7 @@ class CompanyDetailView(APIView):
         company = _get_company(company_id, institution_id)
         serializer = CompanySerializer(company, data=request.data, context={"institution_id": institution_id})
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         serializer.save()
         _invalidate_company_cache(institution_id)
         return success_response(data=CompanySerializer(_get_company(company_id, institution_id)).data, message="Company updated")
@@ -145,7 +217,7 @@ class CompanyDetailView(APIView):
         company = _get_company(company_id, institution_id)
         serializer = CompanySerializer(company, data=request.data, partial=True, context={"institution_id": institution_id})
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         serializer.save()
         _invalidate_company_cache(institution_id)
         return success_response(data=CompanySerializer(_get_company(company_id, institution_id)).data, message="Company updated")
@@ -196,7 +268,7 @@ class SectionListCreateView(APIView):
         company = get_object_or_404(Company, pk=company_id, institution_id=institution_id)
         serializer = SectionSerializer(data=request.data, context={"company": company})
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         section = serializer.save(company=company)
         _invalidate_company_cache(institution_id)
         return success_response(
@@ -221,7 +293,7 @@ class SectionDetailView(APIView):
         section = get_object_or_404(Section, pk=section_id, company=company)
         serializer = SectionSerializer(section, data=request.data, context={"company": company})
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         serializer.save()
         return success_response(
             data=SectionSerializer(get_object_or_404(_section_qs(company), pk=section_id)).data,
@@ -234,7 +306,7 @@ class SectionDetailView(APIView):
         section = get_object_or_404(Section, pk=section_id, company=company)
         serializer = SectionSerializer(section, data=request.data, partial=True, context={"company": company})
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         serializer.save()
         return success_response(
             data=SectionSerializer(get_object_or_404(_section_qs(company), pk=section_id)).data,
@@ -274,7 +346,7 @@ class UploadPresignedUrlView(APIView):
         _get_section_scoped(company_id, section_id, institution_id)
         serializer = PresignedUploadRequestSerializer(data=request.data)
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         filename = serializer.validated_data["filename"]
         content_type = serializer.validated_data["content_type"]
         upload_type = serializer.validated_data["upload_type"]
@@ -295,14 +367,10 @@ class UploadConfirmView(APIView):
         section = _get_section_scoped(company_id, section_id, institution_id)
         serializer = ConfirmUploadSerializer(data=request.data)
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
-        upload = Upload.objects.create(
-            section=section,
-            upload_type=serializer.validated_data["upload_type"],
-            file_url=serializer.validated_data["file_key"],
-            original_filename=serializer.validated_data["original_filename"],
-            file_size_bytes=serializer.validated_data["file_size_bytes"],
-        )
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
+        upload, err = _confirm_verified_upload(section, Upload, serializer.validated_data)
+        if err:
+            return err
         _invalidate_company_cache(institution_id)
         return success_response(data=UploadSerializer(upload).data, status_code=201, message="Upload confirmed")
 
@@ -315,11 +383,12 @@ class UploadAddLinkView(APIView):
         section = _get_section_scoped(company_id, section_id, institution_id)
         serializer = AddLinkSerializer(data=request.data)
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         upload = Upload.objects.create(
             section=section,
             upload_type=serializer.validated_data["upload_type"],
             file_url=serializer.validated_data["file_url"],
+            scan_status="clean",  # no file bytes to scan — a URL, not storage-hosted content
         )
         return success_response(data=UploadSerializer(upload).data, status_code=201, message="Link added")
 
@@ -395,7 +464,7 @@ class StudentUploadListView(APIView):
         institution_id = getattr(request.user, "institution_id", None)
         company = get_object_or_404(Company, pk=company_id, institution_id=institution_id, is_published=True)
         section = get_object_or_404(Section, pk=section_id, company=company)
-        uploads = Upload.objects.filter(section=section).order_by("-created_at")
+        uploads = Upload.objects.filter(section=section, scan_status="clean").order_by("-created_at")
         paginator = StandardResultsPagination()
         page = paginator.paginate_queryset(uploads, request)
         return paginator.get_paginated_response(UploadSerializer(page, many=True).data)
@@ -465,7 +534,7 @@ class AdminModuleListCreateView(APIView):
         institution_id = getattr(request.user, "institution_id", None)
         serializer = ModuleSerializer(data=request.data)
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         from django.db.models import Max
         max_order = Module.objects.filter(institution_id=institution_id).aggregate(m=Max("order"))["m"] or 0
         serializer.save(order=max_order + 1, is_system=False, institution_id=institution_id)
@@ -494,7 +563,7 @@ class AdminModuleDetailView(APIView):
         module = self._get(pk, institution_id)
         serializer = ModuleSerializer(module, data=request.data, partial=True)
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         serializer.save()
         return success_response(data=serializer.data, message="Module updated.")
 
@@ -503,6 +572,11 @@ class AdminModuleDetailView(APIView):
         module = self._get(pk, institution_id)
         if module.is_system:
             return error_response(message="The system module cannot be deleted.", status_code=403)
+        if module.children.exists() or module.module_sections.exists():
+            return error_response(
+                message="Cannot delete a module that has sub-modules or sections. Remove them first.",
+                status_code=400,
+            )
         module.delete()
         return success_response(message="Module deleted.")
 
@@ -515,7 +589,7 @@ class AdminModuleChildrenView(APIView):
         parent = get_object_or_404(Module, pk=pk, institution_id=institution_id)
         serializer = ModuleSerializer(data=request.data)
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         from django.db.models import Max
         max_order = Module.objects.filter(parent=parent).aggregate(m=Max("order"))["m"] or 0
         serializer.save(parent=parent, order=max_order + 1, is_system=False, institution_id=institution_id)
@@ -530,7 +604,7 @@ class AdminModuleSectionListCreateView(APIView):
         module = get_object_or_404(Module, pk=pk, institution_id=institution_id)
         serializer = ModuleSectionSerializer(data=request.data)
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         from django.db.models import Max
         max_order = ModuleSection.objects.filter(module=module).aggregate(m=Max("order"))["m"] or 0
         serializer.save(module=module, order=max_order + 1)
@@ -552,7 +626,7 @@ class AdminModuleSectionDetailView(APIView):
         section = self._get(pk, institution_id)
         serializer = ModuleSectionSerializer(section, data=request.data, partial=True)
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         serializer.save()
         return success_response(data=serializer.data, message="Section updated.")
 
@@ -590,7 +664,7 @@ class AdminModuleUploadPresignedUrlView(APIView):
         _get_scoped_module_section(institution_id, module_id, section_id)
         serializer = PresignedUploadRequestSerializer(data=request.data)
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         filename = serializer.validated_data["filename"]
         content_type = serializer.validated_data["content_type"]
         upload_type = serializer.validated_data["upload_type"]
@@ -611,14 +685,10 @@ class AdminModuleUploadConfirmView(APIView):
         section = _get_scoped_module_section(institution_id, module_id, section_id)
         serializer = ConfirmUploadSerializer(data=request.data)
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
-        upload = ModuleUpload.objects.create(
-            section=section,
-            upload_type=serializer.validated_data["upload_type"],
-            file_url=serializer.validated_data["file_key"],
-            original_filename=serializer.validated_data["original_filename"],
-            file_size_bytes=serializer.validated_data["file_size_bytes"],
-        )
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
+        upload, err = _confirm_verified_upload(section, ModuleUpload, serializer.validated_data)
+        if err:
+            return err
         return success_response(data=ModuleUploadSerializer(upload).data, status_code=201, message="Upload confirmed.")
 
 
@@ -630,11 +700,12 @@ class AdminModuleUploadAddLinkView(APIView):
         section = _get_scoped_module_section(institution_id, module_id, section_id)
         serializer = AddLinkSerializer(data=request.data)
         if not serializer.is_valid():
-            return error_response(message="Validation failed", errors=serializer.errors, status_code=400)
+            return error_response(message=_first_serializer_error(serializer.errors), errors=serializer.errors, status_code=400)
         upload = ModuleUpload.objects.create(
             section=section,
             upload_type=serializer.validated_data["upload_type"],
             file_url=serializer.validated_data["file_url"],
+            scan_status="clean",  # no file bytes to scan — a URL, not storage-hosted content
         )
         return success_response(data=ModuleUploadSerializer(upload).data, status_code=201, message="Link added.")
 
@@ -707,7 +778,7 @@ class StudentModuleSectionView(APIView):
         section = get_object_or_404(ModuleSection, pk=section_pk, module=module)
         if not _check_publish_chain(module) or not section.is_published:
             return error_response(message="This section is not available.", status_code=404)
-        uploads = ModuleUpload.objects.filter(section=section).order_by("created_at")
+        uploads = ModuleUpload.objects.filter(section=section, scan_status="clean").order_by("created_at")
         return success_response(data={
             "module":  ModuleSerializer(module).data,
             "section": ModuleSectionSerializer(section).data,

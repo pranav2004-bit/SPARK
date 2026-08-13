@@ -6,7 +6,7 @@ from django.utils import timezone
 class Batch(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     batch_name = models.CharField(max_length=255, unique=True)
-    institution_id = models.UUIDField(null=True, blank=True, db_index=True)
+    institution_id = models.UUIDField(db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -25,7 +25,7 @@ class Student(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user_id = models.UUIDField(unique=True, db_index=True)
     student_id = models.CharField(max_length=100, unique=True, db_index=True)
-    institution_id = models.UUIDField(null=True, blank=True, db_index=True)
+    institution_id = models.UUIDField(db_index=True)
     fullname = models.CharField(max_length=255, blank=True, null=True)
     college_email_id = models.EmailField(blank=True, null=True)
     department = models.CharField(max_length=255)
@@ -84,7 +84,8 @@ class ScrollConfig(models.Model):
         ("right", "Right (LTR marquee)"),
     ]
 
-    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    # One config record per institution — no longer a global singleton.
+    institution_id = models.UUIDField(unique=True, db_index=True)
     is_enabled = models.BooleanField(default=False)
     direction = models.CharField(max_length=5, choices=DIRECTION_CHOICES, default="left")
     updated_at = models.DateTimeField(auto_now=True)
@@ -92,16 +93,13 @@ class ScrollConfig(models.Model):
     class Meta:
         db_table = "scroll_config"
 
-    def save(self, *args, **kwargs):
-        self.pk = 1
-        super().save(*args, **kwargs)
-
     def __str__(self):
-        return f"ScrollConfig (enabled={self.is_enabled}, direction={self.direction})"
+        return f"ScrollConfig institution={self.institution_id} enabled={self.is_enabled}"
 
 
 class ScrollUpdate(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    institution_id = models.UUIDField(db_index=True)
     text = models.CharField(max_length=300)
     link = models.CharField(max_length=500, blank=True, default="")
     show_new_badge = models.BooleanField(default=False)
@@ -113,7 +111,7 @@ class ScrollUpdate(models.Model):
         db_table = "scroll_updates"
         ordering = ["order", "created_at"]
         indexes = [
-            models.Index(fields=["order"], name="idx_scroll_updates_order"),
+            models.Index(fields=["institution_id", "order"], name="idx_scroll_updates_inst_order"),
         ]
 
     def __str__(self):

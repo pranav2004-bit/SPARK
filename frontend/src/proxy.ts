@@ -1,84 +1,92 @@
-import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-// Decode JWT payload without verification (edge runtime can't run crypto libs).
-// The actual token verification happens server-side at the Django backend on
-// every API call — this is only for client-side UX routing.
-function decodeJwtPayload(
-  token: string
-): { role?: string; is_profile_completed?: boolean } | null {
-  try {
-    const base64 = token.split(".")[1];
-    if (!base64) return null;
-    // atob is available in the edge runtime
-    const json = atob(base64.replace(/-/g, "+").replace(/_/g, "/"));
-    return JSON.parse(json);
-  } catch {
-    return null;
-  }
+// Which login page to show for each portal prefix
+const PORTAL_LOGIN: Record<string, string> = {
+  "/admin": "/admin/login",
+  "/students": "/students/login",
+  "/super-admin": "/super-admin/login",
+};
+
+// Where to land after successful auth, keyed by role
+const PORTAL_HOME: Record<string, string> = {
+  admin: "/admin/batch",
+  student: "/students/home",
+  super_admin: "/super-admin/overview",
+};
+
+// Path prefix each role is authorised to access
+const ROLE_PREFIX: Record<string, string> = {
+  admin: "/admin",
+  student: "/students",
+  super_admin: "/super-admin",
+};
+
+// Login pages — authenticated users are bounced away from these
+const LOGIN_PATHS = new Set([
+  "/login",
+  "/admin/login",
+  "/students/login",
+  "/student/login",
+  "/super-admin/login",
+]);
+
+export function isValidRole(role: string): role is "student" | "admin" | "super_admin" {
+  return role === "student" || role === "admin" || role === "super_admin";
 }
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Read stored auth from localStorage is NOT possible in proxy (edge runtime).
-  // We use a cookie set on login that mirrors the role — not httpOnly so JS can
-  // also read it, but used here for edge-level route protection.
-  const authCookie = request.cookies.get("aptlogic_role")?.value;
-  const accessCookie = request.cookies.get("aptlogic_access")?.value;
+  // Which portal (if any) owns this path?
+  const portalPrefix = Object.keys(PORTAL_LOGIN).find(
+    (prefix) => pathname === prefix || pathname.startsWith(prefix + "/")
+  );
 
-  const role = authCookie ?? null;
-  const payload = accessCookie ? decodeJwtPayload(accessCookie) : null;
-
-  // ── Admin routes ─────────────────────────────────────────────────────────────
-  if (pathname.startsWith("/admin")) {
-    if (pathname === "/admin/login") {
-      // Already logged in as admin → redirect to dashboard
-      if (role === "admin") {
-        return NextResponse.redirect(new URL("/admin/batch", request.url));
+  // ── Not a portal path → public page ───────────────────────────────────────
+  if (!portalPrefix) {
+    // Edge case: /student/login or /login — bounce authenticated users away
+    if (LOGIN_PATHS.has(pathname)) {
+      const roleCookie = request.cookies.get("aptlogic_role")?.value;
+      if (roleCookie && isValidRole(roleCookie)) {
+        return NextResponse.redirect(new URL(PORTAL_HOME[roleCookie], request.url));
       }
-      return NextResponse.next();
     }
-
-    // Protected admin route — must have admin role
-    if (role !== "admin") {
-      return NextResponse.redirect(new URL("/admin/login", request.url));
-    }
+    return NextResponse.next();
   }
 
-  // ── Student routes ───────────────────────────────────────────────────────────
-  if (pathname.startsWith("/students")) {
-    if (pathname === "/students/login") {
-      if (role === "student") {
-        const isComplete = payload?.is_profile_completed ?? true;
-        return NextResponse.redirect(
-          new URL(
-            isComplete ? "/students/home" : "/students/my_profile",
-            request.url
-          )
-        );
-      }
-      return NextResponse.next();
-    }
+  // ── Portal path ────────────────────────────────────────────────────────────
+  const roleCookie = request.cookies.get("aptlogic_role")?.value;
+  const role = roleCookie && isValidRole(roleCookie) ? roleCookie : null;
 
-    if (role !== "student") {
-      return NextResponse.redirect(new URL("/students/login", request.url));
+  // Portal login page
+  if (LOGIN_PATHS.has(pathname)) {
+    if (role) {
+      // Already authenticated → send to own portal home
+      return NextResponse.redirect(new URL(PORTAL_HOME[role], request.url));
     }
+    // Not authenticated → show the login page
+    return NextResponse.next();
+  }
 
-    // First-login guard
-    if (
-      pathname !== "/students/my_profile" &&
-      payload?.is_profile_completed === false
-    ) {
-      return NextResponse.redirect(
-        new URL("/students/my_profile", request.url)
-      );
-    }
+  // Portal non-login page — requires authentication
+  if (!role) {
+    return NextResponse.redirect(new URL(PORTAL_LOGIN[portalPrefix], request.url));
+  }
+
+  // Authenticated — verify this user belongs to the portal being accessed
+  if (!pathname.startsWith(ROLE_PREFIX[role])) {
+    return NextResponse.redirect(new URL(PORTAL_HOME[role], request.url));
   }
 
   return NextResponse.next();
 }
 
 export const config = {
-  matcher: ["/admin/:path*", "/students/:path*"],
+  matcher: [
+    // Exclude Next.js internals, API routes, and static assets
+    "/((?!_next/static|_next/image|favicon\\.ico|api/).*)",
+  ],
 };
+
+// Alias for test compatibility — tests import { middleware } from "../proxy"
+export { proxy as middleware };

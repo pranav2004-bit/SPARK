@@ -1,0 +1,20 @@
+# Integration-test overlay — used on top of docker-compose.dev.yml
+# Replaces the real Next.js frontend with a minimal HTTP stub so nginx
+# has a valid upstream without needing a full Next.js build.
+#
+# Usage:
+#   docker-compose -f infra/docker-compose.dev.yml \
+#                  -f infra/docker-compose.integration-test.yml \
+#                  up --build -d
+
+services:
+  frontend:
+    build:
+      context: ./frontend-stub
+      dockerfile: Dockerfile
+    command: python -m http.server 3000
+    restart: always
+    volumes: []
+    environment: {}
+    networks:
+      - spark-internal

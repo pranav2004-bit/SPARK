@@ -49,7 +49,7 @@ validate_service_env() {
     esac
 }
 
-echo "Validating environment files for all 6 SPARK services..."
+echo "Validating environment files for all 7 SPARK services..."
 echo ""
 
 validate_service_env "auth-service" \
@@ -77,6 +77,11 @@ validate_service_env "notification-service" \
 validate_service_env "analytics-service" \
     "$REPO_ROOT/services/analytics-service/.env" \
     "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" "SERVICE_KEY"
+
+validate_service_env "assessment-service" \
+    "$REPO_ROOT/services/assessment-service/.env" \
+    "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" \
+    "R2_ACCESS_KEY_ID" "R2_SECRET_ACCESS_KEY" "R2_BUCKET_NAME" "R2_CDN_DOMAIN"
 
 echo ""
 echo "─────────────────────────────────────────────────"

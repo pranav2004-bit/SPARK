@@ -43,7 +43,7 @@ export default function BatchPage() {
 
   const fetchBatches = useCallback(async () => {
     try {
-      const { data } = await api.get<ApiSuccess<Batch[]>>("/admin/batches/");
+      const { data } = await api.get<ApiSuccess<Batch[]>>("/users/batches/");
       setBatches(data.data);
     } catch (err) {
       toastError(getErrorMessage(err));
@@ -77,7 +77,7 @@ export default function BatchPage() {
     try {
       if (editBatch) {
         const res = await api.patch<ApiSuccess<Batch>>(
-          `/admin/batches/${editBatch.id}/`,
+          `/users/batches/${editBatch.id}/`,
           data
         );
         setBatches((prev) =>
@@ -85,7 +85,7 @@ export default function BatchPage() {
         );
         toastSuccess("Batch updated.");
       } else {
-        const res = await api.post<ApiSuccess<Batch>>("/admin/batches/", data);
+        const res = await api.post<ApiSuccess<Batch>>("/users/batches/", data);
         setBatches((prev) => [...prev, res.data.data]);
         toastSuccess("Batch created.");
       }
@@ -106,7 +106,7 @@ export default function BatchPage() {
     if (!deleteBatch) return;
     setDeleteLoading(true);
     try {
-      await api.delete(`/admin/batches/${deleteBatch.id}/`);
+      await api.delete(`/users/batches/${deleteBatch.id}/`);
       setBatches((prev) => prev.filter((b) => b.id !== deleteBatch.id));
       toastSuccess(`Batch "${deleteBatch.batch_name}" deleted.`);
       setDeleteBatch(null);
