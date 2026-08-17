@@ -10,6 +10,20 @@ interface ModalProps {
   title: string;
   children: React.ReactNode;
   maxWidth?: "sm" | "md" | "lg";
+  /** Opt-in — when true, clicking the backdrop does nothing (only the X
+   * button / Escape can close). Off by default: most of this component's
+   * many call sites are fine losing an accidental-click's worth of state,
+   * but a form with real in-progress, not-yet-saved data (e.g. the
+   * question editor) shouldn't let a stray click outside it silently
+   * discard everything typed. Escape and the X button are deliberately
+   * NOT covered by this — they still call onClose normally, so a caller
+   * that wants a "you have unsaved changes" confirmation on those too
+   * implements that inside its own onClose, not here. */
+  disableBackdropClose?: boolean;
+  /** Opt-in — rendered in the header between the title and the X button,
+   * e.g. a "Save changes" action a caller wants reachable from the top of
+   * the modal instead of (or in addition to) a footer button. */
+  headerAction?: React.ReactNode;
 }
 
 const maxWidthClass = {
@@ -24,6 +38,8 @@ export function Modal({
   title,
   children,
   maxWidth = "md",
+  disableBackdropClose = false,
+  headerAction,
 }: ModalProps) {
   const overlayRef    = useRef<HTMLDivElement>(null);
   const firstFocusRef = useRef<HTMLButtonElement>(null);
@@ -43,8 +59,16 @@ export function Modal({
 
     document.addEventListener("keydown", handleKeyDown);
     document.body.style.overflow = "hidden";
-    // Focus the close button only on initial open, not on every render.
-    setTimeout(() => firstFocusRef.current?.focus(), 50);
+    // Focus the close button only on initial open, not on every render —
+    // but only as a fallback. If something inside the modal already
+    // grabbed focus (e.g. an <Input autoFocus> like ConfirmDialog's
+    // type-to-confirm field), don't steal it away 50ms later; that
+    // silently yanked keyboard focus out from under anyone who started
+    // typing right as the modal opened.
+    setTimeout(() => {
+      if (overlayRef.current?.contains(document.activeElement)) return;
+      firstFocusRef.current?.focus();
+    }, 50);
 
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
@@ -66,7 +90,7 @@ export function Modal({
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-        onClick={onClose}
+        onClick={disableBackdropClose ? undefined : onClose}
         aria-hidden="true"
       />
 
@@ -87,14 +111,17 @@ export function Modal({
           >
             {title}
           </h2>
-          <button
-            ref={firstFocusRef}
-            onClick={onClose}
-            className="p-1 rounded-[var(--radius-sm)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-hover)] transition-colors"
-            aria-label="Close modal"
-          >
-            <X size={16} />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {headerAction}
+            <button
+              ref={firstFocusRef}
+              onClick={onClose}
+              className="p-1 rounded-[var(--radius-sm)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-hover)] transition-colors"
+              aria-label="Close modal"
+            >
+              <X size={16} />
+            </button>
+          </div>
         </div>
 
         {/* Body */}

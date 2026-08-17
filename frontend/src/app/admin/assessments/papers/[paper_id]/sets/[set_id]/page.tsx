@@ -66,17 +66,38 @@ function AutoTextarea({ minRows = 3, style, onChange, ...props }: React.Textarea
 }
 
 // ── Option row ────────────────────────────────────────────────────────────────
-function OptionRow({ option, mcqType, onSaveText, onToggle, onDelete }: {
+function OptionRow({ option, mcqType, onSaveText, onToggle, onDelete, onAddWithText }: {
   option: AssessmentQuestionOption;
   mcqType: AssessmentMcqType;
   onSaveText: (id: string, text: string) => Promise<void>;
   onToggle: (id: string, current: boolean) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  onAddWithText: (text: string) => Promise<void>;
 }) {
   const [text, setText] = useState(option.text);
   const [busy, setBusy] = useState(false);
   const isCorrect = !!option.is_correct;
   useEffect(() => { setText(option.text); }, [option.text]);
+
+  // Pasting multiple lines spills each line into a new option instead of
+  // cramming them all into this one field — same pattern as practice-service's
+  // question editor (practice/questions/[question_id]/page.tsx).
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const pasted = e.clipboardData.getData("text");
+    const lines = pasted.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+    if (lines.length <= 1) return;
+    e.preventDefault();
+    setText(lines[0]);
+    setBusy(true);
+    try {
+      await onSaveText(option.id, lines[0]);
+      for (const line of lines.slice(1)) {
+        await onAddWithText(line);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="flex items-start gap-3 p-3 rounded-[var(--radius-md)] transition-colors"
@@ -91,6 +112,7 @@ function OptionRow({ option, mcqType, onSaveText, onToggle, onDelete }: {
           className="w-full text-sm rounded-[var(--radius-sm)] px-2 py-1 outline-none leading-relaxed"
           style={{ background: "transparent", border: "1px solid transparent", color: T.text }}
           onChange={e => setText(e.target.value)}
+          onPaste={handlePaste}
           onBlur={async () => { if (text === option.text) return; setBusy(true); try { await onSaveText(option.id, text); } finally { setBusy(false); } }}
         />
       </div>
@@ -184,6 +206,24 @@ function QuestionEditorModal({ isOpen, onClose, question, setId, onCreated, onUp
   const [saving, setSaving] = useState(false);
   const [options, setOptions] = useState<AssessmentQuestionOption[]>([]);
   const [addingOpt, setAddingOpt] = useState(false);
+  // Shown only while creating a brand-new question (current === null) —
+  // lets the admin type option text (and mark one correct) right in the
+  // same form instead of a separate "Add Option" click immediately after
+  // creating. A list, not a single field, so pasting multiple lines can
+  // spill into multiple pending options (see handlePendingOptionPaste)
+  // the same way OptionRow already does for an already-created question's
+  // options — before this, Option A was a single field with no paste
+  // handler at all, so a multi-line paste just landed as one giant option
+  // instead of splitting. Always has >= 1 row; "Create Question" is gated
+  // on at least one having text AND one marked correct (see
+  // canCreateQuestion below) — a question with zero options or no correct
+  // answer isn't assignable-ready anyway (get_assignment_readiness_blockers
+  // would reject it later), so this just surfaces that requirement at
+  // creation time instead of after.
+  const [pendingOptions, setPendingOptions] = useState<{ text: string; correct: boolean }[]>([
+    { text: "", correct: false },
+  ]);
+  const [showExitConfirm, setShowExitConfirm] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -195,6 +235,8 @@ function QuestionEditorModal({ isOpen, onClose, question, setId, onCreated, onUp
     setMcqType(question?.mcq_type ?? "single");
     setMarks(question?.marks ?? 1);
     setImgState("idle");
+    setPendingOptions([{ text: "", correct: false }]);
+    setShowExitConfirm(false);
     if (question) {
       api.get<ApiSuccess<{ question: AssessmentQuestion; options: AssessmentQuestionOption[] }>>(
         `/assessments/admin/questions/${question.id}/`
@@ -206,13 +248,20 @@ function QuestionEditorModal({ isOpen, onClose, question, setId, onCreated, onUp
   }, [isOpen, question]);
 
   async function handleImageSelect(file: File) {
-    if (!current) { toast.error("Save the question first, then add an image."); return; }
     if (!ALLOWED_IMAGE_TYPES.includes(file.type)) { toast.error(`Unsupported format. Allowed: ${ALLOWED_IMAGE_LABEL}`); return; }
     if (file.size > MAX_IMAGE_BYTES) { toast.error("Image exceeds 5 MB limit."); return; }
     setImgState("uploading");
     setPreviewUrl(URL.createObjectURL(file));
     try {
-      const presignRes = await api.post(`/assessments/admin/questions/${current.id}/image-presign/`, {
+      // Before the question exists yet, presign against the set instead —
+      // lets content_type='image'/'both' attach an image on the question's
+      // very first save, instead of requiring a save-then-upload-then-save
+      // round trip (previously the only way, and outright impossible for
+      // 'both': it can't save without an image already present).
+      const presignUrl = current
+        ? `/assessments/admin/questions/${current.id}/image-presign/`
+        : `/assessments/admin/sets/${setId}/image-presign/`;
+      const presignRes = await api.post(presignUrl, {
         filename: file.name, content_type: file.type,
       });
       const { upload_url, file_key, cdn_url } = presignRes.data.data;
@@ -232,7 +281,49 @@ function QuestionEditorModal({ isOpen, onClose, question, setId, onCreated, onUp
     setImageKey(""); setPreviewUrl(null); setImgState("idle");
   }
 
-  async function handleSave() {
+  // ── Pending options (pre-creation) ────────────────────────────────────────
+  function setPendingOptionText(index: number, value: string) {
+    setPendingOptions(prev => prev.map((o, i) => i === index ? { ...o, text: value } : o));
+  }
+
+  // Mirrors handleOptionToggle's single-correct exclusivity (below, for an
+  // already-created question) — without this, "Single Correct" mode let
+  // every pending row stay checked since each toggle only touched its own
+  // row, with nothing deselecting the others.
+  function togglePendingOptionCorrect(index: number) {
+    setPendingOptions(prev => {
+      const turningOn = !prev[index].correct;
+      return prev.map((o, i) => {
+        if (i === index) return { ...o, correct: turningOn };
+        if (mcqType === "single" && turningOn) return { ...o, correct: false };
+        return o;
+      });
+    });
+  }
+
+  function removePendingOption(index: number) {
+    setPendingOptions(prev => prev.length <= 1 ? prev : prev.filter((_, i) => i !== index));
+  }
+
+  // Same behavior as OptionRow's onPaste (below, for an already-created
+  // question) — pasting multiple lines spills each extra line into a new
+  // pending row instead of cramming them all into one option's text.
+  // Before this existed, the pre-creation "Option A" field had no paste
+  // handler at all, so a multi-line paste just landed as one giant option.
+  function handlePendingOptionPaste(index: number, e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const pasted = e.clipboardData.getData("text");
+    const lines = pasted.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+    if (lines.length <= 1) return;
+    e.preventDefault();
+    setPendingOptions(prev => {
+      const next = [...prev];
+      next[index] = { ...next[index], text: lines[0] };
+      next.splice(index + 1, 0, ...lines.slice(1).map(text => ({ text, correct: false })));
+      return next;
+    });
+  }
+
+  async function handleSave(): Promise<boolean> {
     setSaving(true);
     try {
       const payload = {
@@ -246,15 +337,44 @@ function QuestionEditorModal({ isOpen, onClose, question, setId, onCreated, onUp
         const res = await api.post<ApiSuccess<AssessmentQuestion>>(`/assessments/admin/sets/${setId}/questions/`, payload);
         setCurrent(res.data.data);
         onCreated(res.data.data);
-        toast.success("Question created — now add answer options below.");
+
+        // Every non-blank pending option (Option A, plus any extra rows a
+        // multi-line paste spilled into) is created right alongside the
+        // question, in order — sequential (not Promise.all) so the
+        // backend's auto-label-by-count logic assigns A, B, C… correctly
+        // instead of a race where every request sees the same pre-insert
+        // count. A failure partway through doesn't roll back the question
+        // or the options already created — those are real and kept —
+        // it's reported separately rather than folded into the outer catch.
+        const toCreate = pendingOptions.filter(o => o.text.trim());
+        if (toCreate.length) {
+          const created: AssessmentQuestionOption[] = [];
+          try {
+            for (const opt of toCreate) {
+              const optRes = await api.post<ApiSuccess<AssessmentQuestionOption>>(
+                `/assessments/admin/questions/${res.data.data.id}/options/`,
+                { text: opt.text.trim(), is_correct: opt.correct }
+              );
+              created.push(optRes.data.data);
+            }
+          } catch (optErr) {
+            toast.error(getErrorMessage(optErr));
+          } finally {
+            setOptions(created);
+          }
+        }
+
+        toast.success("Question created.");
       } else {
         const res = await api.patch<ApiSuccess<AssessmentQuestion>>(`/assessments/admin/questions/${current.id}/`, payload);
         setCurrent(res.data.data);
         onUpdated(res.data.data);
         toast.success("Question saved.");
       }
+      return true;
     } catch (err) {
       toast.error(getErrorMessage(err));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -272,12 +392,61 @@ function QuestionEditorModal({ isOpen, onClose, question, setId, onCreated, onUp
     finally { setAddingOpt(false); }
   }
 
+  // Used by OptionRow's paste handler — creates a new option pre-filled with text.
+  async function handleAddOptionWithText(text: string) {
+    if (!current) return;
+    try {
+      const res = await api.post<ApiSuccess<AssessmentQuestionOption>>(`/assessments/admin/questions/${current.id}/options/`, {
+        text, is_correct: false,
+      });
+      setOptions(prev => [...prev, res.data.data]);
+    } catch (err) { toast.error(getErrorMessage(err)); }
+  }
+
   async function handleOptionSaveText(id: string, text: string) {
     if (!current) return;
     try {
       const res = await api.patch<ApiSuccess<AssessmentQuestionOption>>(`/assessments/admin/questions/${current.id}/options/${id}/`, { text });
       setOptions(prev => prev.map(o => o.id === id ? res.data.data : o));
     } catch (err) { toast.error(getErrorMessage(err)); }
+  }
+
+  // Real bug fixed here (live report, 2026-08-14): the "Answer Type" toggle
+  // used to only call setMcqType(t) — pure local state, never persisted
+  // until "Save Question" was clicked. But marking an option correct
+  // (handleOptionToggle below) PATCHes immediately and is validated
+  // server-side against the question's *saved* mcq_type — so clicking
+  // "Multiple Correct" then immediately checking a 2nd option failed with
+  // a confusing "single-choice" error, because the backend still thought
+  // it was single-choice. Persisting the mcq_type change immediately (for
+  // an already-created question) closes that gap instead of relying on
+  // the admin knowing to click Save Question first.
+  async function handleMcqTypeChange(t: AssessmentMcqType) {
+    const previous = mcqType;
+    setMcqType(t);
+    if (!current) {
+      // Switching a not-yet-created question to Single Correct: collapse
+      // any pending rows checked while it was Multiple Correct down to
+      // just the first one, so the same exclusivity holds no matter which
+      // order the admin set answer type vs. correctness in.
+      if (t === "single") {
+        setPendingOptions(prev => {
+          const firstCorrect = prev.findIndex(o => o.correct);
+          if (firstCorrect === -1) return prev;
+          return prev.map((o, i) => ({ ...o, correct: i === firstCorrect }));
+        });
+      }
+      return;
+    }
+    if (current.mcq_type === t) return;
+    try {
+      const res = await api.patch<ApiSuccess<AssessmentQuestion>>(`/assessments/admin/questions/${current.id}/`, { mcq_type: t });
+      setCurrent(res.data.data);
+      onUpdated(res.data.data);
+    } catch (err) {
+      setMcqType(previous);
+      toast.error(getErrorMessage(err));
+    }
   }
 
   async function handleOptionToggle(id: string, currentlyCorrect: boolean) {
@@ -305,8 +474,85 @@ function QuestionEditorModal({ isOpen, onClose, question, setId, onCreated, onUp
   const showImage = contentType === "image" || contentType === "both";
   const correctCount = options.filter(o => o.is_correct).length;
 
+  const filledPendingOptions = pendingOptions.filter(o => o.text.trim());
+
+  // Gates "Create Question" — question content, marks, an option, and that
+  // option marked correct. Mirrors what get_assignment_readiness_blockers
+  // would reject later anyway (content completeness, correct-answer
+  // count) — this just surfaces it at creation time instead of after.
+  const hasRequiredContent = (!showText || text.trim().length > 0) && (!showImage || !!imageKey);
+  const canCreateQuestion =
+    !current && hasRequiredContent && marks >= 1
+    && filledPendingOptions.length > 0 && filledPendingOptions.some(o => o.correct);
+
+  // True only while creating a brand-new question with something typed
+  // that hasn't been saved yet — an already-created question (current set)
+  // has nothing to lose by closing, since it's already persisted.
+  const hasUnsavedNewQuestion = !current && (text.trim().length > 0 || !!imageKey || filledPendingOptions.length > 0);
+
+  // For an already-created question, mcq_type and every option's text/
+  // correctness already auto-save on change (handleMcqTypeChange,
+  // handleOptionToggle, handleOptionSaveText all PATCH immediately) — only
+  // these four fields sit in local state until "Save Question" is clicked,
+  // so they're the only ones that make the question "dirty".
+  const isEditDirty = !!current && (
+    text !== (current.question_text ?? "") ||
+    contentType !== current.question_content_type ||
+    marks !== current.marks ||
+    imageKey !== (current.question_image_key ?? "")
+  );
+
+  const canSaveExisting = !!current && hasRequiredContent && marks >= 1 && isEditDirty;
+  const canSubmitQuestion = current ? canSaveExisting : canCreateQuestion;
+  const hasUnsavedChanges = current ? isEditDirty : hasUnsavedNewQuestion;
+
+  function handleAttemptClose() {
+    if (hasUnsavedChanges) setShowExitConfirm(true);
+    else onClose();
+  }
+
+  async function handleSaveFromExitConfirm() {
+    const ok = await handleSave();
+    setShowExitConfirm(false);
+    if (ok) onClose();
+  }
+
+  // Actually throws away the unsaved edits — "Cancel" on this dialog only
+  // dismisses it and returns to the still-open, still-unsaved form, which
+  // isn't a way out for an admin who decided not to save.
+  function handleDiscardQuestion() {
+    setShowExitConfirm(false);
+    onClose();
+  }
+
+  // Closes on a successful save either way — matches the Set-label modal's
+  // header Save button, which always closes once the save lands. "Save
+  // Question" now only lights up once something's actually changed
+  // (canSubmitQuestion / isEditDirty), so a click always means a real,
+  // intentional save, not a leftover click with nothing to persist.
+  async function handleSaveClick() {
+    const ok = await handleSave();
+    if (ok) onClose();
+  }
+
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title={current ? `Question ${current.question_number}` : "New Question"} maxWidth="lg">
+    <>
+    <Modal
+      isOpen={isOpen} onClose={handleAttemptClose}
+      title={current ? `Question ${current.question_number}` : "New Question"}
+      maxWidth="lg" disableBackdropClose
+      headerAction={
+        <Button
+          variant="primary" size="sm" onClick={handleSaveClick} loading={saving}
+          disabled={!canSubmitQuestion}
+          title={!canSubmitQuestion
+            ? (current ? "Change something to enable saving." : "Add the question content, marks, an option, and mark it correct first.")
+            : undefined}
+        >
+          {current ? "Save Question" : "Create Question"}
+        </Button>
+      }
+    >
       <div className="space-y-5">
 
         {/* Content type + marks */}
@@ -342,12 +588,8 @@ function QuestionEditorModal({ isOpen, onClose, question, setId, onCreated, onUp
         {showImage && (
           <div>
             <label className="block text-xs font-semibold mb-1.5" style={{ color: T.muted }}>Question Image</label>
-            {!current ? (
-              <p className="text-xs italic" style={{ color: T.subtle }}>Save the question first to enable image upload.</p>
-            ) : (
-              <ImageUploadZone previewUrl={previewUrl} imageKey={imageKey} uploadState={imgState}
-                fileInputRef={fileInputRef} onSelect={handleImageSelect} onRemove={handleImageRemove} />
-            )}
+            <ImageUploadZone previewUrl={previewUrl} imageKey={imageKey} uploadState={imgState}
+              fileInputRef={fileInputRef} onSelect={handleImageSelect} onRemove={handleImageRemove} />
           </div>
         )}
 
@@ -356,7 +598,7 @@ function QuestionEditorModal({ isOpen, onClose, question, setId, onCreated, onUp
           <p className="text-xs font-semibold mb-2" style={{ color: T.muted }}>Answer Type</p>
           <div className="flex gap-2">
             {(["single", "multiple"] as AssessmentMcqType[]).map(t => (
-              <button key={t} type="button" onClick={() => setMcqType(t)}
+              <button key={t} type="button" onClick={() => handleMcqTypeChange(t)}
                 className="flex-1 py-2 rounded-[var(--radius-md)] text-sm font-semibold border transition-all"
                 style={mcqType === t
                   ? { background: "#EFF6FF", color: "#2563EB", borderColor: "#BFDBFE" }
@@ -367,11 +609,58 @@ function QuestionEditorModal({ isOpen, onClose, question, setId, onCreated, onUp
           </div>
         </div>
 
-        <div className="flex justify-end">
-          <Button variant="primary" size="sm" onClick={handleSave} loading={saving}>
-            {current ? "Save Question" : "Create Question"}
-          </Button>
-        </div>
+        {/* Pending options — only before the question exists. Once created,
+            this is replaced by the full Answer Options editor below (which
+            already includes everything entered here), so it's never shown
+            alongside it. At least one row required, and at least one must
+            be marked correct, to enable Create Question below — every
+            question needs at least one right answer. Pasting multiple
+            lines into any row's text splits into more rows (same behavior
+            as OptionRow, below, for an already-created question). */}
+        {!current && (
+          <div>
+            <label className="block text-xs font-semibold mb-1.5" style={{ color: T.muted }}>
+              Answer Options <span className="font-normal" style={{ color: T.subtle }}>(required — mark at least one correct with the check button; add more after creating)</span>
+            </label>
+            <div className="space-y-2">
+              {pendingOptions.map((opt, i) => (
+                <div key={i} className="flex items-start gap-3 p-3 rounded-[var(--radius-md)]"
+                  style={{ background: opt.correct ? "#F0FDF4" : T.surface, border: `1.5px solid ${opt.correct ? "#BBF7D0" : T.border}` }}>
+                  <span className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold mt-0.5"
+                    style={{ background: opt.correct ? "#16A34A" : T.border, color: opt.correct ? "#fff" : T.muted }}>
+                    {String.fromCharCode(65 + i)}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <AutoTextarea
+                      value={opt.text} minRows={1} placeholder="Option text…"
+                      className="w-full text-sm rounded-[var(--radius-sm)] px-2.5 py-1.5 outline-none leading-relaxed focus:ring-1"
+                      style={{ background: T.white, border: `1px solid ${T.border}`, color: T.text }}
+                      onChange={e => setPendingOptionText(i, e.target.value)}
+                      onPaste={e => handlePendingOptionPaste(i, e)}
+                    />
+                  </div>
+                  <button type="button"
+                    title={opt.correct ? "Mark as incorrect" : "Mark as correct"}
+                    onClick={() => togglePendingOptionCorrect(i)}
+                    className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center transition-all mt-0.5"
+                    style={{ background: opt.correct ? "#16A34A" : T.surface, border: `1.5px solid ${opt.correct ? "#16A34A" : T.border}`, color: opt.correct ? "#fff" : T.subtle }}
+                  >
+                    <Check size={12} />
+                  </button>
+                  {pendingOptions.length > 1 && (
+                    <button type="button" title="Remove option"
+                      onClick={() => removePendingOption(i)}
+                      className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center transition-colors mt-0.5"
+                      style={{ background: T.surface, border: `1.5px solid ${T.border}`, color: T.subtle }}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Options editor — only once the question exists */}
         {current && (
@@ -393,7 +682,8 @@ function QuestionEditorModal({ isOpen, onClose, question, setId, onCreated, onUp
               <div className="space-y-2">
                 {options.map(opt => (
                   <OptionRow key={opt.id} option={opt} mcqType={mcqType}
-                    onSaveText={handleOptionSaveText} onToggle={handleOptionToggle} onDelete={handleOptionDelete} />
+                    onSaveText={handleOptionSaveText} onToggle={handleOptionToggle} onDelete={handleOptionDelete}
+                    onAddWithText={handleAddOptionWithText} />
                 ))}
               </div>
             )}
@@ -406,6 +696,37 @@ function QuestionEditorModal({ isOpen, onClose, question, setId, onCreated, onUp
         )}
       </div>
     </Modal>
+
+    {/* Closing (X / Escape) with unsaved details — for a new question, that's
+        anything typed but not yet created; for an already-created one, any
+        local edit that hasn't been through "Save Question" (mcq_type and
+        option changes auto-save, so they don't count — see isEditDirty).
+        Offers finishing it right now instead of silently discarding it. The
+        confirm button is disabled under the same rule as the header button;
+        if that's not met yet, "Keep Editing" or "Discard" are the only ways
+        forward. */}
+    <ConfirmDialog
+      isOpen={showExitConfirm}
+      onClose={() => setShowExitConfirm(false)}
+      onConfirm={handleSaveFromExitConfirm}
+      title="Unsaved changes"
+      message={
+        current
+          ? (canSaveExisting
+              ? "You've made changes to this question but haven't saved them yet. Leaving now will discard those changes."
+              : "You've made changes to this question but haven't saved them yet. Leaving now will discard those changes. Finish the required fields (content, marks) to save instead of losing them.")
+          : (canCreateQuestion
+              ? "You've entered details for a new question but haven't created it yet. Leaving now will discard everything you've typed."
+              : "You've entered details for a new question but haven't created it yet. Leaving now will discard everything you've typed. Finish the required fields (content, marks, one option marked correct) to create it instead of losing it.")
+      }
+      confirmLabel={current ? "Save Question" : "Create Question"}
+      confirmVariant="primary"
+      confirmDisabled={!canSubmitQuestion}
+      loading={saving}
+      secondaryActionLabel="Discard"
+      onSecondaryAction={handleDiscardQuestion}
+    />
+    </>
   );
 }
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { Clock, WifiOff, CheckCircle2, Maximize, ShieldAlert } from "lucide-react";
+import { Clock, WifiOff, CheckCircle2, Maximize, ShieldAlert, AlertTriangle } from "lucide-react";
 import { StudentLayout } from "@/components/layout/StudentLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Button } from "@/components/ui/Button";
@@ -27,15 +27,32 @@ function formatCountdown(totalSeconds: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+// Mirrors scoring.py's TAB_SWITCH_THRESHOLD / FULLSCREEN_EXIT_THRESHOLD
+// exactly (backend: "> 5" and "> 3", i.e. the 6th switch / 4th exit trips
+// it) — kept in sync by convention since neither constant is exposed via
+// any API. This is a client-side UX consequence layered on top of the
+// server's own malpractice flagging, not a replacement for it: the server
+// computes malpractice_flag independently, from its own logged event
+// counts, at finalize time, regardless of whether this lockout ever fires.
+const TAB_SWITCH_LIMIT = 5;
+const FULLSCREEN_EXIT_LIMIT = 3;
+const LOCKOUT_COUNTDOWN_SECONDS = 5;
+
 export default function StudentExamPage() {
   const { assignment_id } = useParams<{ assignment_id: string }>();
   const router = useRouter();
   const toast = useToast();
 
+  // ── Entry gate — exam doesn't start (no start-session call, no server
+  // timer) until the student has actually entered fullscreen. ─────────────
+  const [examEntered, setExamEntered] = useState(false);
+  const [enteringFullscreen, setEnteringFullscreen] = useState(false);
+  const [fullscreenError, setFullscreenError] = useState("");
+
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionStatus, setSessionStatus] = useState<string | null>(null);
   const [questions, setQuestions] = useState<StudentQuestion[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<string, string[]>>({}); // questionId -> selected
   const [savingState, setSavingState] = useState<Record<string, "saving" | "saved" | "queued">>({});
@@ -46,10 +63,14 @@ export default function StudentExamPage() {
 
   const { saveAnswer, isReconnecting } = useOfflineAnswerQueue(sessionId ?? "");
   const { secondsRemaining, isSyncFailing } = useServerTimeSync();
-  const { isFullscreen, requestFullscreen } = useActivityCapture(
-    sessionStatus === "IN_PROGRESS" ? sessionId : null
-  );
+  const {
+    isFullscreen, requestFullscreen, tabSwitchCount, fullscreenExitCount, screenshotAttempts,
+  } = useActivityCapture(sessionStatus === "IN_PROGRESS" ? sessionId : null);
   const [fullscreenPromptDismissed, setFullscreenPromptDismissed] = useState(false);
+
+  // Reached once either count crosses its limit — drives the blocking,
+  // non-dismissable "auto-submitting" overlay with its own countdown.
+  const [lockout, setLockout] = useState<{ label: string; secondsLeft: number } | null>(null);
 
   // Re-arm the prompt every time fullscreen is (re-)entered, so exiting
   // again later shows it fresh rather than staying dismissed forever
@@ -58,11 +79,57 @@ export default function StudentExamPage() {
     if (isFullscreen) setFullscreenPromptDismissed(false);
   }, [isFullscreen]);
 
-  // ── Load: start-session (idempotent) → fetch questions ───────────────────
+  // Warn before an accidental tab close / reload / back-navigation while an
+  // exam is actually in progress — answers themselves are never lost
+  // (useOfflineAnswerQueue persists them locally and syncs on reconnect),
+  // but a student who isn't sure whether their last click was saved
+  // shouldn't be one misclick away from losing their place mid-exam.
+  // Browsers ignore the custom message and show their own generic prompt;
+  // setting returnValue is what actually triggers that native dialog.
   useEffect(() => {
+    if (sessionStatus !== "IN_PROGRESS") return;
+    function handleBeforeUnload(e: BeforeUnloadEvent) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [sessionStatus]);
+
+  // Clicking "Enter Fullscreen & Start Exam" on the gate screen below.
+  // Only on success does examEntered flip true, which is what lets the
+  // load() effect fire and call start-session — so the server-side timer
+  // (computed at session creation) genuinely doesn't start until the
+  // student is in fullscreen. requestFullscreen can fail/reject (denied
+  // permission, unsupported browser, iframe restrictions) — that's handled
+  // as an explicit error state with its own "continue without" escape
+  // hatch below, rather than silently swallowed, so a student on a
+  // genuinely unsupported device isn't permanently locked out.
+  async function handleEnterExam() {
+    setFullscreenError("");
+    setEnteringFullscreen(true);
+    try {
+      await requestFullscreen();
+      setExamEntered(true);
+    } catch {
+      setFullscreenError(
+        "Fullscreen couldn't be enabled on this device or browser. You can continue without it, " +
+        "but tab switches, window changes, and fullscreen exits are still monitored and limited."
+      );
+    } finally {
+      setEnteringFullscreen(false);
+    }
+  }
+
+  // ── Load: start-session (idempotent) → fetch questions ───────────────────
+  // Gated on examEntered — never fires until the fullscreen gate above has
+  // been passed (or explicitly bypassed via its escape hatch).
+  useEffect(() => {
+    if (!examEntered) return;
     let cancelled = false;
 
     async function load() {
+      setLoading(true);
       try {
         const startRes = await api.post<ApiSuccess<StudentStartSessionResponse>>(
           `/assessments/student/assignments/${assignment_id}/start-session/`
@@ -97,7 +164,7 @@ export default function StudentExamPage() {
     load();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assignment_id]);
+  }, [assignment_id, examEntered]);
 
   const activeQuestion = questions[activeIndex] as StudentQuestion | undefined;
 
@@ -124,8 +191,19 @@ export default function StudentExamPage() {
     });
   }, [saveAnswer]);
 
+  // A ref, not the `submitting` state, guards re-entrancy — state updates
+  // are batched/async, so two callers landing in the same tick (e.g. the
+  // countdown timer hitting 0 right as the lockout overlay also reaches 0)
+  // could both pass a `submitting` check before either had actually set it.
+  // The backend's own race-safe finalize already makes a genuine double
+  // POST harmless (verified earlier), but this avoids firing the second
+  // network call — and the resulting "already submitted" error toast —
+  // at all.
+  const submitInFlight = useRef(false);
+
   const handleSubmit = useCallback(async () => {
-    if (!sessionId) return;
+    if (!sessionId || submitInFlight.current) return;
+    submitInFlight.current = true;
     setSubmitting(true);
     try {
       const res = await api.post<ApiSuccess<StudentSubmitResponse>>(
@@ -138,8 +216,66 @@ export default function StudentExamPage() {
     } finally {
       setSubmitting(false);
       setConfirmSubmit(false);
+      submitInFlight.current = false;
     }
   }, [sessionId, toast]);
+
+  // ── Tab-switch / fullscreen-exit graduated warnings + hard lockout ──────
+  // Every occurrence below the limit shows a warning toast naming how many
+  // are left; crossing the limit (same boundary as the backend's own
+  // malpractice check — see TAB_SWITCH_LIMIT/FULLSCREEN_EXIT_LIMIT above)
+  // starts the lockout overlay instead. setLockout(prev => prev ?? ...)
+  // guards against a second trigger (e.g. both counts crossing near
+  // simultaneously) restarting an already-running countdown.
+  useEffect(() => {
+    if (tabSwitchCount === 0 || sessionStatus !== "IN_PROGRESS") return;
+    if (tabSwitchCount > TAB_SWITCH_LIMIT) {
+      setLockout(prev => prev ?? { label: "tab switches", secondsLeft: LOCKOUT_COUNTDOWN_SECONDS });
+    } else {
+      toast.warning(
+        `Tab switch detected — warning ${tabSwitchCount} of ${TAB_SWITCH_LIMIT}. ` +
+        `Reaching the limit will auto-submit your exam.`
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabSwitchCount]);
+
+  useEffect(() => {
+    if (fullscreenExitCount === 0 || sessionStatus !== "IN_PROGRESS") return;
+    if (fullscreenExitCount > FULLSCREEN_EXIT_LIMIT) {
+      setLockout(prev => prev ?? { label: "fullscreen exits", secondsLeft: LOCKOUT_COUNTDOWN_SECONDS });
+    } else {
+      toast.warning(
+        `Fullscreen exit detected — warning ${fullscreenExitCount} of ${FULLSCREEN_EXIT_LIMIT}. ` +
+        `Reaching the limit will auto-submit your exam.`
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fullscreenExitCount]);
+
+  // Best-effort only — see useActivityCapture's own doc comment for why a
+  // browser can never reliably detect a screenshot in general. This is
+  // strictly a UX warning, not tied to the lockout mechanism above.
+  useEffect(() => {
+    if (screenshotAttempts === 0 || sessionStatus !== "IN_PROGRESS") return;
+    toast.warning("Screenshot attempt detected. Screenshots are not permitted during this exam.");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screenshotAttempts]);
+
+  // Ticks the lockout overlay's countdown down to 0, then actually submits
+  // (reusing the exact same submit path a manual click uses) and redirects
+  // to the student's assessments home once that call settles.
+  useEffect(() => {
+    if (!lockout) return;
+    if (lockout.secondsLeft <= 0) {
+      handleSubmit().finally(() => router.push("/students/assessments"));
+      return;
+    }
+    const t = setTimeout(() => {
+      setLockout(l => (l ? { ...l, secondsLeft: l.secondsLeft - 1 } : l));
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [lockout, handleSubmit, router]);
 
   // Auto-submit attempt once the local countdown hits 0 — the server sweep
   // will catch it within ~20s regardless, but attempting an immediate
@@ -156,6 +292,48 @@ export default function StudentExamPage() {
     () => questions.filter(q => (answers[q.id]?.length ?? 0) > 0).length,
     [questions, answers]
   );
+
+  // ── Entry gate screen — shown before start-session is ever called ───────
+  if (!examEntered) {
+    return (
+      <StudentLayout>
+        <PageWrapper className="max-w-lg py-16">
+          <div className="text-center">
+            <div className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5"
+              style={{ background: "#EFF6FF" }}>
+              <Maximize size={28} style={{ color: "#2563EB" }} />
+            </div>
+            <h1 className="text-xl font-bold mb-2" style={{ color: "var(--color-text)" }}>
+              Continue to your exam
+            </h1>
+            <p className="text-sm mb-6 leading-relaxed" style={{ color: "var(--color-text-muted)" }}>
+              This exam runs in fullscreen. If this is your first time opening it, your timer starts
+              the moment you enter fullscreen — not before. Tab switches, fullscreen exits, and
+              copy/paste are monitored and limited for the rest of the exam.
+            </p>
+            {fullscreenError && (
+              <p className="text-xs mb-4 leading-relaxed" style={{ color: "var(--color-danger)" }}>
+                {fullscreenError}
+              </p>
+            )}
+            <div className="flex flex-col items-center gap-2.5">
+              <Button
+                variant="primary" leftIcon={<Maximize size={15} />}
+                loading={enteringFullscreen} onClick={handleEnterExam}
+              >
+                Enter Fullscreen & Continue
+              </Button>
+              {fullscreenError && (
+                <Button variant="secondary" size="sm" onClick={() => setExamEntered(true)}>
+                  Continue without fullscreen
+                </Button>
+              )}
+            </div>
+          </div>
+        </PageWrapper>
+      </StudentLayout>
+    );
+  }
 
   if (loading) return <GlobalLoader />;
 
@@ -176,6 +354,11 @@ export default function StudentExamPage() {
             {finalResult && finalResult.score !== null && (
               <p className="text-sm mb-6" style={{ color: "var(--color-text-muted)" }}>
                 You scored <strong>{finalResult.score}</strong> out of <strong>{finalResult.total_marks}</strong>.
+              </p>
+            )}
+            {finalResult && finalResult.results_visible === false && (
+              <p className="text-sm mb-6" style={{ color: "var(--color-text-subtle)" }}>
+                Your result will be shared by your instructor.
               </p>
             )}
             <Button variant="primary" onClick={() => router.push("/students/assessments")}>
@@ -224,7 +407,10 @@ export default function StudentExamPage() {
           </div>
         </div>
 
-        {/* ── Fullscreen nudge — UX prompt, not a hard block ────────────── */}
+        {/* ── Fullscreen nudge — shown again if the student exits fullscreen
+            mid-exam. Not a hard block on its own (they get graduated
+            warnings first, per the effect above), but exits do count toward
+            the same limit that triggers the lockout overlay below. ────── */}
         {!isFullscreen && !fullscreenPromptDismissed && (
           <div
             className="flex items-start gap-3 px-4 py-3.5 rounded-[var(--radius-lg)] mb-5"
@@ -233,18 +419,18 @@ export default function StudentExamPage() {
             <ShieldAlert size={18} style={{ color: "#B45309", flexShrink: 0, marginTop: 2 }} />
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold" style={{ color: "#92400E" }}>
-                Stay in fullscreen for this exam
+                You've left fullscreen
               </p>
               <p className="text-xs mt-1 leading-relaxed" style={{ color: "#92400E" }}>
-                For academic integrity, this exam monitors tab switches, window focus, fullscreen exits,
-                and copy/paste while your session is active. Staying in fullscreen is recommended but not required.
+                This exam monitors tab switches, window focus, fullscreen exits, and copy/paste.
+                Fullscreen exits are limited to {FULLSCREEN_EXIT_LIMIT} — going over auto-submits your exam.
               </p>
               <div className="flex gap-2 mt-2.5">
-                <Button variant="warning" size="sm" leftIcon={<Maximize size={13} />} onClick={requestFullscreen}>
-                  Enter Fullscreen
+                <Button variant="warning" size="sm" leftIcon={<Maximize size={13} />} onClick={() => { requestFullscreen().catch(() => {}); }}>
+                  Return to Fullscreen
                 </Button>
                 <Button variant="secondary" size="sm" onClick={() => setFullscreenPromptDismissed(true)}>
-                  Continue without
+                  Dismiss
                 </Button>
               </div>
             </div>
@@ -373,6 +559,40 @@ export default function StudentExamPage() {
         confirmVariant="warning"
         loading={submitting}
       />
+
+      {/* ── Lockout overlay — reaching either limit lands here. No close
+          button, no Escape-to-dismiss (unlike Modal): the whole point is
+          that this can't be dismissed, only counted down through. ────── */}
+      {lockout && (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center p-4"
+          style={{ background: "rgba(15,23,42,0.75)" }}
+          role="alertdialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-sm rounded-[var(--radius-xl)] p-6 text-center"
+            style={{ background: "#fff", boxShadow: "var(--shadow-xl)" }}
+          >
+            <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+              style={{ background: "#FEF2F2" }}>
+              <AlertTriangle size={26} style={{ color: "#DC2626" }} />
+            </div>
+            <h2 className="text-lg font-bold mb-2" style={{ color: "var(--color-text)" }}>
+              You've reached the limit
+            </h2>
+            <p className="text-sm mb-5 leading-relaxed" style={{ color: "var(--color-text-muted)" }}>
+              Too many {lockout.label} were detected. Your assessment is being submitted automatically.
+            </p>
+            <div
+              className="w-14 h-14 rounded-full flex items-center justify-center mx-auto font-mono text-xl font-bold"
+              style={{ background: "#FEF2F2", color: "#DC2626", border: "2px solid #FECACA" }}
+            >
+              {lockout.secondsLeft}
+            </div>
+          </div>
+        </div>
+      )}
     </StudentLayout>
   );
 }

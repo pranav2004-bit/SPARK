@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
-import { Download, Users, CheckCircle2, ShieldAlert, TrendingUp } from "lucide-react";
+import { Download, Users, CheckCircle2, ShieldAlert, TrendingUp, AlertTriangle } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -79,13 +79,19 @@ export default function AdminAssessmentAnalyticsPage() {
 
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [exporting, setExporting] = useState(false);
 
+  // On failure this must not just toast and fall through to the "No
+  // completed sessions yet" branch below — data stays null either way, and
+  // that branch alone can't tell "genuinely zero completions" from "this
+  // failed to load."
   const load = useCallback(() => {
     setLoading(true);
+    setLoadError(false);
     api.get<ApiSuccess<AnalyticsData>>(`/assessments/admin/assignments/${assignment_id}/analytics/`)
       .then(res => setData(res.data.data))
-      .catch(err => toast.error(getErrorMessage(err)))
+      .catch(err => { toast.error(getErrorMessage(err)); setLoadError(true); })
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assignment_id]);
@@ -126,11 +132,24 @@ export default function AdminAssessmentAnalyticsPage() {
     );
   }
 
+  if (loadError) {
+    return (
+      <AdminLayout>
+        <PageWrapper className="max-w-6xl">
+          <PageHeader title="Analytics" subtitle="Institution-grade breakdown of this assessment's results." backHref="/admin/assessments/analytics" />
+          <EmptyState icon={AlertTriangle} title="Couldn't load analytics"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: load }} />
+        </PageWrapper>
+      </AdminLayout>
+    );
+  }
+
   if (!data || data.total_completed === 0) {
     return (
       <AdminLayout>
         <PageWrapper className="max-w-6xl">
-          <PageHeader title="Analytics" subtitle="Institution-grade breakdown of this assessment's results." backHref="/admin/assessments/papers" />
+          <PageHeader title="Analytics" subtitle="Institution-grade breakdown of this assessment's results." backHref="/admin/assessments/analytics" />
           <EmptyState icon={TrendingUp} title="No completed sessions yet"
             subtitle="Analytics will populate once students submit their assessments." />
         </PageWrapper>
@@ -146,7 +165,7 @@ export default function AdminAssessmentAnalyticsPage() {
         <PageHeader
           title="Analytics"
           subtitle="Institution-grade breakdown of this assessment's results."
-          backHref="/admin/assessments/papers"
+          backHref="/admin/assessments/analytics"
           rightSlot={
             <Button variant="secondary" leftIcon={<Download size={14} />} loading={exporting} onClick={handleExport}>
               Export CSV

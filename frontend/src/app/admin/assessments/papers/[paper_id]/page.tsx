@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
-  Layers, HelpCircle, Pencil, Trash2, ChevronRight, ListChecks, Send,
+  Layers, HelpCircle, Pencil, Trash2, ChevronRight, ListChecks, ScrollText,
 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -44,6 +44,11 @@ export default function AdminAssessmentPaperPage() {
   const [saving,     setSaving]     = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; label: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [showSetExitConfirm, setShowSetExitConfirm] = useState(false);
+
+  const [rulesOpen, setRulesOpen] = useState(false);
+  const [rulesText, setRulesText] = useState("");
+  const [rulesSaving, setRulesSaving] = useState(false);
 
   const load = () => {
     api.get<ApiSuccess<PaperDetail>>(`/assessments/admin/papers/${paper_id}/`)
@@ -58,7 +63,25 @@ export default function AdminAssessmentPaperPage() {
     setModalLabel(typeof state === "object" ? state.item.label : "");
     setModalError(""); setModal(state);
   }
-  function closeModal() { setModal(null); setModalLabel(""); setModalError(""); }
+  function closeModal() { setModal(null); setModalLabel(""); setModalError(""); setShowSetExitConfirm(false); }
+
+  // Original label for the set being edited ("" while adding, since there's
+  // nothing to compare against) — lets the header Save button light up only
+  // once the field actually differs from what's saved, instead of being
+  // clickable (and closeable-without-warning) the whole time.
+  const originalSetLabel = modal !== null && typeof modal === "object" ? modal.item.label : "";
+  const isSetLabelDirty = modalLabel.trim() !== originalSetLabel.trim();
+  const canSubmitSetModal = !!modalLabel.trim() && isSetLabelDirty;
+
+  function handleAttemptCloseSetModal() {
+    if (isSetLabelDirty) setShowSetExitConfirm(true);
+    else closeModal();
+  }
+
+  async function handleSaveChangesFromExitConfirm() {
+    setShowSetExitConfirm(false);
+    await handleModalSubmit();
+  }
 
   async function handleModalSubmit() {
     const label = modalLabel.trim();
@@ -77,6 +100,24 @@ export default function AdminAssessmentPaperPage() {
       closeModal();
     } catch (err) { setModalError(getErrorMessage(err)); }
     finally { setSaving(false); }
+  }
+
+  function openRules() {
+    setRulesText(detail?.paper.instructions ?? "");
+    setRulesOpen(true);
+  }
+
+  async function handleSaveRules() {
+    setRulesSaving(true);
+    try {
+      const res = await api.patch<ApiSuccess<QuestionPaper>>(
+        `/assessments/admin/papers/${paper_id}/instructions/`, { instructions: rulesText },
+      );
+      setDetail(prev => prev ? { ...prev, paper: res.data.data } : prev);
+      toast.success("Rules saved.");
+      setRulesOpen(false);
+    } catch (err) { toast.error(getErrorMessage(err)); }
+    finally { setRulesSaving(false); }
   }
 
   async function handleDelete() {
@@ -110,9 +151,8 @@ export default function AdminAssessmentPaperPage() {
           }
           rightSlot={
             <div className="flex items-center gap-2">
-              <Button variant="secondary" leftIcon={<Send size={14} />}
-                onClick={() => router.push(`/admin/assessments/papers/${paper_id}/assign`)}>
-                Assign to Batch
+              <Button variant="secondary" leftIcon={<ScrollText size={14} />} onClick={openRules}>
+                Rules
               </Button>
               <Button variant="primary" onClick={() => openModal("add")}>+ Add Set</Button>
             </div>
@@ -186,7 +226,40 @@ export default function AdminAssessmentPaperPage() {
 
       </PageWrapper>
 
-      <Modal isOpen={modal !== null} onClose={closeModal} title={modal === "add" ? "New Set" : "Edit Set"} maxWidth="sm">
+      <Modal isOpen={rulesOpen} onClose={() => setRulesOpen(false)} title="Exam Rules" maxWidth="lg">
+        <p className="text-xs mb-3" style={{ color: "var(--color-text-subtle)" }}>
+          Shown to students before they can start this exam — they must tick "I have read all the instructions" to proceed.
+        </p>
+        <textarea
+          autoFocus
+          rows={10}
+          placeholder="Paste the exam instructions here…"
+          value={rulesText}
+          onChange={e => setRulesText(e.target.value)}
+          className="w-full text-sm rounded-[var(--radius-md)] px-3.5 py-2.5 outline-none leading-relaxed resize-y border bg-white text-[var(--color-text)] placeholder:text-[var(--color-text-subtle)] border-[var(--color-border)] hover:border-[var(--color-border-strong)] focus:ring-2 focus:ring-[var(--color-accent)]"
+        />
+        <div className="flex justify-end gap-3 mt-5">
+          <Button variant="secondary" type="button" onClick={() => setRulesOpen(false)}>Cancel</Button>
+          <Button type="button" loading={rulesSaving} onClick={handleSaveRules}>Save</Button>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={modal !== null}
+        onClose={handleAttemptCloseSetModal}
+        title={modal === "add" ? "New Set" : "Edit Set"}
+        maxWidth="sm"
+        headerAction={
+          <Button
+            size="sm"
+            loading={saving}
+            disabled={!canSubmitSetModal}
+            onClick={handleModalSubmit}
+          >
+            {modal === "add" ? "Create" : "Save changes"}
+          </Button>
+        }
+      >
         <form onSubmit={e => { e.preventDefault(); handleModalSubmit(); }}>
           <Input
             label="Set label"
@@ -196,14 +269,23 @@ export default function AdminAssessmentPaperPage() {
             onChange={e => { setModalLabel(e.target.value); setModalError(""); }}
             error={modalError}
           />
-          <div className="flex justify-end gap-3 mt-5">
-            <Button variant="secondary" type="button" onClick={closeModal}>Cancel</Button>
-            <Button type="submit" loading={saving} disabled={!modalLabel.trim()}>
-              {modal === "add" ? "Create" : "Save changes"}
-            </Button>
-          </div>
         </form>
       </Modal>
+
+      {/* Closing (X / backdrop) with an unsaved label change — asks before
+          the edit is silently lost, same shape as the question editor's
+          exit-confirm. */}
+      <ConfirmDialog
+        isOpen={showSetExitConfirm}
+        onClose={() => setShowSetExitConfirm(false)}
+        onConfirm={handleSaveChangesFromExitConfirm}
+        title="Unsaved changes"
+        message="You've changed this set's label but haven't saved it yet. Leaving now will discard the change."
+        confirmLabel={modal === "add" ? "Create" : "Save changes"}
+        confirmVariant="primary"
+        confirmDisabled={!canSubmitSetModal}
+        loading={saving}
+      />
 
       <ConfirmDialog
         isOpen={!!deleteTarget}

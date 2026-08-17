@@ -2,9 +2,9 @@
 
 import { useEffect, useCallback, createContext, useContext, useState, useMemo } from "react";
 import { createPortal } from "react-dom";
-import { CheckCircle2, XCircle, X } from "lucide-react";
+import { CheckCircle2, XCircle, AlertTriangle, X } from "lucide-react";
 
-type ToastType = "success" | "error";
+type ToastType = "success" | "error" | "warning";
 
 interface Toast {
   id: string;
@@ -16,6 +16,9 @@ interface ToastContextValue {
   showToast: (type: ToastType, message: string) => void;
   success: (message: string) => void;
   error: (message: string) => void;
+  /** Amber, non-fatal — a graduated caution (e.g. "2 of 5 warnings used")
+   * that isn't a failure but shouldn't read as a green success either. */
+  warning: (message: string) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -46,10 +49,14 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     (message: string) => showToast("error", message),
     [showToast]
   );
+  const warning = useCallback(
+    (message: string) => showToast("warning", message),
+    [showToast]
+  );
 
   const contextValue = useMemo(
-    () => ({ showToast, success, error }),
-    [showToast, success, error]
+    () => ({ showToast, success, error, warning }),
+    [showToast, success, error, warning]
   );
 
   return (
@@ -86,29 +93,27 @@ function ToastItem({
     // Accessible: auto-dismiss after 4s, but keep visible 300ms for animation
   }, []);
 
-  const isSuccess = toast.type === "success";
+  const borderColor = {
+    success: "border-[var(--color-success)]",
+    error: "border-[var(--color-danger)]",
+    warning: "border-[#E8820C]",
+  }[toast.type];
 
   return (
     <div
       role="alert"
       className={[
         "flex items-start gap-3 p-4 rounded-[var(--radius-md)] shadow-[var(--shadow-lg)]",
-        "pointer-events-auto bg-white border",
-        isSuccess
-          ? "border-[var(--color-success)] text-[var(--color-text)]"
-          : "border-[var(--color-danger)] text-[var(--color-text)]",
+        "pointer-events-auto bg-white border text-[var(--color-text)]",
+        borderColor,
       ].join(" ")}
     >
-      {isSuccess ? (
-        <CheckCircle2
-          size={16}
-          className="text-[var(--color-success)] shrink-0 mt-0.5"
-        />
+      {toast.type === "success" ? (
+        <CheckCircle2 size={16} className="text-[var(--color-success)] shrink-0 mt-0.5" />
+      ) : toast.type === "warning" ? (
+        <AlertTriangle size={16} className="text-[#E8820C] shrink-0 mt-0.5" />
       ) : (
-        <XCircle
-          size={16}
-          className="text-[var(--color-danger)] shrink-0 mt-0.5"
-        />
+        <XCircle size={16} className="text-[var(--color-danger)] shrink-0 mt-0.5" />
       )}
       <p className="text-sm flex-1 leading-relaxed">{toast.message}</p>
       <button

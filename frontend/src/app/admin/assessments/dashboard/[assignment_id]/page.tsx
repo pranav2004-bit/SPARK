@@ -2,12 +2,13 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
-import { Download, Printer, Users, CheckCircle2, ShieldAlert, Percent, Radio } from "lucide-react";
+import { Download, Printer, Users, CheckCircle2, ShieldAlert, Percent, Radio, AlertTriangle } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
 import type { ApiSuccess } from "@/types";
@@ -86,18 +87,24 @@ export default function AdminAssessmentDashboardPage() {
 
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [exporting, setExporting] = useState(false);
   const statusRef = useRef<string | undefined>(undefined);
 
+  // On failure this must set a visible error state, not just toast — the
+  // "!data" branch below used to render a bare page header with nothing
+  // else on any failure, which looks broken/suspicious rather than
+  // communicating "this couldn't load, try again."
   const load = useCallback((silent = false) => {
-    if (!silent) setLoading(true);
+    if (!silent) { setLoading(true); setLoadError(false); }
     api.get<ApiSuccess<DashboardData>>(`/assessments/admin/assignments/${assignment_id}/dashboard/`)
       .then(res => {
         setData(res.data.data);
         statusRef.current = res.data.data.status;
+        setLoadError(false);
       })
-      .catch(err => toast.error(getErrorMessage(err)))
-      .finally(() => setLoading(false));
+      .catch(err => { if (!silent) { toast.error(getErrorMessage(err)); setLoadError(true); } })
+      .finally(() => { if (!silent) setLoading(false); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assignment_id]);
 
@@ -157,7 +164,15 @@ export default function AdminAssessmentDashboardPage() {
     return (
       <AdminLayout>
         <PageWrapper className="max-w-5xl">
-          <PageHeader title="Dashboard" backHref="/admin/assessments/papers" />
+          <PageHeader title="Dashboard" backHref="/admin/assessments/dashboard" />
+          {loadError && (
+            <EmptyState
+              icon={AlertTriangle}
+              title="Couldn't load this dashboard"
+              subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+              action={{ label: "Retry", onClick: () => load() }}
+            />
+          )}
         </PageWrapper>
       </AdminLayout>
     );
@@ -186,7 +201,7 @@ export default function AdminAssessmentDashboardPage() {
           <PageHeader
             title="Dashboard"
             subtitle="At-a-glance KPI rollup for this assignment."
-            backHref="/admin/assessments/papers"
+            backHref="/admin/assessments/dashboard"
             rightSlot={
               <div className="flex items-center gap-2 no-print">
                 <Button variant="secondary" leftIcon={<Printer size={14} />} onClick={handlePrint}>

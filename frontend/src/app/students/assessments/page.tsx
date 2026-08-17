@@ -2,12 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ClipboardList, Clock, PlayCircle, CheckCircle2, Hourglass, Ban, History } from "lucide-react";
+import { ClipboardList, Clock, PlayCircle, CheckCircle2, Hourglass, Ban, History, AlertTriangle } from "lucide-react";
 import { StudentLayout } from "@/components/layout/StudentLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { Modal } from "@/components/ui/Modal";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
@@ -61,14 +62,37 @@ export default function StudentAssessmentsPage() {
 
   const [items, setItems] = useState<StudentAssignmentListItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [rulesGate, setRulesGate] = useState<StudentAssignmentListItem | null>(null);
+  const [rulesAgreed, setRulesAgreed] = useState(false);
 
-  useEffect(() => {
+  function handleEnter(item: StudentAssignmentListItem) {
+    // Resuming an already-started session skips the gate entirely — the
+    // student's timer is already running, re-showing rules would just
+    // burn their remaining time for no reason. Only a brand-new start
+    // (never opened this session before), and only if the admin actually
+    // set rules text, shows the gate first.
+    if (item.session_status === "IN_PROGRESS" || !item.paper_instructions.trim()) {
+      router.push(`/students/assessments/${item.assignment_id}`);
+      return;
+    }
+    setRulesAgreed(false);
+    setRulesGate(item);
+  }
+
+  // On failure this must not just toast and fall through to "No assessments
+  // yet" below — a student reading that during a transient backend hiccup
+  // could reasonably conclude they have nothing due and miss a live exam.
+  function load() {
+    setLoading(true);
+    setLoadError(false);
     api.get<ApiSuccess<StudentAssignmentListItem[]>>("/assessments/student/assignments/")
       .then(res => setItems(res.data.data))
-      .catch(err => toast.error(getErrorMessage(err)))
+      .catch(err => { toast.error(getErrorMessage(err)); setLoadError(true); })
       .finally(() => setLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(load, []);
 
   const isEmpty = !loading && items.length === 0;
 
@@ -89,6 +113,13 @@ export default function StudentAssessmentsPage() {
           <div className="space-y-3">
             {[1, 2].map(i => <Skeleton key={i} className="h-24 w-full rounded-[var(--radius-xl)]" />)}
           </div>
+        ) : loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load your assessments"
+            subtitle="Something went wrong fetching this — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: load }}
+          />
         ) : isEmpty ? (
           <EmptyState
             icon={ClipboardList}
@@ -117,7 +148,7 @@ export default function StudentAssessmentsPage() {
                     {canEnter && (
                       <Button
                         variant="primary"
-                        onClick={() => router.push(`/students/assessments/${item.assignment_id}`)}
+                        onClick={() => handleEnter(item)}
                       >
                         {item.session_status === "IN_PROGRESS" ? "Resume Exam" : "Start Exam"}
                       </Button>
@@ -129,6 +160,46 @@ export default function StudentAssessmentsPage() {
           </div>
         )}
       </PageWrapper>
+
+      <Modal
+        isOpen={rulesGate !== null}
+        onClose={() => setRulesGate(null)}
+        title="Before you start"
+        maxWidth="lg"
+      >
+        {rulesGate && (
+          <>
+            <p className="text-sm font-semibold mb-2" style={{ color: "var(--color-text)" }}>{rulesGate.paper_title}</p>
+            <div
+              className="text-sm leading-relaxed whitespace-pre-wrap max-h-72 overflow-y-auto p-4 rounded-[var(--radius-md)] mb-4"
+              style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", color: "var(--color-text-muted)" }}
+            >
+              {rulesGate.paper_instructions}
+            </div>
+            <label className="flex items-start gap-2.5 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={rulesAgreed}
+                onChange={e => setRulesAgreed(e.target.checked)}
+                className="mt-0.5 h-4 w-4 shrink-0 rounded border-[var(--color-border)] text-[var(--color-accent)] focus:ring-[var(--color-accent)]"
+              />
+              <span className="text-sm" style={{ color: "var(--color-text)" }}>
+                I have read all the instructions above.
+              </span>
+            </label>
+            <div className="flex justify-end gap-3 mt-5">
+              <Button variant="secondary" type="button" onClick={() => setRulesGate(null)}>Cancel</Button>
+              <Button
+                type="button"
+                disabled={!rulesAgreed}
+                onClick={() => router.push(`/students/assessments/${rulesGate.assignment_id}`)}
+              >
+                Start Exam
+              </Button>
+            </div>
+          </>
+        )}
+      </Modal>
     </StudentLayout>
   );
 }

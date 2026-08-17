@@ -290,9 +290,15 @@ export interface QuestionPaper {
   id: string;
   title: string;
   description: string;
-  is_published: boolean;
+  instructions: string;
   set_count: number;
   created_by: string;
+  // Resolved server-side from created_by (a bare user_id — no FK across
+  // services) via a best-effort auth-service lookup. Both can be "" if the
+  // lookup didn't resolve (e.g. auth-service was briefly unreachable) —
+  // never assume either is populated just because the paper loaded.
+  created_by_name: string;
+  created_by_email: string;
   created_at: string;
   updated_at: string;
 }
@@ -345,12 +351,17 @@ export type BatchAssignmentStatus = "SCHEDULED" | "LIVE" | "CLOSED";
 export interface BatchAssignment {
   id: string;
   paper: string;
+  paper_title: string;
   batch_id: string;
   institution_id: string;
   global_start_time: string | null;
   global_expire_time: string;
   exam_duration_minutes: number;
   pass_cutoff_percentage: number;
+  show_result_to_student: boolean;
+  // Empty array means every department in the batch — non-empty narrows
+  // the roster snapshot to just those department(s).
+  departments: string[];
   status: BatchAssignmentStatus;
   created_by: string;
   created_at: string;
@@ -371,6 +382,7 @@ export type AssessmentSessionStatus =
 export interface StudentAssignmentListItem {
   assignment_id: string;
   paper_title: string;
+  paper_instructions: string;
   status: BatchAssignmentStatus;
   exam_duration_minutes: number;
   global_start_time: string | null;
@@ -416,25 +428,29 @@ export interface StudentSessionQuestionsResponse {
 export interface StudentSubmitResponse {
   session_id: string;
   status: AssessmentSessionStatus;
+  results_visible: boolean;
   score: number | null;
   total_marks: number | null;
 }
 
 // ── Admin: Results (Phase 7) ─────────────────────────────────────────────────
 
+export type AdminResultExamStatus = "pending" | "writing" | "submitted";
+
 export interface AdminResultRow {
-  result_id: string;
+  result_id: string | null;
   student_user_id: string;
   student_roll_id: string;
   student_name: string;
   department: string;
-  started_at: string;
-  ended_at: string;
-  duration_seconds: number;
-  score: number;
-  total_marks: number;
-  percentage: number;
-  status: AssessmentSessionStatus;
+  set_label: string;
+  exam_status: AdminResultExamStatus;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  score: number | null;
+  total_marks: number | null;
+  percentage: number | null;
   malpractice_flag: boolean;
 }
 

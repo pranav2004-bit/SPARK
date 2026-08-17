@@ -28,7 +28,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/admin/resources", label: "Resources", icon: <Briefcase size={15} />,       matchPrefix: "/admin/resources", altMatchPrefix: "/admin/companies" },
   { href: "/admin/inquiries", label: "Inquiries", icon: <MessageSquare size={15} />,   matchPrefix: "/admin/inquiries" },
   { href: "/admin/practice",  label: "Practice",  icon: <BookOpen size={15} />,        matchPrefix: "/admin/practice" },
-  { href: "/admin/assessments/papers", label: "Assessments", icon: <FileText size={15} />, matchPrefix: "/admin/assessments" },
+  { href: "/admin/assessments", label: "Assessments", icon: <FileText size={15} />, matchPrefix: "/admin/assessments" },
   { href: "/admin/scroll",    label: "Scrollbar", icon: <Radio size={15} />,           matchPrefix: "/admin/scroll" },
 ];
 

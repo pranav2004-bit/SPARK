@@ -1,17 +1,20 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useParams, useRouter } from "next/navigation";
-import { PlayCircle, StopCircle, RefreshCcw, Users, Clock, CheckCircle2, FileText, TrendingUp, LayoutDashboard } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { PlayCircle, StopCircle, RefreshCcw, Users, Clock, CheckCircle2, FileText, TrendingUp, LayoutDashboard, ChevronDown } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toast";
+import { useAuth } from "@/hooks/useAuth";
 import api, { getErrorMessage } from "@/lib/api";
+import { DEPARTMENTS } from "@/lib/constants";
 import type {
   QuestionPaper, Batch, BatchAssignment, BatchAssignmentStatusPoll, ApiSuccess, PaginatedResponse,
 } from "@/types";
@@ -36,21 +39,40 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export default function AdminAssessmentAssignPage() {
-  const { paper_id } = useParams<{ paper_id: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const toast = useToast();
+  const { user, isSuperAdmin } = useAuth();
+  // This page is admin-only (route-guarded elsewhere), so `user` is always
+  // AdminUser here in practice — StudentUser (the only AuthUser variant
+  // without `.id`) narrowed out via the "id" in user check for TypeScript.
+  const currentUserId = user && "id" in user ? user.id : undefined;
 
-  const [paper, setPaper] = useState<QuestionPaper | null>(null);
+  const [papers, setPapers] = useState<QuestionPaper[]>([]);
   const [batches, setBatches] = useState<Batch[]>([]);
+  const [loadingOptions, setLoadingOptions] = useState(true);
+  const [loadOptionsError, setLoadOptionsError] = useState(false);
+
+  const [paperId, setPaperId] = useState(searchParams.get("paper") ?? "");
   const [assignments, setAssignments] = useState<BatchAssignment[]>([]);
   const [statusByAssignment, setStatusByAssignment] = useState<Record<string, BatchAssignmentStatusPoll>>({});
-  const [loading, setLoading] = useState(true);
+  const [loadingAssignments, setLoadingAssignments] = useState(true);
+  const [loadAssignmentsError, setLoadAssignmentsError] = useState(false);
+  // Collapsed by default — the create form is tucked behind a "Create
+  // Assessment" toggle so the page opens straight onto the assignment
+  // history instead of an empty form, opening only when the admin actually
+  // wants to create one; pre-arriving with ?paper= (from a paper's own
+  // page) still opens it, since that's a clear signal of create intent.
+  const [formOpen, setFormOpen] = useState(!!searchParams.get("paper"));
 
   const [batchId, setBatchId] = useState("");
+  // Empty = every department in the batch (unchanged default behavior).
+  const [selectedDepartments, setSelectedDepartments] = useState<string[]>([]);
   const [duration, setDuration] = useState("60");
   const [startTime, setStartTime] = useState("");
   const [expireTime, setExpireTime] = useState("");
   const [passCutoff, setPassCutoff] = useState("40");
+  const [showResult, setShowResult] = useState(true);
   const [creating, setCreating] = useState(false);
   const [formError, setFormError] = useState("");
 
@@ -59,23 +81,64 @@ export default function AdminAssessmentAssignPage() {
   const [actingOn, setActingOn] = useState<string | null>(null);
   const [resyncingId, setResyncingId] = useState<string | null>(null);
 
-  const load = useCallback(() => {
+  // Papers + batches — the two dropdown sources — loaded once. Papers is
+  // filtered to ones this admin can actually assign (faculty-privacy
+  // restriction: assigning is creator-only, same as opening/editing a
+  // paper — see assessment-service's _require_paper_owner) so the dropdown
+  // never offers a choice that would 403 on submit. A super admin sees
+  // every paper, matching their backend override.
+  // On failure this must not just toast and leave the dropdown looking
+  // merely empty — "author one in Question Bank first" (below) is
+  // misleading if papers actually exist and this just failed to load.
+  const loadOptions = useCallback(() => {
+    setLoadingOptions(true);
+    setLoadOptionsError(false);
     Promise.all([
-      api.get<ApiSuccess<{ paper: QuestionPaper }>>(`/assessments/admin/papers/${paper_id}/`),
+      api.get<PaginatedResponse<QuestionPaper>>("/assessments/admin/papers/"),
       api.get<ApiSuccess<Batch[]>>("/users/batches/"),
-      api.get<PaginatedResponse<BatchAssignment>>(`/assessments/admin/assignments/?paper_id=${paper_id}`),
     ])
-      .then(([paperRes, batchesRes, assignRes]) => {
-        setPaper(paperRes.data.data.paper);
+      .then(([papersRes, batchesRes]) => {
+        const assignable = isSuperAdmin
+          ? papersRes.data.results
+          : papersRes.data.results.filter(p => p.created_by === currentUserId);
+        setPapers(assignable);
         setBatches(batchesRes.data.data);
-        setAssignments(assignRes.data.results);
       })
-      .catch(err => { toast.error(getErrorMessage(err)); router.push("/admin/assessments/papers"); })
-      .finally(() => setLoading(false));
+      .catch(err => { toast.error(getErrorMessage(err)); setLoadOptionsError(true); })
+      .finally(() => setLoadingOptions(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paper_id]);
+  }, [isSuperAdmin, currentUserId]);
 
-  useEffect(load, [load]);
+  useEffect(loadOptions, [loadOptions]);
+
+  // Unfiltered (every assignment across every paper) when no paper is
+  // picked in the create form — this is what renders as the page's default
+  // "past assessments" view now that the form itself is collapsed by
+  // default; scoped to just that paper once one is selected, same as
+  // before. Same reasoning as elsewhere — "No assignments yet" (below)
+  // shouldn't be shown when the fetch itself failed.
+  const loadAssignments = useCallback(() => {
+    setLoadingAssignments(true);
+    setLoadAssignmentsError(false);
+    const url = paperId
+      ? `/assessments/admin/assignments/?paper_id=${paperId}`
+      : "/assessments/admin/assignments/";
+    api.get<PaginatedResponse<BatchAssignment>>(url)
+      .then(res => setAssignments(res.data.results))
+      .catch(err => { toast.error(getErrorMessage(err)); setLoadAssignmentsError(true); })
+      .finally(() => setLoadingAssignments(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paperId]);
+
+  useEffect(loadAssignments, [loadAssignments]);
+
+  // Keep the URL's ?paper= in sync so the pre-selection (arriving from a
+  // paper's own page) is also reflected if the admin reloads or shares the
+  // link, without a full navigation/remount.
+  useEffect(() => {
+    const url = paperId ? `/admin/assessments/assign?paper=${paperId}` : "/admin/assessments/assign";
+    window.history.replaceState(null, "", url);
+  }, [paperId]);
 
   // Poll every non-CLOSED assignment's live status widget — CLOSED is
   // terminal so there's nothing left to change; polling it forever would
@@ -99,17 +162,20 @@ export default function AdminAssessmentAssignPage() {
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     setFormError("");
+    if (!paperId) { setFormError("Select a question paper."); return; }
     if (!batchId) { setFormError("Select a batch."); return; }
     if (!expireTime) { setFormError("Global expire time is required."); return; }
     const durationNum = Number(duration);
     if (!durationNum || durationNum <= 0) { setFormError("Exam duration must be a positive number of minutes."); return; }
 
     const payload: Record<string, unknown> = {
-      paper: paper_id,
+      paper: paperId,
       batch_id: batchId,
       global_expire_time: new Date(expireTime).toISOString(),
       exam_duration_minutes: durationNum,
       pass_cutoff_percentage: Number(passCutoff) || 40,
+      show_result_to_student: showResult,
+      departments: selectedDepartments,
     };
     if (startTime) payload.global_start_time = new Date(startTime).toISOString();
 
@@ -117,7 +183,8 @@ export default function AdminAssessmentAssignPage() {
     try {
       const res = await api.post<ApiSuccess<BatchAssignment>>("/assessments/admin/assignments/", payload);
       setAssignments(prev => [res.data.data, ...prev]);
-      setBatchId(""); setStartTime(""); setExpireTime(""); setDuration("60"); setPassCutoff("40");
+      setBatchId(""); setSelectedDepartments([]); setStartTime(""); setExpireTime(""); setDuration("60"); setPassCutoff("40"); setShowResult(true);
+      setFormOpen(false);
       toast.success("Assignment created.");
     } catch (err) {
       setFormError(getErrorMessage(err));
@@ -173,49 +240,121 @@ export default function AdminAssessmentAssignPage() {
   }
 
   const batchName = (id: string) => batches.find(b => b.id === id)?.batch_name ?? id;
+  const selectedPaper = papers.find(p => p.id === paperId);
+
+  function toggleDepartment(dept: string) {
+    setSelectedDepartments(prev =>
+      prev.includes(dept) ? prev.filter(d => d !== dept) : [...prev, dept]
+    );
+  }
 
   return (
     <AdminLayout>
       <PageWrapper className="max-w-4xl">
         <PageHeader
-          title={paper ? `Assign — ${paper.title}` : ""}
-          titleSkeleton={loading ? <Skeleton className="h-8 w-64" /> : undefined}
-          subtitle="Assign this paper to a batch, then manually start the global exam timer when ready."
-          backHref={`/admin/assessments/papers/${paper_id}`}
+          title={selectedPaper ? `Assign — ${selectedPaper.title}` : "Assign"}
+          titleSkeleton={loadingOptions ? <Skeleton className="h-8 w-64" /> : undefined}
+          subtitle="Pick a question paper and a batch, then manually start the global exam timer when ready."
+          backHref="/admin/assessments"
         />
 
-        {!loading && paper && !paper.is_published && (
-          <div
-            className="mb-5 px-4 py-3 rounded-[var(--radius-lg)] text-sm"
-            style={{ background: "#FFF4E6", color: "#B45309", border: "1px solid #FDE0B0" }}
-          >
-            This paper isn&apos;t published yet. You can create an assignment now, but starting the exam
-            will be rejected until the paper is published.
-          </div>
-        )}
-
-        {/* Create assignment form */}
+        {/* Create assignment — collapsed by default behind this toggle, so
+            the page opens straight onto assignment history (below) instead
+            of an empty form every time. */}
         <div
-          className="rounded-[var(--radius-xl)] p-5 mb-6"
+          className="rounded-[var(--radius-xl)] mb-6 overflow-hidden"
           style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", boxShadow: "var(--shadow-sm)" }}
         >
-          <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--color-text)" }}>New assignment</h3>
+          <button
+            type="button"
+            onClick={() => setFormOpen(v => !v)}
+            aria-expanded={formOpen}
+            className="w-full flex items-center justify-between px-5 py-4 cursor-pointer"
+          >
+            <span className="text-sm font-semibold" style={{ color: "var(--color-text)" }}>Create Assessment</span>
+            <ChevronDown
+              size={16}
+              style={{
+                color: "var(--color-text-subtle)",
+                transform: formOpen ? "rotate(180deg)" : "rotate(0deg)",
+                transition: "transform 200ms ease",
+              }}
+            />
+          </button>
+          <div
+            style={{
+              maxHeight: formOpen ? "2400px" : "0px",
+              opacity: formOpen ? 1 : 0,
+              overflow: "hidden",
+              transition: "max-height 300ms ease, opacity 200ms ease",
+            }}
+          >
+          <div className="px-5 pb-5 pt-1" style={{ borderTop: "1px solid var(--color-border)" }}>
           <form onSubmit={handleCreate} className="space-y-4">
-            <div>
-              <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--color-text-muted)" }}>Batch</label>
-              <select
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Select
+                label="Question paper"
+                value={paperId}
+                onChange={e => setPaperId(e.target.value)}
+                options={[
+                  { value: "", label: loadingOptions ? "Loading…" : "Select a question paper…" },
+                  ...papers.map(p => ({ value: p.id, label: p.title })),
+                ]}
+              />
+              <Select
+                label="Batch"
                 value={batchId}
                 onChange={e => setBatchId(e.target.value)}
-                className="w-full h-9 px-3 rounded-[var(--radius-md)] text-sm"
-                style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text)" }}
-              >
-                <option value="">Select a batch…</option>
-                {batches.map(b => (
-                  <option key={b.id} value={b.id}>
-                    {b.batch_name} {typeof b.student_count === "number" ? `(${b.student_count} students)` : ""}
-                  </option>
-                ))}
-              </select>
+                options={[
+                  { value: "", label: "Select a batch…" },
+                  ...batches.map(b => ({
+                    value: b.id,
+                    label: `${b.batch_name}${typeof b.student_count === "number" ? ` (${b.student_count} students)` : ""}`,
+                  })),
+                ]}
+              />
+            </div>
+            {!loadingOptions && loadOptionsError && (
+              <p className="text-xs" style={{ color: "var(--color-danger)" }}>
+                Couldn't load question papers/batches — this may be temporary.{" "}
+                <button type="button" onClick={loadOptions} className="underline cursor-pointer">Retry</button>
+              </p>
+            )}
+            {!loadingOptions && !loadOptionsError && papers.length === 0 && (
+              <p className="text-xs" style={{ color: "var(--color-text-subtle)" }}>
+                No question papers to assign yet — author one in Question Bank first.
+              </p>
+            )}
+
+            <div>
+              <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--color-text-muted)" }}>
+                Departments (optional — leave all unchecked to include every department in the batch)
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {DEPARTMENTS.map(dept => {
+                  const active = selectedDepartments.includes(dept);
+                  return (
+                    <button
+                      key={dept}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => toggleDepartment(dept)}
+                      className="px-3 py-1.5 rounded-full text-xs font-semibold transition-colors cursor-pointer"
+                      style={active
+                        ? { background: "var(--color-accent)", color: "#fff", border: "1px solid var(--color-accent)" }
+                        : { background: "var(--color-surface)", color: "var(--color-text-muted)", border: "1px solid var(--color-border)" }
+                      }
+                    >
+                      {dept}
+                    </button>
+                  );
+                })}
+              </div>
+              {selectedDepartments.length > 0 && (
+                <p className="text-xs mt-1.5" style={{ color: "var(--color-text-subtle)" }}>
+                  Only {selectedDepartments.join(", ")} student{selectedDepartments.length === 1 ? "" : "s"} in the selected batch will be assigned this exam.
+                </p>
+              )}
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -240,15 +379,43 @@ export default function AdminAssessmentAssignPage() {
               />
             </div>
 
-            <Input
-              label="Pass cutoff (%)"
-              type="number"
-              min={0}
-              max={100}
-              value={passCutoff}
-              onChange={e => setPassCutoff(e.target.value)}
-              className="max-w-[160px]"
-            />
+            <div className="flex items-end gap-6 flex-wrap">
+              <Input
+                label="Pass cutoff (%)"
+                type="number"
+                min={0}
+                max={100}
+                value={passCutoff}
+                onChange={e => setPassCutoff(e.target.value)}
+                className="max-w-[160px]"
+              />
+
+              <div>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--color-text-muted)" }}>
+                  Show result to student after submission
+                </label>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={showResult}
+                  onClick={() => setShowResult(v => !v)}
+                  className="h-9 inline-flex items-center gap-2.5 cursor-pointer"
+                >
+                  <span
+                    className="relative inline-flex h-5 w-10 shrink-0 items-center rounded-full transition-colors"
+                    style={{ background: showResult ? "#16A34A" : "var(--color-border-strong)" }}
+                  >
+                    <span
+                      className="inline-block h-4 w-4 rounded-full bg-white shadow transition-transform"
+                      style={{ transform: showResult ? "translateX(21px)" : "translateX(3px)" }}
+                    />
+                  </span>
+                  <span className="text-sm font-semibold" style={{ color: showResult ? "#16A34A" : "var(--color-text-muted)" }}>
+                    {showResult ? "On" : "Off"}
+                  </span>
+                </button>
+              </div>
+            </div>
 
             {formError && <p className="text-xs" style={{ color: "var(--color-danger)" }}>{formError}</p>}
 
@@ -256,14 +423,26 @@ export default function AdminAssessmentAssignPage() {
               <Button type="submit" loading={creating}>Create assignment</Button>
             </div>
           </form>
+          </div>
+          </div>
         </div>
 
-        {/* Existing assignments */}
-        <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--color-text)" }}>Assignments</h3>
-        {loading ? (
+        {/* Assignment history — every assignment by default, scoped down
+            to one paper once the create form's paper dropdown picks one. */}
+        <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--color-text)" }}>
+          {paperId && selectedPaper ? `Assignments — ${selectedPaper.title}` : "Assignments"}
+        </h3>
+        {loadingAssignments ? (
           <Skeleton className="h-24 w-full rounded-[var(--radius-xl)]" />
+        ) : loadAssignmentsError ? (
+          <p className="text-sm" style={{ color: "var(--color-danger)" }}>
+            Couldn't load assignments — this may be temporary.{" "}
+            <button type="button" onClick={loadAssignments} className="underline cursor-pointer">Retry</button>
+          </p>
         ) : assignments.length === 0 ? (
-          <p className="text-sm" style={{ color: "var(--color-text-subtle)" }}>No assignments yet for this paper.</p>
+          <p className="text-sm" style={{ color: "var(--color-text-subtle)" }}>
+            {paperId ? "No assignments yet for this paper." : "No assignments yet — create one above to get started."}
+          </p>
         ) : (
           <div className="space-y-3">
             {assignments.map(a => {
@@ -291,6 +470,10 @@ export default function AdminAssessmentAssignPage() {
                           ) : "…"}
                         </span>
                         <span className="flex items-center gap-1"><CheckCircle2 size={11} /> cutoff {a.pass_cutoff_percentage}%</span>
+                        <span>{a.show_result_to_student ? "Results visible to students" : "Results hidden from students"}</span>
+                        {a.departments.length > 0 && (
+                          <span>Departments: {a.departments.join(", ")}</span>
+                        )}
                       </p>
                     </div>
 
