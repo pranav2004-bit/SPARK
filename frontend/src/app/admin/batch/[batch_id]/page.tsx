@@ -27,12 +27,14 @@ export default function BatchDetailPage() {
   const [totalCount, setTotalCount] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [department, setDepartment] = useState("");
 
   const fetchStudents = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const params = new URLSearchParams();
       params.set("page", String(page));
@@ -47,6 +49,7 @@ export default function BatchDetailPage() {
       setTotalPages(data.total_pages ?? Math.ceil(data.count / 50));
     } catch (err) {
       toastError(getErrorMessage(err));
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -165,6 +168,8 @@ export default function BatchDetailPage() {
         <StudentTable
           students={students}
           loading={loading}
+          loadError={loadError}
+          onRetry={fetchStudents}
           totalCount={totalCount}
           totalPages={totalPages}
           page={page}

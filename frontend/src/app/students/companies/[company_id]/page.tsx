@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
-  Layers, ChevronRight, Loader2,
+  Layers, ChevronRight, Loader2, AlertTriangle,
   Calculator, Users, Code2, BookOpen, Brain,
   MessageSquare, Globe, type LucideIcon,
 } from "lucide-react";
@@ -162,12 +162,15 @@ export default function CompanySectionsPage() {
   const [company, setCompany] = useState<Company | null>(null);
   const [sections, setSections] = useState<Section[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [notFound, setNotFound] = useState(false);
   const [backLoading, setBackLoading] = useState(false);
   const [navigatingId, setNavigatingId] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     if (!company_id) { router.replace("/students/companies"); return; }
+    setLoading(true);
+    setLoadError(false);
     try {
       const [companyRes, sectionsRes] = await Promise.all([
         api.get<ApiSuccess<Company>>(`/resources/student/companies/${company_id}/`),
@@ -180,7 +183,11 @@ export default function CompanySectionsPage() {
       if (msg.toLowerCase().includes("not found") || msg.includes("404")) {
         setNotFound(true);
       } else {
+        // Must not just toast and fall through to "No sections yet" below
+        // — that reads as "there's genuinely nothing here," not "this
+        // failed to load."
         toast.error(msg);
+        setLoadError(true);
       }
     } finally {
       setLoading(false);
@@ -246,7 +253,15 @@ export default function CompanySectionsPage() {
           }
         />
 
-        {sections.length === 0 ? (
+        {loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load sections"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: fetchData }}
+          />
+
+        ) : sections.length === 0 ? (
           <EmptyState
             icon={Layers}
             title="No sections yet"

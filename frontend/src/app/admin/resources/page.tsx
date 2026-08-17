@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Building2, Layers, Pencil, Trash2, ChevronRight,
-  Globe, EyeOff, Loader2, Check, Link2, ShieldCheck,
+  Globe, EyeOff, Loader2, Check, Link2, ShieldCheck, AlertTriangle,
 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -190,6 +190,7 @@ export default function AdminResourcesPage() {
 
   const [modules,    setModules]    = useState<ResourceModule[]>([]);
   const [loading,    setLoading]    = useState(true);
+  const [loadError,  setLoadError]  = useState(false);
   const [modal,      setModal]      = useState<null | "add" | { mode: "edit"; module: ResourceModule }>(null);
   const [modalName,  setModalName]  = useState("");
   const [modalError, setModalError] = useState("");
@@ -199,13 +200,19 @@ export default function AdminResourcesPage() {
   const [deleting,     setDeleting]     = useState(false);
 
   // ── Load ───────────────────────────────────────────────────────────────────
-  useEffect(() => {
+  // On failure this must not just toast and fall through to "No modules
+  // yet" below — that reads as "there's genuinely nothing here," not "this
+  // failed to load."
+  function load() {
+    setLoading(true);
+    setLoadError(false);
     api.get("/resources/modules/")
       .then(res => setModules(res.data.results ?? []))
-      .catch(() => toast.error("Failed to load modules."))
+      .catch(() => { toast.error("Failed to load modules."); setLoadError(true); })
       .finally(() => setLoading(false));
+  }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(load, []);
 
   // ── Modal helpers ──────────────────────────────────────────────────────────
   function openAdd() {
@@ -296,6 +303,13 @@ export default function AdminResourcesPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {[1, 2].map(i => <ResourceItemCardSkeleton key={i} />)}
           </div>
+        ) : loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load modules"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: load }}
+          />
         ) : modules.length === 0 ? (
           <EmptyState
             icon={Layers}

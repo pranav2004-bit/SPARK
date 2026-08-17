@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useForm } from "react-hook-form";
-import { Pencil, Trash2, UserCheck, UserX, KeyRound } from "lucide-react";
+import { Pencil, Trash2, UserCheck, UserX, KeyRound, AlertTriangle } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -18,6 +18,12 @@ import type { Student, Batch, ApiSuccess } from "@/types";
 interface StudentTableProps {
   students: Student[];
   loading: boolean;
+  // Optional: when true, renders an inline "couldn't load" row instead of
+  // the ordinary "No students found." row — a load failure must not read
+  // as "there's genuinely nothing here." Backward compatible: callers that
+  // don't pass it keep the existing empty-row behavior unchanged.
+  loadError?: boolean;
+  onRetry?: () => void;
   totalCount: number;
   totalPages?: number;
   page: number;
@@ -38,6 +44,8 @@ const PAGE_SIZE = 50;
 export function StudentTable({
   students,
   loading,
+  loadError = false,
+  onRetry,
   totalCount,
   totalPages: totalPagesProp,
   page,
@@ -201,6 +209,31 @@ export function StudentTable({
                 Array.from({ length: 5 }).map((_, i) => (
                   <TableRowSkeleton key={i} cols={showBatchColumn ? 7 : 6} />
                 ))
+              ) : loadError ? (
+                <tr>
+                  <td
+                    colSpan={showBatchColumn ? 7 : 6}
+                    className="text-center py-14 text-sm"
+                    style={{ color: "var(--color-text-muted)" }}
+                  >
+                    <div className="flex flex-col items-center gap-2">
+                      <AlertTriangle size={20} style={{ color: "var(--color-danger)" }} />
+                      <span style={{ color: "var(--color-text)" }}>Couldn't load students.</span>
+                      <span className="text-xs" style={{ color: "var(--color-text-subtle)" }}>
+                        Something went wrong fetching this data — it may be temporary.
+                      </span>
+                      {onRetry && (
+                        <button
+                          onClick={onRetry}
+                          className="mt-1 text-xs font-semibold px-3 py-1.5 rounded-[var(--radius-md)] transition-colors"
+                          style={{ color: "var(--color-accent)", border: "1px solid var(--color-border)" }}
+                        >
+                          Retry
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
               ) : students.length === 0 ? (
                 <tr>
                   <td

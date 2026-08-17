@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
-  Layers, FolderOpen, HelpCircle,
+  Layers, FolderOpen, HelpCircle, AlertTriangle,
   Pencil, Trash2, Globe, EyeOff, Loader2, ChevronRight, Link2, Check,
 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
@@ -145,6 +145,7 @@ export default function PracticeModulePage() {
 
   const [detail,     setDetail]     = useState<ModuleDetail | null>(null);
   const [loading,    setLoading]    = useState(true);
+  const [loadError,  setLoadError]  = useState(false);
   const [modal,      setModal]      = useState<ModalState>(null);
   const [modalName,  setModalName]  = useState("");
   const [modalError, setModalError] = useState("");
@@ -156,13 +157,19 @@ export default function PracticeModulePage() {
   const [deleting, setDeleting] = useState(false);
 
   // ── Load ───────────────────────────────────────────────────────────────────
-  useEffect(() => {
+  // On failure this must not just toast and fall through to "Nothing here
+  // yet" below — with `detail` staying null either way, isEmpty can't tell
+  // "genuinely no children/sections" from "this failed to load."
+  function load() {
+    setLoading(true);
+    setLoadError(false);
     api.get(`/practice/modules/${module_id}/`)
       .then(res => setDetail(res.data.data))
-      .catch(() => toast.error("Failed to load module."))
+      .catch(() => { toast.error("Failed to load module."); setLoadError(true); })
       .finally(() => setLoading(false));
+  }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [module_id]);
+  useEffect(load, [module_id]);
 
   // ── Modal helpers ──────────────────────────────────────────────────────────
   function openModal(state: NonNullable<ModalState>) {
@@ -284,6 +291,13 @@ export default function PracticeModulePage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {[1, 2, 3].map(i => <ResourceItemCardSkeleton key={i} />)}
           </div>
+        ) : loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load this module"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: load }}
+          />
         ) : isEmpty ? (
           <EmptyState
             icon={HelpCircle}

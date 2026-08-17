@@ -16,6 +16,7 @@ import {
   Check,
   Loader2,
   X,
+  AlertTriangle,
 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -87,6 +88,7 @@ export default function UploadsPage() {
   const [section, setSection] = useState<Section | null>(null);
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -114,6 +116,8 @@ export default function UploadsPage() {
   const [renameError, setRenameError] = useState("");
 
   const fetchData = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const [companyRes, sectionRes, uploadsRes] = await Promise.all([
         api.get<ApiSuccess<Company>>(`/resources/companies/${company_id}/`),
@@ -127,6 +131,7 @@ export default function UploadsPage() {
       setUploads(uploadsRes.data.results);
     } catch (err) {
       toastError(getErrorMessage(err));
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -617,6 +622,13 @@ export default function UploadsPage() {
         {/* ── Upload list ─────────────────────────────────────────────────────── */}
         {loading ? (
           <UploadListSkeleton rows={4} />
+        ) : loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load uploads"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: fetchData }}
+          />
         ) : uploads.length === 0 && !uploadType ? (
           <EmptyState
             icon={UploadIcon}

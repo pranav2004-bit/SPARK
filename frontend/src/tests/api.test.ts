@@ -190,6 +190,14 @@ describe("getErrorMessage", () => {
     expect(getErrorMessage(err)).toBe("email: Enter a valid email address.");
   });
 
+  it("returns a clear offline message for an Axios error with no response (network/timeout/DNS failure)", () => {
+    const err = new Error("Network Error") as any;
+    err.isAxiosError = true;
+    err.response = undefined;
+    jest.spyOn(axios, "isAxiosError").mockReturnValueOnce(true);
+    expect(getErrorMessage(err)).toBe("No internet connection. Please check your network and try again.");
+  });
+
   it("returns error.message for a plain JS Error instance", () => {
     const err = new Error("Network Error");
     expect(getErrorMessage(err)).toBe("Network Error");
@@ -257,6 +265,7 @@ describe("Response interceptor — 401 redirect behaviour", () => {
     mockLocationHref = "";
     (global as any).window = {
       location: {
+        pathname: "/students/login",
         get href() { return mockLocationHref; },
         set href(v: string) { mockLocationHref = v; },
       },
@@ -305,16 +314,39 @@ describe("Response interceptor — 401 redirect behaviour", () => {
     expect(mockLocationHref).toBe("/super-admin/login");
   });
 
-  it("falls back to /admin/login when user is null on 401 — the key edge case", async () => {
-    // Token expired and the auth store's user object was already nulled before
-    // the 401 fired. user?.role → undefined → `role ?? "admin"` → "/admin/login".
-    // Without this fallback the redirect target is undefined and the user is stuck.
+  it("falls back to the current portal's login page when user is null on 401 — the key edge case", async () => {
+    // Token expired (or never existed) and the auth store's user object is
+    // null when the 401 fires. user?.role → undefined → falls back to
+    // whichever portal window.location.pathname is under (here /students/login,
+    // matching the test window mock), not a hardcoded /admin/login — a real
+    // bug report: a fresh "Get Started" visit to /students/login was being
+    // bounced to /admin/login by this exact fallback defaulting to "admin".
+    mockStore.refreshToken = null;
+    mockStore.user = null;
+
+    await getResponseErrorHandler()(make401Error()).catch(() => {});
+
+    expect(mockLocationHref).toBe("/students/login");
+  });
+
+  it("falls back to /admin/login when user is null and the path is under /admin", async () => {
+    (global as any).window.location.pathname = "/admin/batch";
     mockStore.refreshToken = null;
     mockStore.user = null;
 
     await getResponseErrorHandler()(make401Error()).catch(() => {});
 
     expect(mockLocationHref).toBe("/admin/login");
+  });
+
+  it("falls back to /super-admin/login when user is null and the path is under /super-admin", async () => {
+    (global as any).window.location.pathname = "/super-admin/overview";
+    mockStore.refreshToken = null;
+    mockStore.user = null;
+
+    await getResponseErrorHandler()(make401Error()).catch(() => {});
+
+    expect(mockLocationHref).toBe("/super-admin/login");
   });
 
   it("calls clearAuth and clearAuthCookies before redirecting on 401", async () => {
@@ -362,7 +394,7 @@ describe("Response interceptor — 401 redirect behaviour", () => {
     expect(mockLocationHref).toBe("/super-admin/login");
   });
 
-  it("falls back to /admin/login when refresh fails and user is null", async () => {
+  it("falls back to the current portal's login page when refresh fails and user is null", async () => {
     // Same edge case as Branch A but in the catch block of the refresh attempt.
     mockStore.refreshToken = "stale_refresh_token";
     mockStore.user = null;
@@ -370,7 +402,7 @@ describe("Response interceptor — 401 redirect behaviour", () => {
 
     await getResponseErrorHandler()(make401Error()).catch(() => {});
 
-    expect(mockLocationHref).toBe("/admin/login");
+    expect(mockLocationHref).toBe("/students/login");
   });
 
   // ── Branch C: refresh succeeds, but the retried request itself fails ──────

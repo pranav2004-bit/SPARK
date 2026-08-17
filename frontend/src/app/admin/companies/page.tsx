@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
-import { Building2, Pencil, Trash2, Layers, ChevronRight, Link2, Check } from "lucide-react";
+import { Building2, Pencil, Trash2, Layers, ChevronRight, Link2, Check, AlertTriangle } from "lucide-react";
 import { useCopyLink } from "@/hooks/useCopyLink";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -31,6 +31,7 @@ export default function CompaniesPage() {
 
   const [companies, setCompanies] = useState<Company[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [search, setSearch] = useState("");
   const [editCompany, setEditCompany] = useState<Company | null>(null);
   const [deleteCompany, setDeleteCompany] = useState<Company | null>(null);
@@ -60,6 +61,8 @@ export default function CompaniesPage() {
   } = useForm<CompanyForm>();
 
   const fetchCompanies = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const { data } = await api.get<PaginatedResponse<Company>>(
         "/resources/companies/"
@@ -67,6 +70,7 @@ export default function CompaniesPage() {
       setCompanies(data.results);
     } catch (err) {
       toastError(getErrorMessage(err));
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -211,6 +215,13 @@ export default function CompaniesPage() {
               <CompanyCardSkeleton key={i} />
             ))}
           </div>
+        ) : loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load companies"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: fetchCompanies }}
+          />
         ) : companies.length === 0 ? (
           // No companies exist at all
           <EmptyState

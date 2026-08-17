@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, useParams } from "next/navigation";
 import { useForm } from "react-hook-form";
-import { Layers, Pencil, Trash2, Upload, ChevronRight, Link2, Check } from "lucide-react";
+import { Layers, Pencil, Trash2, Upload, ChevronRight, Link2, Check, AlertTriangle } from "lucide-react";
 import { useCopyLink } from "@/hooks/useCopyLink";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -31,6 +31,7 @@ export default function SectionsPage() {
   const [company, setCompany] = useState<Company | null>(null);
   const [sections, setSections] = useState<Section[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [editSection, setEditSection] = useState<Section | null>(null);
   const [deleteSection, setDeleteSection] = useState<Section | null>(null);
   const [showAdd, setShowAdd] = useState(false);
@@ -46,6 +47,8 @@ export default function SectionsPage() {
   } = useForm<SectionForm>();
 
   const fetchSections = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const [companyRes, sectionsRes] = await Promise.all([
         api.get<ApiSuccess<Company>>(`/resources/companies/${company_id}/`),
@@ -57,6 +60,7 @@ export default function SectionsPage() {
       setSections(sectionsRes.data.results);
     } catch (err) {
       toastError(getErrorMessage(err));
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -163,6 +167,13 @@ export default function SectionsPage() {
               <SectionCardSkeleton key={i} />
             ))}
           </div>
+        ) : loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load sections"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: fetchSections }}
+          />
         ) : sections.length === 0 ? (
           <EmptyState
             icon={Layers}

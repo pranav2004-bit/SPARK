@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useForm } from "react-hook-form";
-import { Users, ChevronDown, Upload } from "lucide-react";
+import { Users, ChevronDown, Upload, AlertTriangle } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -37,6 +37,7 @@ export default function StudentsPage() {
   const [batches, setBatches] = useState<Batch[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [search, setSearch] = useState("");
@@ -56,6 +57,7 @@ export default function StudentsPage() {
 
   const fetchStudents = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const params = new URLSearchParams();
       params.set("page", String(page));
@@ -71,6 +73,7 @@ export default function StudentsPage() {
       setTotalPages(data.total_pages ?? Math.ceil(data.count / 50));
     } catch (err) {
       toastError(getErrorMessage(err));
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -242,7 +245,14 @@ export default function StudentsPage() {
           )}
         </div>
 
-        {!loading && totalCount === 0 && !search && !department ? (
+        {loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load students"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: fetchStudents }}
+          />
+        ) : !loading && totalCount === 0 && !search && !department ? (
           <EmptyState
             icon={Users}
             title="No Students Yet"

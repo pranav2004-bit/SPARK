@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
   ListChecks, AlignLeft, Pencil, Trash2, Globe, EyeOff,
-  Loader2, ChevronRight, Link2, Check, Search,
+  Loader2, ChevronRight, Link2, Check, Search, AlertTriangle,
 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -146,6 +146,7 @@ export default function PracticeSectionPage() {
 
   const [detail,        setDetail]        = useState<SectionDetail | null>(null);
   const [loading,       setLoading]       = useState(true);
+  const [loadError,     setLoadError]     = useState(false);
   const [modal,         setModal]         = useState<ModalState>(null);
   const [creatingType,  setCreatingType]  = useState<QuestionType | null>(null);
   const [deleteTarget,  setDeleteTarget]  = useState<PracticeQuestion | null>(null);
@@ -155,13 +156,19 @@ export default function PracticeSectionPage() {
   const [typeFilter,  setTypeFilter]  = useState<"all" | "mcq" | "fib">("all");
 
   // ── Load ───────────────────────────────────────────────────────────────────
-  useEffect(() => {
+  // On failure this must not just toast and fall through to "No questions
+  // yet" below — that reads as "there's genuinely nothing here," not "this
+  // failed to load."
+  function load() {
+    setLoading(true);
+    setLoadError(false);
     api.get(`/practice/sections/${section_id}/`)
       .then(res => setDetail(res.data.data))
-      .catch(() => toast.error("Failed to load section."))
+      .catch(() => { toast.error("Failed to load section."); setLoadError(true); })
       .finally(() => setLoading(false));
+  }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [section_id]);
+  useEffect(load, [section_id]);
 
   // ── Create question (no title input — number auto-assigned) ───────────────
   async function handleCreateQuestion(questionType: QuestionType) {
@@ -292,6 +299,13 @@ export default function PracticeSectionPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {[1, 2, 3].map(i => <QuestionCardSkeleton key={i} />)}
           </div>
+        ) : loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load this section"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: load }}
+          />
         ) : allQuestions.length === 0 ? (
           <EmptyState
             icon={ListChecks}

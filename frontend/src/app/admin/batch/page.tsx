@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
-import { LayoutDashboard, Pencil, Trash2, Users, ChevronRight } from "lucide-react";
+import { LayoutDashboard, Pencil, Trash2, Users, ChevronRight, AlertTriangle } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -27,6 +27,7 @@ export default function BatchPage() {
 
   const [batches, setBatches] = useState<Batch[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [editBatch, setEditBatch] = useState<Batch | null>(null);
   const [deleteBatch, setDeleteBatch] = useState<Batch | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -42,11 +43,14 @@ export default function BatchPage() {
   } = useForm<BatchForm>();
 
   const fetchBatches = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const { data } = await api.get<ApiSuccess<Batch[]>>("/users/batches/");
       setBatches(data.data);
     } catch (err) {
       toastError(getErrorMessage(err));
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -141,6 +145,13 @@ export default function BatchPage() {
               <CardSkeleton key={i} />
             ))}
           </div>
+        ) : loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load batches"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: fetchBatches }}
+          />
         ) : batches.length === 0 ? (
           <EmptyState
             icon={LayoutDashboard}

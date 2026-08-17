@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import {
   Plus, Trash2, Pencil,
   ChevronUp, ChevronDown, Link2,
-  ArrowLeft, ArrowRight, Save, Loader2, GripVertical,
+  ArrowLeft, ArrowRight, Save, Loader2, GripVertical, AlertTriangle,
 } from "lucide-react";
 import api from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
@@ -80,6 +80,7 @@ export default function AdminScrollPage() {
   // Updates list
   const [updates, setUpdates]       = useState<ScrollUpdate[]>([]);
   const [loading, setLoading]       = useState(true);
+  const [loadError, setLoadError]   = useState(false);
 
   // New item form
   const [showAdd, setShowAdd]       = useState(false);
@@ -100,24 +101,29 @@ export default function AdminScrollPage() {
   const [reordering, setReordering] = useState(false);
 
   // ── Load ──────────────────────────────────────────────────────────────────
-
-  useEffect(() => {
-    async function load() {
-      try {
-        const [cfgRes, updRes] = await Promise.all([
-          api.get("/users/scroll/config/"),
-          api.get("/users/scroll/updates/"),
-        ]);
-        setConfig(cfgRes.data.data);
-        setUpdates(updRes.data.data ?? []);
-      } catch {
-        showToast("error", "Failed to load scroll settings.");
-      } finally {
-        setLoading(false);
-      }
+  // On failure this must not just toast and fall through to "No updates
+  // yet" below — that reads as "there's genuinely nothing here," not "this
+  // failed to load."
+  async function load() {
+    setLoading(true);
+    setLoadError(false);
+    try {
+      const [cfgRes, updRes] = await Promise.all([
+        api.get("/users/scroll/config/"),
+        api.get("/users/scroll/updates/"),
+      ]);
+      setConfig(cfgRes.data.data);
+      setUpdates(updRes.data.data ?? []);
+    } catch {
+      showToast("error", "Failed to load scroll settings.");
+      setLoadError(true);
+    } finally {
+      setLoading(false);
     }
-    load();
-  }, [showToast]);
+  }
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, []);
 
   // ── Config patch ──────────────────────────────────────────────────────────
 
@@ -259,6 +265,56 @@ export default function AdminScrollPage() {
         <div style={{ display: "flex", alignItems: "center", gap: 10, color: "#8fa3b8", fontSize: 14, paddingTop: 24 }}>
           <Loader2 size={18} className="animate-spin" />
           Loading…
+        </div>
+      ) : loadError ? (
+        <div
+          style={{
+            background: "#fff",
+            border: "1px solid #e6e3df",
+            borderRadius: 14,
+            padding: "48px 20px",
+            textAlign: "center",
+            boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
+          }}
+        >
+          <div
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: 12,
+              background: "#FEF2F2",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              margin: "0 auto 12px",
+            }}
+          >
+            <AlertTriangle size={20} style={{ color: "#ef4444" }} />
+          </div>
+          <p style={{ fontSize: 14, fontWeight: 600, color: "#1A3150" }}>Couldn't load scroll settings</p>
+          <p style={{ fontSize: 12, color: "#8fa3b8", marginTop: 4 }}>
+            Something went wrong fetching this data — it may be temporary. Try again in a moment.
+          </p>
+          <button
+            onClick={() => load()}
+            style={{
+              marginTop: 16,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "7px 16px",
+              borderRadius: 8,
+              border: "none",
+              background: "#FF8C00",
+              color: "#fff",
+              fontSize: 13,
+              fontWeight: 600,
+              fontFamily: "inherit",
+              cursor: "pointer",
+            }}
+          >
+            Retry
+          </button>
         </div>
       ) : (
         <>

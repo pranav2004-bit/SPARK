@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { Building2, ChevronRight, Search, Loader2, Layers } from "lucide-react";
+import { Building2, ChevronRight, Search, Loader2, Layers, AlertTriangle } from "lucide-react";
 import { StudentLayout } from "@/components/layout/StudentLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -127,6 +127,7 @@ export default function StudentCompaniesPage() {
 
   const [companies, setCompanies] = useState<Company[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [navigatingId, setNavigatingId] = useState<string | null>(null);
   const [backLoading, setBackLoading] = useState(false);
@@ -137,11 +138,14 @@ export default function StudentCompaniesPage() {
   }
 
   const fetchCompanies = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const res = await api.get<PaginatedResponse<Company>>("/resources/student/companies/");
       setCompanies(res.data.results);
     } catch (err) {
       toast.error(getErrorMessage(err));
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -193,7 +197,15 @@ export default function StudentCompaniesPage() {
         )}
 
         {/* ── Grid ─────────────────────────────────────────────────────────── */}
-        {!hasCompanies ? (
+        {loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load companies"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: fetchCompanies }}
+          />
+
+        ) : !hasCompanies ? (
           <EmptyState
             icon={Building2}
             title="No companies yet"

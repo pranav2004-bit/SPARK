@@ -90,7 +90,16 @@ api.interceptors.response.use(
         const role = useAuthStore.getState().user?.role;
         useAuthStore.getState().clearAuth();
         clearAuthCookies();
-        window.location.href = LOGIN_REDIRECT_PATHS[role ?? "admin"] ?? "/login";
+        // When role is unknown (never logged in this session — e.g. a fresh
+        // "Get Started" visit that 401s before any auth exists), fall back to
+        // whichever portal the user is currently under instead of always
+        // defaulting to admin — that previously bounced student-portal visitors
+        // to /admin/login.
+        const path = window.location.pathname;
+        const portalFallback = path.startsWith("/admin") ? "admin"
+          : path.startsWith("/super-admin") ? "super_admin"
+          : "student";
+        window.location.href = LOGIN_REDIRECT_PATHS[role ?? portalFallback] ?? "/login";
         return Promise.reject(err);
       };
 
@@ -152,6 +161,14 @@ export default api;
 
 export function getErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
+    // No `response` at all means the request never reached the server —
+    // offline, DNS failure, timeout, CORS block — as opposed to a real
+    // HTTP error response (4xx/5xx), which has its own message below.
+    // Same detection used by the exam page's offline queue
+    // (assessmentOfflineQueue.ts's isRetryableNetworkError).
+    if (error.response === undefined) {
+      return "No internet connection. Please check your network and try again.";
+    }
     const data = error.response?.data;
     if (data?.message) return data.message;
     if (data?.detail) return data.detail;

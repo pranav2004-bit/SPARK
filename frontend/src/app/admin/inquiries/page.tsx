@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import {
   MessageSquare, CheckCheck, Clock,
-  Mail, User, GraduationCap, BookOpen, Loader2,
+  Mail, User, GraduationCap, BookOpen, Loader2, AlertTriangle,
 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -50,6 +50,7 @@ export default function InquiriesPage() {
   const toast = useToast();
   const [inquiries, setInquiries] = useState<Inquiry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [markingId, setMarkingId] = useState<string | null>(null);
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [totalCount, setTotalCount] = useState(0);
@@ -58,6 +59,7 @@ export default function InquiriesPage() {
 
   const fetchInquiries = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const params = new URLSearchParams();
       if (unreadOnly) params.set("unread", "true");
@@ -70,6 +72,7 @@ export default function InquiriesPage() {
       setTotalPages(res.data.total_pages);
     } catch (err) {
       toast.error(getErrorMessage(err));
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -110,9 +113,11 @@ export default function InquiriesPage() {
             <p className="text-sm text-[var(--color-text-muted)] mt-0.5">
               {loading
                 ? "Loading…"
-                : totalCount === 0
-                  ? "No inquiries yet."
-                  : `${totalCount} total${unreadCount > 0 ? ` · ${unreadCount} unread` : " · all read"}`
+                : loadError
+                  ? "Couldn't load inquiries."
+                  : totalCount === 0
+                    ? "No inquiries yet."
+                    : `${totalCount} total${unreadCount > 0 ? ` · ${unreadCount} unread` : " · all read"}`
               }
             </p>
           </div>
@@ -138,6 +143,14 @@ export default function InquiriesPage() {
           <div className="space-y-3">
             {[1, 2, 3].map((i) => <SkeletonCard key={i} />)}
           </div>
+
+        ) : loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load inquiries"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: fetchInquiries }}
+          />
 
         ) : inquiries.length === 0 ? (
           <EmptyState

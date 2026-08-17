@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Layers, FolderOpen, ChevronRight } from "lucide-react";
+import { Layers, FolderOpen, ChevronRight, AlertTriangle } from "lucide-react";
 import { StudentLayout } from "@/components/layout/StudentLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { LoadingSpinner } from "@/components/ui/Skeleton";
 import { GlobalLoader } from "@/components/ui/GlobalLoader";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
 import type { PracticeModule, PracticeSection } from "@/types";
@@ -44,6 +45,7 @@ export default function StudentPracticeHubPage() {
 
   const [data,         setData]         = useState<PracticeRootData>({ modules: [], sections: [] });
   const [loading,      setLoading]      = useState(true);
+  const [loadError,    setLoadError]    = useState(false);
   const [navigatingTo, setNavigatingTo] = useState<string | null>(null);
 
   const goTo = (path: string, id: string) => {
@@ -51,13 +53,19 @@ export default function StudentPracticeHubPage() {
     router.push(path);
   };
 
-  useEffect(() => {
+  // On failure this must not just toast and fall through to "No practice
+  // content yet" below — that reads as "there's genuinely nothing here,"
+  // not "this failed to load."
+  function load() {
+    setLoading(true);
+    setLoadError(false);
     api.get("/practice/student/")
       .then(res => setData(res.data.data ?? { modules: [], sections: [] }))
-      .catch(err => toastError(getErrorMessage(err)))
+      .catch(err => { toastError(getErrorMessage(err)); setLoadError(true); })
       .finally(() => setLoading(false));
+  }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(load, []);
 
   const { modules, sections } = data;
   const hasContent = modules.length > 0 || sections.length > 0;
@@ -79,7 +87,15 @@ export default function StudentPracticeHubPage() {
         </div>
 
         {/* ── Content ─────────────────────────────────────────────────────────── */}
-        {!hasContent ? (
+        {loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load practice content"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: load }}
+          />
+
+        ) : !hasContent ? (
           <div className="flex flex-col items-center justify-center py-24 text-center">
             <div
               className="w-14 h-14 rounded-full flex items-center justify-center mb-4"

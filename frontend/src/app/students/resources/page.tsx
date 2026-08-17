@@ -2,11 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Building2, Layers, ChevronRight } from "lucide-react";
+import { Building2, Layers, ChevronRight, AlertTriangle } from "lucide-react";
 import { StudentLayout } from "@/components/layout/StudentLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { LoadingSpinner } from "@/components/ui/Skeleton";
 import { GlobalLoader } from "@/components/ui/GlobalLoader";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
 import type { ResourceModule } from "@/types";
@@ -57,19 +58,25 @@ export default function StudentResourcesHubPage() {
 
   const [modules,      setModules]      = useState<ResourceModule[]>([]);
   const [loading,      setLoading]      = useState(true);
+  const [loadError,    setLoadError]    = useState(false);
   const [navigatingTo, setNavigatingTo] = useState<string | null>(null);
 
   const lastFetchAt = useRef<number>(0);
   const STALE_MS    = 30_000;
 
+  // Silent background polls (visibility-change refetch) stay quiet on
+  // failure — but a *non-silent* failure (initial load) must not just toast
+  // and fall through to "No resources yet" below, which reads as "there's
+  // genuinely nothing here" rather than "this failed to load."
   const fetchModules = (silent = false) => {
     if (!silent) setLoading(true);
     api.get("/resources/student/modules/")
       .then(res => {
         setModules(res.data.data ?? []);
         lastFetchAt.current = Date.now();
+        setLoadError(false);
       })
-      .catch(err => { if (!silent) toastError(getErrorMessage(err)); })
+      .catch(err => { if (!silent) { toastError(getErrorMessage(err)); setLoadError(true); } })
       .finally(() => { if (!silent) setLoading(false); });
   };
 
@@ -121,7 +128,15 @@ export default function StudentResourcesHubPage() {
         </div>
 
         {/* ── Grid ────────────────────────────────────────────────────────────── */}
-        {modules.length === 0 ? (
+        {loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load resources"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: () => fetchModules() }}
+          />
+
+        ) : modules.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-center">
             <div className="w-14 h-14 rounded-full flex items-center justify-center mb-4"
               style={{ background: T.surface }}>

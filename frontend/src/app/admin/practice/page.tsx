@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Layers, FolderOpen, HelpCircle,
+  Layers, FolderOpen, HelpCircle, AlertTriangle,
   Pencil, Trash2, Globe, EyeOff, Loader2, ChevronRight, Link2, Check,
 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
@@ -172,6 +172,7 @@ export default function AdminPracticePage() {
   const [modules,   setModules]   = useState<PracticeModule[]>([]);
   const [sections,  setSections]  = useState<PracticeSection[]>([]);
   const [loading,   setLoading]   = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [modal,     setModal]     = useState<ModalState>(null);
   const [modalName, setModalName] = useState("");
   const [modalError, setModalError] = useState("");
@@ -183,16 +184,22 @@ export default function AdminPracticePage() {
   const [deleting, setDeleting] = useState(false);
 
   // ── Load ───────────────────────────────────────────────────────────────────
-  useEffect(() => {
+  // On failure this must not just toast and fall through to "Nothing here
+  // yet" below — that reads as "you have no modules/sections," not "this
+  // failed to load."
+  function load() {
+    setLoading(true);
+    setLoadError(false);
     api.get("/practice/")
       .then(res => {
         setModules(res.data.data.modules);
         setSections(res.data.data.sections);
       })
-      .catch(() => toast.error("Failed to load practice hub."))
+      .catch(() => { toast.error("Failed to load practice hub."); setLoadError(true); })
       .finally(() => setLoading(false));
+  }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(load, []);
 
   // ── Modal helpers ──────────────────────────────────────────────────────────
   function openModal(state: NonNullable<ModalState>) {
@@ -302,6 +309,13 @@ export default function AdminPracticePage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {[1, 2, 3].map(i => <ResourceItemCardSkeleton key={i} />)}
           </div>
+        ) : loadError ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn't load the practice hub"
+            subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+            action={{ label: "Retry", onClick: load }}
+          />
         ) : isEmpty ? (
           <EmptyState
             icon={HelpCircle}
