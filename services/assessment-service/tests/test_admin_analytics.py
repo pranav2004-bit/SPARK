@@ -32,7 +32,7 @@ def analytics_setup(db):
     comment below for the full manual computation this is built from."""
     paper = QuestionPaper.objects.create(
         institution_id=INSTITUTION_A, title="Analytics Test Paper",
-        created_by=ADMIN_USER_ID, is_published=True,
+        created_by=ADMIN_USER_ID,
     )
     set_a = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
     set_b = QuestionSet.objects.create(paper=paper, label="Set B", order=2)

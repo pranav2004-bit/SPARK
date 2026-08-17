@@ -52,6 +52,27 @@ def snapshot_roster_and_allocate(assignment, auth_header: str) -> int:
         .values_list("student_id", flat=True)
     )
 
+    # Empty departments list (the default) means every department in the
+    # batch — narrow the roster only when the admin scoped this assignment
+    # to specific department(s) (live request, 2026-08-15). department is
+    # free-text on Student (user-service), no fixed enum — matched
+    # case-insensitively, same convention as the admin results table's
+    # existing department filter (department__iexact).
+    if assignment.departments:
+        wanted = {d.strip().lower() for d in assignment.departments}
+        matched = [s for s in students if (s.get("department") or "").strip().lower() in wanted]
+        if not matched and students and not existing_ids:
+            # Only the FIRST snapshot (nothing allocated yet) can leave this
+            # assignment permanently dead — a resync legitimately finding
+            # zero new matches (everyone eligible is already allocated)
+            # isn't an error, just nothing new to do, so this only fires
+            # pre-creation.
+            raise RuntimeError(
+                "No students in the selected batch match the selected department(s). "
+                "Double-check the department names and try again."
+            )
+        students = matched
+
     new_allocations = []
     skipped = 0
     for student in students:

@@ -26,7 +26,7 @@ def results_setup(db):
     """
     paper = QuestionPaper.objects.create(
         institution_id=INSTITUTION_A, title="Results Test Paper",
-        created_by=ADMIN_USER_ID, is_published=True,
+        created_by=ADMIN_USER_ID,
     )
     qset = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
 
@@ -102,6 +102,24 @@ class TestStudentResults:
         assert failed_row["percentage"] == 30.0
         assert failed_row["passed"] is False
         assert failed_row["status"] == SESSION_STATUS_AUTO_SUBMITTED
+
+    def test_score_hidden_when_show_result_to_student_is_false(self, student_client, results_setup):
+        BatchAssignment.objects.filter(pk=results_setup["assignment_1"].pk).update(show_result_to_student=False)
+        resp = student_client.get("/api/assessments/student/results/")
+        data = resp.json()["data"]
+        by_assignment = {r["assignment_id"]: r for r in data}
+
+        hidden_row = by_assignment[str(results_setup["assignment_1"].id)]
+        assert hidden_row["results_visible"] is False
+        assert hidden_row["score"] is None
+        assert hidden_row["total_marks"] is None
+        assert hidden_row["percentage"] is None
+        assert hidden_row["passed"] is None
+
+        # assignment_2 wasn't touched — still fully visible.
+        visible_row = by_assignment[str(results_setup["assignment_2"].id)]
+        assert visible_row["results_visible"] is True
+        assert visible_row["score"] == 3
 
     def test_no_admin_only_fields_exposed(self, student_client, results_setup):
         resp = student_client.get("/api/assessments/student/results/")

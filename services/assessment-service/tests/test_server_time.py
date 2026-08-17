@@ -16,7 +16,7 @@ from .conftest import INSTITUTION_A, ADMIN_USER_ID, STUDENT_USER_ID
 def live_assignment_and_set(db):
     paper = QuestionPaper.objects.create(
         institution_id=INSTITUTION_A, title="Server Time Test Paper",
-        created_by=ADMIN_USER_ID, is_published=True,
+        created_by=ADMIN_USER_ID,
     )
     qset = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
     assignment = BatchAssignment.objects.create(

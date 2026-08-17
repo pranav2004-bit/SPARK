@@ -89,7 +89,7 @@ def _request_with_sqlite_lock_retry(fn, retries=400, delay=0.05):
 def concurrency_setup(transactional_db):
     paper = QuestionPaper.objects.create(
         institution_id=INSTITUTION_A, title="Concurrency Test Paper",
-        created_by=ADMIN_USER_ID, is_published=True,
+        created_by=ADMIN_USER_ID,
     )
     qset = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
     question = Question.objects.create(

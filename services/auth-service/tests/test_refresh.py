@@ -56,3 +56,13 @@ def test_blacklisted_refresh_returns_401(admin_user):
         content_type="application/json",
     )
     assert resp.status_code == 401
+    # SimpleJWT's InvalidToken sets .detail to a dict of ErrorDetail objects
+    # (not a plain string) — a naive exception handler that builds the
+    # top-level "message" via str(exc) leaks Python's raw repr straight to
+    # the frontend toast: "{'detail': ErrorDetail(string='Token is
+    # blacklisted', code='token_not_valid'), 'code': ErrorDetail(...)}".
+    # Real bug, caught live in the admin UI. message must be clean text.
+    message = resp.json()["message"]
+    assert "ErrorDetail" not in message
+    assert "{'detail'" not in message
+    assert message == "Token is blacklisted"

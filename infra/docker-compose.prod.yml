@@ -128,6 +128,16 @@ services:
     image: ${REGISTRY:-spark}/user-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/user-service/.env
+    environment:
+      # Pinned explicitly rather than left to inherit core/settings.py's
+      # code default: that default was tightened (5s/3 retries → 3s/2) on
+      # 2026-08-17 for the dev Docker-internal network, where a stale
+      # connection after long idle should fail fast. Real production
+      # network hops have more legitimate variance than same-host dev
+      # traffic, so this service keeps the original, more patient values
+      # rather than silently inheriting the dev-motivated tightening.
+      AUTH_SERVICE_TIMEOUT: "5"
+      AUTH_SERVICE_RETRIES: "3"
     depends_on:
       postgres:
         condition: service_healthy
@@ -359,6 +369,16 @@ services:
     image: ${REGISTRY:-spark}/assessment-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/assessment-service/.env
+    environment:
+      # Same reasoning as user-service's override above — pin the original,
+      # more patient values here rather than silently inherit the
+      # dev-motivated 2026-08-17 tightening (AUTH_SERVICE_TIMEOUT 5s→2s/3→2
+      # retries, USER_SERVICE_TIMEOUT 5s→3s/3→2 retries), which was aimed at
+      # a same-host Docker network staleness bug, not real prod latency.
+      AUTH_SERVICE_TIMEOUT: "5"
+      AUTH_SERVICE_RETRIES: "3"
+      USER_SERVICE_TIMEOUT: "5"
+      USER_SERVICE_RETRIES: "3"
     depends_on:
       postgres:
         condition: service_healthy

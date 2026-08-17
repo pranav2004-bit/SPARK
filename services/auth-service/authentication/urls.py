@@ -11,6 +11,7 @@ from .views import (
     StudentChangePasswordView,
     AdminSelfProfileView,
     AdminChangePasswordView,
+    AdminUserLookupView,
     AdminListCreateView,
     AdminDetailView,
     AdminResetDefaultPasswordView,
@@ -30,6 +31,7 @@ urlpatterns = [
     # Admin self-service
     path("me/", AdminSelfProfileView.as_view(), name="admin-self-profile"),
     path("me/change-password/", AdminChangePasswordView.as_view(), name="admin-change-password"),
+    path("admin/users/lookup/", AdminUserLookupView.as_view(), name="admin-user-lookup"),
 
     # Password resets
     path("student/<str:student_id>/reset-password/", StudentPasswordResetView.as_view(), name="student-reset-password"),

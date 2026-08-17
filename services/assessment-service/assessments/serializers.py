@@ -14,7 +14,7 @@ class QuestionPaperSerializer(serializers.ModelSerializer):
     class Meta:
         model = QuestionPaper
         fields = [
-            "id", "title", "description", "is_published",
+            "id", "title", "description", "instructions",
             "set_count", "created_by", "created_at", "updated_at",
         ]
         read_only_fields = ["id", "created_by", "created_at", "updated_at"]
@@ -117,12 +117,18 @@ class StudentQuestionSerializer(serializers.ModelSerializer):
 
 
 class BatchAssignmentSerializer(serializers.ModelSerializer):
+    # Additive, read-only — the frontend's new admin/assessments/assignments/
+    # list page needs a human-readable label per row, and "paper" itself only
+    # ever serializes to the FK's raw UUID. select_related("paper") in the
+    # view (AdminAssignmentListCreateView.get) makes this free — no N+1.
+    paper_title = serializers.CharField(source="paper.title", read_only=True)
+
     class Meta:
         model = BatchAssignment
         fields = [
-            "id", "paper", "batch_id", "institution_id",
+            "id", "paper", "paper_title", "batch_id", "institution_id",
             "global_start_time", "global_expire_time", "exam_duration_minutes",
-            "pass_cutoff_percentage", "status", "created_by",
+            "pass_cutoff_percentage", "show_result_to_student", "departments", "status", "created_by",
             "created_at", "updated_at",
         ]
         read_only_fields = [
@@ -135,6 +141,11 @@ class BatchAssignmentSerializer(serializers.ModelSerializer):
             "id", "institution_id", "status",
             "created_by", "created_at", "updated_at",
         ]
+
+    def validate_departments(self, value):
+        if not isinstance(value, list) or not all(isinstance(d, str) and d.strip() for d in value):
+            raise serializers.ValidationError("departments must be a list of department names.")
+        return [d.strip() for d in value]
 
     def validate(self, attrs):
         expire = attrs.get("global_expire_time")

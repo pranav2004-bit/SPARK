@@ -17,7 +17,7 @@ from .conftest import INSTITUTION_A, INSTITUTION_B, ADMIN_USER_ID, STUDENT_USER_
 def published_paper(db):
     paper = QuestionPaper.objects.create(
         institution_id=INSTITUTION_A, title="Assign Test Paper",
-        created_by=ADMIN_USER_ID, is_published=True,
+        created_by=ADMIN_USER_ID,
     )
     qset = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
     q = Question.objects.create(set=qset, question_text="2+2?", marks=1)
@@ -27,9 +27,9 @@ def published_paper(db):
 
 
 @pytest.fixture
-def unpublished_paper(db):
+def paper_with_empty_set(db):
     paper = QuestionPaper.objects.create(
-        institution_id=INSTITUTION_A, title="Unpublished Paper", created_by=ADMIN_USER_ID,
+        institution_id=INSTITUTION_A, title="Empty Set Paper", created_by=ADMIN_USER_ID,
     )
     QuestionSet.objects.create(paper=paper, label="Set A", order=1)
     return paper
@@ -39,7 +39,7 @@ def unpublished_paper(db):
 def paper_no_sets(db):
     return QuestionPaper.objects.create(
         institution_id=INSTITUTION_A, title="No Sets Paper",
-        created_by=ADMIN_USER_ID, is_published=True,
+        created_by=ADMIN_USER_ID,
     )
 
 
@@ -66,6 +66,33 @@ class TestCreateAssignment:
         assert body["status"] == ASSIGNMENT_STATUS_SCHEDULED
         assert body["pass_cutoff_percentage"] == 40  # default
         mock_snap.assert_called_once()
+
+    @patch("assessments.views.snapshot_roster_and_allocate")
+    def test_departments_defaults_to_empty_list_when_omitted(self, mock_snap, admin_client, published_paper):
+        mock_snap.return_value = 0
+        resp = admin_client.post("/api/assessments/admin/assignments/", _payload(published_paper), format="json")
+        assert resp.status_code == 201
+        assert resp.json()["data"]["departments"] == []
+
+    @patch("assessments.views.snapshot_roster_and_allocate")
+    def test_departments_accepted_and_stored(self, mock_snap, admin_client, published_paper):
+        mock_snap.return_value = 0
+        payload = _payload(published_paper, departments=["CSE", "CSD"])
+        resp = admin_client.post("/api/assessments/admin/assignments/", payload, format="json")
+        assert resp.status_code == 201
+        assert resp.json()["data"]["departments"] == ["CSE", "CSD"]
+        assignment = BatchAssignment.objects.get(pk=resp.json()["data"]["id"])
+        assert assignment.departments == ["CSE", "CSD"]
+
+    def test_departments_rejects_non_list(self, admin_client, published_paper):
+        payload = _payload(published_paper, departments="CSE")  # string, not a list
+        resp = admin_client.post("/api/assessments/admin/assignments/", payload, format="json")
+        assert resp.status_code == 400
+
+    def test_departments_rejects_non_string_entries(self, admin_client, published_paper):
+        payload = _payload(published_paper, departments=[123])
+        resp = admin_client.post("/api/assessments/admin/assignments/", payload, format="json")
+        assert resp.status_code == 400
 
     @patch("assessments.views.snapshot_roster_and_allocate")
     def test_roster_failure_rolls_back_whole_assignment(self, mock_snap, admin_client, published_paper):
@@ -97,6 +124,84 @@ class TestCreateAssignment:
     def test_non_admin_forbidden(self, student_client, published_paper):
         resp = student_client.post("/api/assessments/admin/assignments/", _payload(published_paper), format="json")
         assert resp.status_code == 403
+
+
+# ── Assignment-readiness checks (moved here from publish/, 2026-08-14) ─────
+# publish/unpublish no longer gates anything — every one of these used to be
+# a publish-time-only check (some just a warning, not even a hard block);
+# now they're all enforced at assignment-creation time instead, since
+# "assign" is the sole readiness gate left in the admin workflow.
+
+class TestAssignmentReadinessChecks:
+    def _paper_with_sets(self, set_specs):
+        """set_specs: list of lists of (marks, mcq_type, correct_count) per question."""
+        from assessments.models import MCQ_TYPE_MULTIPLE
+        paper = QuestionPaper.objects.create(
+            institution_id=INSTITUTION_A, title="Readiness Test Paper", created_by=ADMIN_USER_ID,
+        )
+        for i, questions in enumerate(set_specs):
+            qset = QuestionSet.objects.create(paper=paper, label=f"Set {chr(65+i)}", order=i + 1)
+            for j, (marks, mcq_type, correct_count) in enumerate(questions):
+                q = Question.objects.create(set=qset, question_text=f"Q{j}?", marks=marks, mcq_type=mcq_type)
+                QuestionOption.objects.create(question=q, label="A", text="opt A", is_correct=correct_count >= 1, order=1)
+                QuestionOption.objects.create(question=q, label="B", text="opt B", is_correct=correct_count >= 2, order=2)
+        return paper
+
+    def test_unequal_question_counts_across_sets_rejected(self, admin_client):
+        from assessments.models import MCQ_TYPE_SINGLE
+        paper = self._paper_with_sets([
+            [(1, MCQ_TYPE_SINGLE, 1)],
+            [(1, MCQ_TYPE_SINGLE, 1), (1, MCQ_TYPE_SINGLE, 1)],
+        ])
+        resp = admin_client.post("/api/assessments/admin/assignments/", _payload(paper), format="json")
+        assert resp.status_code == 400
+        assert "unequal question counts" in resp.json()["message"]
+
+    def test_unequal_marks_across_sets_rejected(self, admin_client):
+        from assessments.models import MCQ_TYPE_SINGLE
+        paper = self._paper_with_sets([
+            [(1, MCQ_TYPE_SINGLE, 1)],
+            [(2, MCQ_TYPE_SINGLE, 1)],
+        ])
+        resp = admin_client.post("/api/assessments/admin/assignments/", _payload(paper), format="json")
+        assert resp.status_code == 400
+        assert "unequal total marks" in resp.json()["message"]
+
+    def test_multiple_correct_question_with_only_one_correct_rejected(self, admin_client):
+        from assessments.models import MCQ_TYPE_MULTIPLE
+        paper = self._paper_with_sets([[(1, MCQ_TYPE_MULTIPLE, 1)]])
+        resp = admin_client.post("/api/assessments/admin/assignments/", _payload(paper), format="json")
+        assert resp.status_code == 400
+        assert "more than one correct option" in resp.json()["message"]
+
+    def test_multiple_correct_question_with_two_correct_accepted(self, admin_client):
+        from assessments.models import MCQ_TYPE_MULTIPLE
+        paper = self._paper_with_sets([[(1, MCQ_TYPE_MULTIPLE, 2)]])
+        with patch("assessments.views.snapshot_roster_and_allocate", return_value=0):
+            resp = admin_client.post("/api/assessments/admin/assignments/", _payload(paper), format="json")
+        assert resp.status_code == 201
+
+    def test_set_with_no_questions_rejected(self, admin_client):
+        paper = QuestionPaper.objects.create(
+            institution_id=INSTITUTION_A, title="Empty Set Paper", created_by=ADMIN_USER_ID,
+        )
+        QuestionSet.objects.create(paper=paper, label="Set A", order=1)
+        resp = admin_client.post("/api/assessments/admin/assignments/", _payload(paper), format="json")
+        assert resp.status_code == 400
+        assert "has no questions" in resp.json()["message"]
+
+    def test_equal_sets_with_valid_questions_accepted(self, admin_client, paper_with_empty_set):
+        # paper_with_empty_set's single set has zero questions, so give it
+        # one valid question first, then confirm readiness only cares about
+        # real content (question count/options/correct-answer rules).
+        from assessments.models import MCQ_TYPE_SINGLE
+        qset = paper_with_empty_set.sets.first()
+        q = Question.objects.create(set=qset, question_text="2+2?", marks=1, mcq_type=MCQ_TYPE_SINGLE)
+        QuestionOption.objects.create(question=q, label="A", text="4", is_correct=True, order=1)
+        QuestionOption.objects.create(question=q, label="B", text="5", is_correct=False, order=2)
+        with patch("assessments.views.snapshot_roster_and_allocate", return_value=0):
+            resp = admin_client.post("/api/assessments/admin/assignments/", _payload(paper_with_empty_set), format="json")
+        assert resp.status_code == 201
 
 
 # ── Immutability lock (completes Task 2.2's stub) ───────────────────────────
@@ -142,12 +247,18 @@ class TestStartAssignment:
         assert assignment.status == ASSIGNMENT_STATUS_LIVE
         assert assignment.global_start_time is not None
 
-    def test_start_unpublished_paper_rejected(self, admin_client, unpublished_paper):
-        assignment = self._create_direct(unpublished_paper)
+    def test_start_succeeds_without_rechecking_paper_readiness(self, admin_client, paper_with_empty_set):
+        # Readiness (content completeness, correct-answer counts) is checked
+        # once, at assignment-creation time (get_assignment_readiness_blockers)
+        # — Start must not re-run it. This directly created assignment
+        # bypasses that create-time check (as _create_direct always has),
+        # using a paper whose set has no questions, to prove Start doesn't
+        # care about paper content at all.
+        assignment = self._create_direct(paper_with_empty_set)
         resp = admin_client.patch(f"/api/assessments/admin/assignments/{assignment.id}/start/")
-        assert resp.status_code == 400
+        assert resp.status_code == 200
         assignment.refresh_from_db()
-        assert assignment.status == ASSIGNMENT_STATUS_SCHEDULED
+        assert assignment.status == ASSIGNMENT_STATUS_LIVE
 
     def test_start_twice_is_noop_not_error(self, admin_client, published_paper):
         assignment = self._create_direct(published_paper)

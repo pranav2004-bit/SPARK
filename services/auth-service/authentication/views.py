@@ -1,4 +1,5 @@
 import logging
+import uuid
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import connection
@@ -9,7 +10,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from django.core.cache import cache
 
 from core.responses import success_response, error_response
-from core.permissions import IsAdminUser, IsStudentUser, IsSuperAdminUser, IsInternalService
+from core.permissions import IsAdminUser, IsStudentUser, IsSuperAdminUser, IsInternalService, IsAdminOrSuperAdmin
 from .serializers import (
     LoginSerializer, LogoutSerializer,
     StudentPasswordResetSerializer, AdminPasswordResetSerializer,
@@ -328,6 +329,51 @@ class AdminChangePasswordView(APIView):
         )
         tokens = get_tokens_for_user(user)
         return success_response(data=tokens, message="Password changed successfully.")
+
+
+# ── Admin: shared lookups ────────────────────────────────────────────────────
+
+class AdminUserLookupView(APIView):
+    """GET /api/auth/admin/users/lookup/?ids=<uuid>,<uuid>,... — resolves a
+    batch of user_ids to display name/email, scoped to the requesting
+    admin's own institution only. Any admin or super admin may call this
+    (unlike AdminListCreateView below, which is roster *management* and
+    stays super-admin-only) — this is a read-only "whose account is this"
+    lookup that any admin viewing shared institution content (e.g. another
+    admin's authored question paper) needs.
+
+    Bulk-by-ids, not one-id-per-call — callers (e.g. assessment-service's
+    auth_service_client.resolve_user_names, used for papers-list "Created
+    by <name>" labels) batch every id they need into one request instead of
+    N+1 calling per row.
+
+    An id outside the caller's own institution is silently omitted from the
+    response, not 403'd or 404'd individually — that would let a caller
+    probe for the existence of ids in other institutions one at a time.
+    """
+    permission_classes = [IsAdminOrSuperAdmin]
+
+    def get(self, request):
+        raw_ids = request.query_params.get("ids", "")
+        ids = []
+        for part in raw_ids.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                ids.append(uuid.UUID(part))
+            except ValueError:
+                continue  # malformed id — just unresolvable, not a 400
+        # Defensive cap — this endpoint answers "resolve the authors shown
+        # on one page of results," never an arbitrarily large batch.
+        ids = ids[:100]
+
+        if not ids:
+            return success_response(data=[])
+
+        users = User.objects.filter(id__in=ids, institution_id=request.user.institution_id)
+        data = [{"id": str(u.id), "name": u.name, "email": u.email} for u in users]
+        return success_response(data=data)
 
 
 # ── Admin Management (Super Admin only) ────────────────────────────────────────

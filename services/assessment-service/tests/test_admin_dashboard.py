@@ -33,7 +33,7 @@ def dashboard_setup(db):
     """
     paper = QuestionPaper.objects.create(
         institution_id=INSTITUTION_A, title="Dashboard Test Paper",
-        created_by=ADMIN_USER_ID, is_published=True,
+        created_by=ADMIN_USER_ID,
     )
     qset = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
     q1 = Question.objects.create(set=qset, question_text="Q1", marks=10)

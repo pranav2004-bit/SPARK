@@ -223,10 +223,34 @@ CELERY_BEAT_SCHEDULE = {
 # user-service's own core/auth_client.py → auth-service pattern, except the
 # call is authenticated by forwarding the calling admin's own JWT (not a
 # X-Service-Key shared secret) — see core/user_service_client.py for why.
+#
+# Timeout trimmed from the original 5s (2026-08-17, same incident as
+# AUTH_SERVICE_TIMEOUT below): a stale connection to another service should
+# fail fast, not hang for a full 5s per page of a multi-page roster fetch.
+# Kept a little higher than AUTH_SERVICE_TIMEOUT's 2s since this one's
+# result is a hard blocker for assignment creation (wrong to cut off an
+# in-flight page fetch too eagerly), not a cosmetic label.
 USER_SERVICE_URL = os.environ.get("USER_SERVICE_URL", "http://user-service:8000")
-USER_SERVICE_TIMEOUT = int(os.environ.get("USER_SERVICE_TIMEOUT", "5"))
-USER_SERVICE_RETRIES = int(os.environ.get("USER_SERVICE_RETRIES", "3"))
+USER_SERVICE_TIMEOUT = int(os.environ.get("USER_SERVICE_TIMEOUT", "3"))
+USER_SERVICE_RETRIES = int(os.environ.get("USER_SERVICE_RETRIES", "2"))
 USER_SERVICE_RETRY_BACKOFF = float(os.environ.get("USER_SERVICE_RETRY_BACKOFF", "0.3"))
+
+# ── auth-service (resolve created_by → name/email for "Created by" labels) ─────
+# Same JWT-forwarding pattern as USER_SERVICE_* above, just pointed at
+# auth-service instead — see core/auth_service_client.py.
+#
+# Timeout deliberately much lower than USER_SERVICE_TIMEOUT: that one backs
+# a roster fetch the assignment flow actually needs, worth waiting on. This
+# one only fills in a "Created by <name>" cosmetic label on the papers list
+# — resolve_user_names already degrades to {} on any failure rather than
+# raising, but a live incident (2026-08-17: a stale connection after the
+# containers sat idle ~31h) showed the old 5s-per-attempt default still let
+# one slow/stuck call hold up the whole papers-list response long enough
+# for it to read as a hard failure rather than "loaded, just no names yet."
+AUTH_SERVICE_URL = os.environ.get("AUTH_SERVICE_URL", "http://auth-service:8000")
+AUTH_SERVICE_TIMEOUT = int(os.environ.get("AUTH_SERVICE_TIMEOUT", "2"))
+AUTH_SERVICE_RETRIES = int(os.environ.get("AUTH_SERVICE_RETRIES", "2"))
+AUTH_SERVICE_RETRY_BACKOFF = float(os.environ.get("AUTH_SERVICE_RETRY_BACKOFF", "0.3"))
 
 # ── Logging (Task 13.2) ──────────────────────────────────────────────────────
 # Structured JSON on every handler, correlation ID (core/logging_utils.py —

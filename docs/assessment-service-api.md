@@ -56,11 +56,14 @@ erDiagram
 | `institution_id` | UUID | isolation filter on every queryset |
 | `title` | string | |
 | `description` | text | |
-| `is_published` | bool | unpublished papers invisible to assignment flow (Task 2.2) |
 | `created_by` | UUID | admin user_id |
 | `created_at` / `updated_at` | timestamp | |
 
 **Immutability:** becomes read-only the instant it has ≥1 `BatchAssignment` in `SCHEDULED`/`LIVE`/`CLOSED` (Task 2.2 stub → Task 3.2 real check). Admins wanting a changed version duplicate the paper.
+
+**Ownership restriction (added 2026-08-17):** only the creating admin (`created_by`) or a `super_admin` may open, edit, delete, or assign a paper — enforced server-side via `_require_paper_owner` on every paper/set/question/option mutation and detail-read endpoint, returning `403` for any other admin. Every admin can still *see* every paper in the institution's list (`GET /api/assessments/admin/papers/`); non-owned papers just render locked/view-only in the UI. This is a faculty-privacy control, not an institution-isolation one — `institution_id` scoping is unchanged and unrelated.
+
+**Response-only enrichment (not model fields, added 2026-08-17):** `GET /api/assessments/admin/papers/` additionally returns `created_by_name` and `created_by_email` per row, resolved live from auth-service via `core/auth_service_client.py` (batched, one call per page) and best-effort — a resolution failure leaves both as `""`, it never fails the papers list itself. See [assessment-service-operations.md](assessment-service-operations.md)'s "Known Incident" section for the timeout tuning this call is subject to.
 
 ### QuestionSet — Task 2.1
 | Field | Type | Notes |
@@ -112,6 +115,7 @@ Validation (Task 2.2): single-choice → exactly one `is_correct`; multiple-choi
 | `pass_cutoff_percentage` | int | default 40, admin-editable per assignment (Decision #4) |
 | `status` | enum | `SCHEDULED` / `LIVE` / `CLOSED` — see ADR 001 |
 | `created_by` | UUID | |
+| `departments` | JSON list of strings | added 2026-08-17. Empty (default) = every department in the batch, matching pre-existing behavior. Non-empty = roster is filtered case-insensitively to just those departments at snapshot time (`snapshot_roster_and_allocate`) — raises if the filter would leave a first-ever snapshot with zero students against a non-empty source roster, so an assignment can never be silently created with nobody in it. |
 
 ### StudentSetAllocation — Task 3.1
 | Field | Type | Notes |
@@ -206,17 +210,18 @@ As-implemented — flatter than originally drafted, matching `practice-service`'
 ```
 GET/POST                /api/assessments/admin/papers/                                          list (paginated) / create
 GET/PATCH/DELETE         /api/assessments/admin/papers/<uuid:pk>/                                 detail (+ sets) / update / delete
-PATCH                    /api/assessments/admin/papers/<uuid:pk>/publish/                          publish/unpublish toggle
 POST                     /api/assessments/admin/papers/<uuid:pk>/sets/                             create a set under this paper
 GET/PATCH/DELETE         /api/assessments/admin/sets/<uuid:pk>/                                    detail (+ questions) / update / delete
 POST                     /api/assessments/admin/sets/<uuid:pk>/questions/                           create a question under this set
+POST                     /api/assessments/admin/sets/<uuid:pk>/image-presign/                       presigned upload for a question's image *before the question exists yet*
 GET/PATCH/DELETE         /api/assessments/admin/questions/<uuid:pk>/                                detail (+ options) / update / delete
 GET/POST                 /api/assessments/admin/questions/<uuid:pk>/options/                        list / create an option
 PATCH/DELETE             /api/assessments/admin/questions/<uuid:pk>/options/<uuid:option_pk>/       update / delete an option
 POST                     /api/assessments/admin/questions/<uuid:pk>/image-presign/                  presigned upload for the question's own image
 POST                     /api/assessments/admin/questions/<uuid:pk>/options/<uuid:option_pk>/image-presign/  presigned upload for an option's image
 ```
-All PATCH/DELETE on a locked (assigned) paper, its sets, questions, or options → `403` "This paper is assigned and locked." Publishing (`is_published=true`) runs the full publish-blocker check (every question in every set: has content, ≥2 options, exactly the right correct-answer count) — `400` with the specific reasons if any question fails; on success, a non-blocking `warnings` array in the response flags sets with unequal total marks.
+`admin/sets/<pk>/image-presign/` (added 2026-08-14): scoped to the QuestionSet rather than a Question, since `question_content_type='image'`/`'both'` couldn't otherwise ever be used on a question's first save — the question-level presign endpoint needs a question id, but `'both'` can't be saved without an image already attached, and there was no way to get an image attached before the question exists. `AdminSetQuestionsView.post` (question create) now runs the same verify/quarantine-scan + paper image-quota gate on `question_image_key` that `AdminQuestionDetailView.patch` already applied on every later image change, so an image attached at creation time is checked exactly once, not skipped.
+All PATCH/DELETE on a locked (assigned) paper, its sets, questions, or options → `403` "This paper is assigned and locked." Publish/unpublish was removed from the admin workflow (2026-08-14) — `POST /api/assessments/admin/assignments/` is now the sole readiness gate: it runs the full readiness check (every question in every set: has content, ≥2 options, exactly the right correct-answer count, plus equal question counts/marks across sets) and rejects with `400` and the specific reasons if any check fails.
 
 ### Admin — Batch Assignment & Timer Control (Task 3.2)
 ```
@@ -230,6 +235,8 @@ PATCH   /api/assessments/admin/assignments/<id>/sessions/<session_id>/extend/   
 POST    /api/assessments/admin/assignments/<id>/resync-roster/                   additive, idempotent
 ```
 \* `student_count_completed` only appears once Task 5.1 lands (sessions don't exist before Phase 4/5) — earlier callers get `student_count_total` only.
+
+`POST /api/assessments/admin/assignments/` is subject to the same ownership restriction as the paper itself (added 2026-08-17): assigning a paper you didn't create returns `403` unless you're a `super_admin`, via the same `_require_paper_owner` check. `departments` (see BatchAssignment above) is accepted in this create payload.
 
 ### Admin — Results, Analytics, Dashboard (Task 7.x / 8.x / 9.x)
 ```

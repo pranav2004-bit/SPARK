@@ -32,8 +32,8 @@ Configuration (via Django settings / environment variables)
 ------------------------------------------------------------
   AUTH_SERVICE_URL        — base URL of auth-service  (default: http://auth-service:8000)
   SERVICE_KEY             — shared secret sent as X-Service-Key header
-  AUTH_SERVICE_TIMEOUT    — per-attempt timeout in seconds            (default: 5)
-  AUTH_SERVICE_RETRIES    — total number of attempts (1 = no retry)   (default: 3)
+  AUTH_SERVICE_TIMEOUT    — per-attempt timeout in seconds            (default: 3)
+  AUTH_SERVICE_RETRIES    — total number of attempts (1 = no retry)   (default: 2)
   AUTH_SERVICE_RETRY_BACKOFF — base seconds for exponential backoff   (default: 0.3)
                                attempt 1 waits backoff×1, attempt 2 waits backoff×2, …
 """
@@ -83,8 +83,8 @@ def _cfg() -> dict:
     return {
         "url":     getattr(settings, "AUTH_SERVICE_URL", "http://auth-service:8000"),
         "key":     getattr(settings, "SERVICE_KEY", ""),
-        "timeout": int(getattr(settings, "AUTH_SERVICE_TIMEOUT", 5)),
-        "retries": int(getattr(settings, "AUTH_SERVICE_RETRIES", 3)),
+        "timeout": int(getattr(settings, "AUTH_SERVICE_TIMEOUT", 3)),
+        "retries": int(getattr(settings, "AUTH_SERVICE_RETRIES", 2)),
         "backoff": float(getattr(settings, "AUTH_SERVICE_RETRY_BACKOFF", 0.3)),
     }
 

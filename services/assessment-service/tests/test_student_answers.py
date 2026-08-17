@@ -21,7 +21,7 @@ def exam_setup(db):
     multi-select, and a 1-mark single-select — total 6 marks."""
     paper = QuestionPaper.objects.create(
         institution_id=INSTITUTION_A, title="Answers Test Paper",
-        created_by=ADMIN_USER_ID, is_published=True,
+        created_by=ADMIN_USER_ID,
     )
     qset = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
 
@@ -211,6 +211,31 @@ class TestSubmitAndScoring:
         assert resp.status_code == 200
         assert resp.json()["data"]["score"] == 2  # only q1's marks
         assert resp.json()["data"]["total_marks"] == 6
+
+    def test_submit_shows_score_when_result_visible_by_default(self, student_client, exam_setup):
+        session = exam_setup["session"]
+        student_client.put(_answer_url(session.id, exam_setup["q1"].id),
+                            {"selected_option_ids": [str(exam_setup["q1_correct"].id)]}, format="json")
+        resp = student_client.post(_submit_url(session.id))
+        body = resp.json()["data"]
+        assert body["results_visible"] is True
+        assert body["score"] == 2
+        assert body["total_marks"] == 6
+
+    def test_submit_hides_score_when_show_result_to_student_is_false(self, student_client, exam_setup):
+        BatchAssignment.objects.filter(pk=exam_setup["assignment"].pk).update(show_result_to_student=False)
+        session = exam_setup["session"]
+        student_client.put(_answer_url(session.id, exam_setup["q1"].id),
+                            {"selected_option_ids": [str(exam_setup["q1_correct"].id)]}, format="json")
+        resp = student_client.post(_submit_url(session.id))
+        body = resp.json()["data"]
+        assert body["results_visible"] is False
+        assert body["score"] is None
+        assert body["total_marks"] is None
+        # The real score is still computed and stored — only the API
+        # response to the student is masked, admins still see it in full.
+        result = ResultSummary.objects.get(session=session)
+        assert result.score == 2
 
     def test_submit_is_idempotent_second_call_no_error(self, student_client, exam_setup):
         session = exam_setup["session"]

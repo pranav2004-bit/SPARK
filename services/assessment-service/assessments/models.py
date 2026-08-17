@@ -10,7 +10,12 @@ class QuestionPaper(models.Model):
     institution_id = models.UUIDField(db_index=True)
     title          = models.CharField(max_length=255)
     description    = models.TextField(blank=True, default="")
-    is_published   = models.BooleanField(default=False)
+    # Shown to students as a mandatory read-before-you-start gate (Rules
+    # button, admin/assessments/papers/<id>/). Editable even while the paper
+    # is locked — unlike title/description/questions, it's read-only
+    # guidance text that can't corrupt exam integrity or scores, so there's
+    # no reason to freeze it once assigned (see AdminPaperInstructionsView).
+    instructions   = models.TextField(blank=True, default="")
     # JWT user_id claim — no FK (cross-service isolation, matches
     # practice-service's convention for admin-authored content)
     created_by     = models.UUIDField()
@@ -203,6 +208,14 @@ class BatchAssignment(models.Model):
     # convention already established in practice-service/user-service.
     batch_id       = models.UUIDField(db_index=True)
     institution_id = models.UUIDField(db_index=True)
+    # Empty list (the default) means every department in the batch — this
+    # assignment's roster snapshot (allocation.py's
+    # snapshot_roster_and_allocate) only narrows to specific departments
+    # when this is non-empty. department itself is free-text on Student
+    # (user-service), no fixed enum — matched case-insensitively at
+    # allocation time, same convention as the existing department filter
+    # on the admin results table (department__iexact).
+    departments = models.JSONField(default=list, blank=True)
 
     global_start_time  = models.DateTimeField(null=True, blank=True)  # set at creation or left null until start/ (Task 3.2)
     global_expire_time = models.DateTimeField()
@@ -211,6 +224,13 @@ class BatchAssignment(models.Model):
     # because the same paper can be reused across assignments with
     # different pass bars (Decision #4, docs/assessment-service-api.md).
     pass_cutoff_percentage = models.PositiveIntegerField(default=40)
+    # Per-assignment, not per-paper (same reasoning as pass_cutoff_percentage
+    # above) — an admin may want the same paper's score hidden for one batch
+    # (e.g. a diagnostic pre-test) but shown for another. Read by
+    # StudentSubmitView (right after submit) and StudentResultsView (past
+    # results list) — both null out score/total_marks/percentage/passed
+    # when this is False, never just hide them client-side.
+    show_result_to_student = models.BooleanField(default=True)
 
     status = models.CharField(
         max_length=10, choices=ASSIGNMENT_STATUS_CHOICES, default=ASSIGNMENT_STATUS_SCHEDULED, db_index=True,

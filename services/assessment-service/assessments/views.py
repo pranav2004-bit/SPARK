@@ -4,7 +4,7 @@ import logging
 from datetime import timedelta
 from django.core.cache import cache
 from django.db import transaction, IntegrityError
-from django.db.models import Count, Max, Avg, Case, When, Value, F, FloatField, ExpressionWrapper, Q
+from django.db.models import Count, Max, Avg, Case, When, Value, F, FloatField, CharField, ExpressionWrapper, Q, OuterRef, Subquery
 from django.http import StreamingHttpResponse, HttpResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -12,7 +12,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from rest_framework.generics import get_object_or_404
 
-from core.permissions import IsAdminUser, IsStudentUser
+from core.permissions import IsAdminUser, IsStudentUser, IsAdminOrSuperAdmin
 from core.responses import success_response, error_response
 from core.pagination import StandardResultsPagination
 from core.storage import (
@@ -22,6 +22,7 @@ from core.storage import (
 )
 from core.upload_constraints import ALLOWED_IMAGE_EXTENSIONS, MAX_BYTES_PER_PAPER
 from core.user_service_client import fetch_batch_roster
+from core.auth_service_client import resolve_user_names
 from core.cache_utils import safe_cache_get, safe_cache_set
 
 from .models import (
@@ -37,7 +38,7 @@ from .serializers import (
     QuestionSerializer, QuestionOptionSerializer, BatchAssignmentSerializer,
     StudentQuestionSerializer,
 )
-from .validators import get_question_publish_blockers, get_content_type_blocker
+from .validators import get_content_type_blocker, get_assignment_readiness_blockers
 from .allocation import snapshot_roster_and_allocate
 from .scoring import finalize_sessions
 from .enforcement import session_is_writable, strip_client_timestamps
@@ -53,6 +54,33 @@ _ALLOWED_IMAGE_MIME = (
 
 def _get_institution_id(request):
     return getattr(request.user, "institution_id", None)
+
+
+PAPER_OWNERSHIP_DENIED_MSG = "This assessment was created by another admin and can't be accessed by you."
+
+
+def _require_paper_owner(paper, request):
+    """Faculty-privacy restriction: a question paper's contents (sets,
+    questions, options, instructions, images) and the ability to assign it
+    to a batch are visible/actionable only to the admin who authored it —
+    every other admin at the same institution sees the paper listed
+    (AdminPaperListCreateView.get is intentionally NOT gated by this) but
+    cannot open, edit, delete, or assign it. Results/Analytics/Dashboard
+    stay institution-wide and are never gated by this check.
+
+    Super admins always bypass this — without an override, a paper would
+    become permanently inaccessible to everyone the instant its creator's
+    account is deactivated or deleted (already-supported admin-management
+    actions elsewhere in this platform), which would be a real operational
+    risk, not a hypothetical one.
+
+    Returns an error_response (403) if access is denied, else None.
+    """
+    if request.user.role == "super_admin":
+        return None
+    if str(paper.created_by) != str(request.user.id):
+        return error_response(PAPER_OWNERSHIP_DENIED_MSG, status_code=403)
+    return None
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
@@ -167,10 +195,28 @@ def _validate_image_presign_request(filename: str, content_type: str):
     return None
 
 
+def _generate_image_presign(filename: str, content_type: str):
+    """Returns (payload, error_response) — payload is None on failure.
+    Shared by all three presign views (question/option/set-scoped)."""
+    error = _validate_image_presign_request(filename, content_type)
+    if error:
+        return None, error_response(error, status_code=400)
+
+    file_key = build_file_key("image", filename)
+    try:
+        upload_url = generate_presigned_upload_url(file_key, content_type)
+    except RuntimeError as exc:
+        logger.error("Storage not configured: %s", exc)
+        return None, error_response("File storage is not configured.", status_code=503)
+    return {
+        "upload_url": upload_url, "file_key": file_key, "cdn_url": get_cdn_url(file_key),
+    }, None
+
+
 # ── Admin: Question Papers ──────────────────────────────────────────────────────
 
 class AdminPaperListCreateView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def get(self, request):
         institution_id = _get_institution_id(request)
@@ -180,7 +226,27 @@ class AdminPaperListCreateView(APIView):
 
         paginator = StandardResultsPagination()
         page = paginator.paginate_queryset(papers, request)
-        return paginator.get_paginated_response(QuestionPaperSerializer(page, many=True).data)
+        data = QuestionPaperSerializer(page, many=True).data
+
+        # "Created by <name>" per card — one batch call for the whole page,
+        # not one per paper. created_by has no FK (cross-service isolation —
+        # see QuestionPaper.created_by's own comment), so the name/email
+        # live in auth-service and must be resolved live. Best-effort:
+        # resolve_user_names degrades to {} on any failure rather than
+        # raising, so the papers list itself never breaks over this — a
+        # paper whose creator didn't resolve just shows created_by_name=""
+        # (the frontend falls back to the creator's id in that case).
+        creator_ids = sorted({row["created_by"] for row in data if row.get("created_by")})
+        # Explicit early-exit rather than relying on resolve_user_names' own
+        # internal no-op-on-empty behavior — an empty page (or one whole
+        # institution with zero papers) shouldn't even attempt the call.
+        creators = resolve_user_names(creator_ids, request.META.get("HTTP_AUTHORIZATION", "")) if creator_ids else {}
+        for row in data:
+            info = creators.get(row["created_by"], {})
+            row["created_by_name"] = info.get("name", "")
+            row["created_by_email"] = info.get("email", "")
+
+        return paginator.get_paginated_response(data)
 
     def post(self, request):
         institution_id = _get_institution_id(request)
@@ -192,7 +258,7 @@ class AdminPaperListCreateView(APIView):
 
 
 class AdminPaperDetailView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def _get(self, pk, institution_id):
         return get_object_or_404(QuestionPaper, pk=pk, institution_id=institution_id)
@@ -200,6 +266,9 @@ class AdminPaperDetailView(APIView):
     def get(self, request, pk):
         institution_id = _get_institution_id(request)
         paper = self._get(pk, institution_id)
+        denied = _require_paper_owner(paper, request)
+        if denied:
+            return denied
         sets = paper.sets.annotate(question_count=Count("questions"))
         return success_response(data={
             "paper": QuestionPaperSerializer(paper).data,
@@ -209,6 +278,9 @@ class AdminPaperDetailView(APIView):
     def patch(self, request, pk):
         institution_id = _get_institution_id(request)
         paper = self._get(pk, institution_id)
+        denied = _require_paper_owner(paper, request)
+        if denied:
+            return denied
         if paper.is_locked():
             return error_response("This paper is assigned and locked.", status_code=403)
         s = QuestionPaperSerializer(paper, data=request.data, partial=True)
@@ -220,64 +292,50 @@ class AdminPaperDetailView(APIView):
     def delete(self, request, pk):
         institution_id = _get_institution_id(request)
         paper = self._get(pk, institution_id)
+        denied = _require_paper_owner(paper, request)
+        if denied:
+            return denied
         if paper.is_locked():
             return error_response("This paper is assigned and locked.", status_code=403)
         paper.delete()
         return success_response(message="Paper deleted")
 
 
-class AdminPaperPublishView(APIView):
-    permission_classes = [IsAdminUser]
+class AdminPaperInstructionsView(APIView):
+    """Rules/instructions text shown to students before they can start the
+    exam (student/assignments/ list -> the Start-Exam gate). Deliberately
+    NOT gated by paper.is_locked() — unlike every other paper edit, this is
+    read-only guidance text that can't corrupt exam integrity or scores, so
+    an admin must still be able to write/fix it after the paper is already
+    assigned (the common case, since assignment now happens right after
+    authoring — see get_assignment_readiness_blockers)."""
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def patch(self, request, pk):
         institution_id = _get_institution_id(request)
         paper = get_object_or_404(QuestionPaper, pk=pk, institution_id=institution_id)
-        if paper.is_locked():
-            return error_response("This paper is assigned and locked.", status_code=403)
-
-        publish = request.data.get("is_published", True)
-        warnings = []
-
-        if publish:
-            blockers = []
-            for qset in paper.sets.prefetch_related("questions__options"):
-                for question in qset.questions.all():
-                    blockers.extend(get_question_publish_blockers(question))
-            if blockers:
-                return error_response(
-                    "Cannot publish: " + " ".join(blockers),
-                    errors={"publish": blockers},
-                    status_code=400,
-                )
-
-            # Non-blocking: sets are meant to be equivalent alternates for
-            # anti-cheating distribution (AT7), not different-difficulty
-            # variants — warn if their total marks diverge so the admin can
-            # catch an authoring mistake before assigning (Task 8.1's
-            # analytics must otherwise compare across sets by percentage).
-            totals = {qset.label: qset.total_marks() for qset in paper.sets.all()}
-            if len(set(totals.values())) > 1:
-                warnings.append(
-                    f"Sets have unequal total marks: {totals}. "
-                    "They should normally be equivalent alternates."
-                )
-
-        paper.is_published = publish
-        paper.save(update_fields=["is_published", "updated_at"])
-        return success_response(
-            data={**QuestionPaperSerializer(paper).data, "warnings": warnings},
-            message="Paper published" if publish else "Paper unpublished",
-        )
+        denied = _require_paper_owner(paper, request)
+        if denied:
+            return denied
+        instructions = request.data.get("instructions", "")
+        if not isinstance(instructions, str):
+            return error_response("instructions must be a string.", status_code=400)
+        paper.instructions = instructions
+        paper.save(update_fields=["instructions", "updated_at"])
+        return success_response(data=QuestionPaperSerializer(paper).data, message="Instructions saved")
 
 
 # ── Admin: Question Sets ─────────────────────────────────────────────────────────
 
 class AdminPaperSetsView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def post(self, request, pk):
         institution_id = _get_institution_id(request)
         paper = get_object_or_404(QuestionPaper, pk=pk, institution_id=institution_id)
+        denied = _require_paper_owner(paper, request)
+        if denied:
+            return denied
         if paper.is_locked():
             return error_response("This paper is assigned and locked.", status_code=403)
 
@@ -294,7 +352,7 @@ class AdminPaperSetsView(APIView):
 
 
 class AdminSetDetailView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def _get(self, pk, institution_id):
         return get_object_or_404(
@@ -305,6 +363,9 @@ class AdminSetDetailView(APIView):
     def get(self, request, pk):
         institution_id = _get_institution_id(request)
         qset = self._get(pk, institution_id)
+        denied = _require_paper_owner(qset.paper, request)
+        if denied:
+            return denied
         questions = qset.questions.all()
         return success_response(data={
             "set": QuestionSetSerializer(qset).data,
@@ -315,6 +376,9 @@ class AdminSetDetailView(APIView):
     def patch(self, request, pk):
         institution_id = _get_institution_id(request)
         qset = self._get(pk, institution_id)
+        denied = _require_paper_owner(qset.paper, request)
+        if denied:
+            return denied
         if qset.paper.is_locked():
             return error_response("This paper is assigned and locked.", status_code=403)
         s = QuestionSetSerializer(qset, data=request.data, partial=True)
@@ -326,6 +390,9 @@ class AdminSetDetailView(APIView):
     def delete(self, request, pk):
         institution_id = _get_institution_id(request)
         qset = self._get(pk, institution_id)
+        denied = _require_paper_owner(qset.paper, request)
+        if denied:
+            return denied
         if qset.paper.is_locked():
             return error_response("This paper is assigned and locked.", status_code=403)
         qset.delete()
@@ -335,7 +402,7 @@ class AdminSetDetailView(APIView):
 # ── Admin: Questions ───────────────────────────────────────────────────────────
 
 class AdminSetQuestionsView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def post(self, request, pk):
         institution_id = _get_institution_id(request)
@@ -343,28 +410,57 @@ class AdminSetQuestionsView(APIView):
             QuestionSet.objects.select_related("paper"),
             pk=pk, paper__institution_id=institution_id,
         )
+        denied = _require_paper_owner(qset.paper, request)
+        if denied:
+            return denied
         if qset.paper.is_locked():
             return error_response("This paper is assigned and locked.", status_code=403)
 
         content_type = request.data.get("question_content_type", "text")
+        image_key = request.data.get("question_image_key", "")
         blocker = get_content_type_blocker(
             content_type,
             request.data.get("question_text", ""),
-            request.data.get("question_image_key", ""),
+            image_key,
         )
         if blocker:
             return error_response(blocker, status_code=400)
+
+        # An image can now be uploaded (via AdminSetImagePresignView) before
+        # the question exists — e.g. content_type='image'/'both' need an
+        # image key present on this very first save. That image was never
+        # scanned/quota-checked at presign time (presigning only issues an
+        # upload URL), so it must go through the same verify+quota gate
+        # AdminQuestionDetailView.patch already applies on every later image
+        # change — otherwise a first-save image would skip both checks.
+        real_size = None
+        if image_key:
+            real_size, err = _verify_and_scan_image(image_key)
+            if err:
+                return err
+            if not _paper_image_quota_ok(qset.paper_id, exclude_bytes=0, additional_bytes=real_size):
+                try:
+                    delete_file(image_key)
+                except Exception:
+                    logger.warning("Failed to clean up over-quota image key=%s", image_key)
+                return error_response(
+                    "This paper has reached its image storage limit. Remove some images before adding more.",
+                    status_code=400,
+                )
 
         data = {**request.data, "set": str(qset.id)}
         s = QuestionSerializer(data=data)
         if not s.is_valid():
             return error_response("Validation failed", errors=s.errors, status_code=400)
-        s.save()
-        return success_response(data=s.data, status_code=201, message="Question created")
+        question = s.save()
+        if real_size is not None:
+            question.question_image_size_bytes = real_size
+            question.save(update_fields=["question_image_size_bytes"])
+        return success_response(data=QuestionSerializer(question).data, status_code=201, message="Question created")
 
 
 class AdminQuestionDetailView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def _get(self, pk, institution_id):
         return get_object_or_404(
@@ -375,6 +471,9 @@ class AdminQuestionDetailView(APIView):
     def get(self, request, pk):
         institution_id = _get_institution_id(request)
         question = self._get(pk, institution_id)
+        denied = _require_paper_owner(question.set.paper, request)
+        if denied:
+            return denied
         options = question.options.all()
         return success_response(data={
             "question": QuestionSerializer(question).data,
@@ -385,6 +484,9 @@ class AdminQuestionDetailView(APIView):
     def patch(self, request, pk):
         institution_id = _get_institution_id(request)
         question = self._get(pk, institution_id)
+        denied = _require_paper_owner(question.set.paper, request)
+        if denied:
+            return denied
         if question.set.paper.is_locked():
             return error_response("This paper is assigned and locked.", status_code=403)
 
@@ -415,6 +517,24 @@ class AdminQuestionDetailView(APIView):
                     status_code=400,
                 )
 
+        # Switching mcq_type "multiple" -> "single" while 2+ options are
+        # already marked correct would otherwise silently leave the
+        # question in an inconsistent state (single-choice with multiple
+        # correct answers) — the option-level endpoints already guard the
+        # other direction (rejecting a 2nd correct option on a
+        # single-choice question), so this closes the same gap
+        # symmetrically rather than leaving it asymmetric. Found during a
+        # live bug report: the frontend's "Answer Type" toggle used to be
+        # local-only (never PATCHed here at all) until this same fix.
+        new_mcq_type = request.data.get("mcq_type", question.mcq_type)
+        if new_mcq_type == MCQ_TYPE_SINGLE and question.mcq_type != MCQ_TYPE_SINGLE:
+            if question.options.filter(is_correct=True).count() > 1:
+                return error_response(
+                    "This question has more than one correct option marked — "
+                    "unset all but one before switching to Single Correct.",
+                    status_code=400,
+                )
+
         old_image_key = question.question_image_key
         s = QuestionSerializer(question, data=request.data, partial=True)
         if not s.is_valid():
@@ -438,6 +558,9 @@ class AdminQuestionDetailView(APIView):
     def delete(self, request, pk):
         institution_id = _get_institution_id(request)
         question = self._get(pk, institution_id)
+        denied = _require_paper_owner(question.set.paper, request)
+        if denied:
+            return denied
         if question.set.paper.is_locked():
             return error_response("This paper is assigned and locked.", status_code=403)
         image_key = question.question_image_key
@@ -453,13 +576,17 @@ class AdminQuestionDetailView(APIView):
 # ── Admin: Question Options ───────────────────────────────────────────────────
 
 class AdminQuestionOptionsView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def get(self, request, pk):
         institution_id = _get_institution_id(request)
         question = get_object_or_404(
-            Question, pk=pk, set__paper__institution_id=institution_id
+            Question.objects.select_related("set__paper"),
+            pk=pk, set__paper__institution_id=institution_id,
         )
+        denied = _require_paper_owner(question.set.paper, request)
+        if denied:
+            return denied
         options = question.options.all()
         return success_response(data=QuestionOptionSerializer(options, many=True).data)
 
@@ -469,6 +596,9 @@ class AdminQuestionOptionsView(APIView):
             Question.objects.select_related("set__paper"),
             pk=pk, set__paper__institution_id=institution_id,
         )
+        denied = _require_paper_owner(question.set.paper, request)
+        if denied:
+            return denied
         if question.set.paper.is_locked():
             return error_response("This paper is assigned and locked.", status_code=403)
 
@@ -500,7 +630,7 @@ class AdminQuestionOptionsView(APIView):
 
 
 class AdminQuestionOptionDetailView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def _get(self, pk, option_pk, institution_id):
         return get_object_or_404(
@@ -513,6 +643,9 @@ class AdminQuestionOptionDetailView(APIView):
         institution_id = _get_institution_id(request)
         option = self._get(pk, option_pk, institution_id)
         question = option.question
+        denied = _require_paper_owner(question.set.paper, request)
+        if denied:
+            return denied
         if question.set.paper.is_locked():
             return error_response("This paper is assigned and locked.", status_code=403)
 
@@ -534,6 +667,9 @@ class AdminQuestionOptionDetailView(APIView):
     def delete(self, request, pk, option_pk):
         institution_id = _get_institution_id(request)
         option = self._get(pk, option_pk, institution_id)
+        denied = _require_paper_owner(option.question.set.paper, request)
+        if denied:
+            return denied
         if option.question.set.paper.is_locked():
             return error_response("This paper is assigned and locked.", status_code=403)
         image_key = option.image_key
@@ -549,54 +685,74 @@ class AdminQuestionOptionDetailView(APIView):
 # ── Admin: Image presign ───────────────────────────────────────────────────────
 
 class AdminQuestionImagePresignView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def post(self, request, pk):
         institution_id = _get_institution_id(request)
-        get_object_or_404(Question, pk=pk, set__paper__institution_id=institution_id)
+        question = get_object_or_404(
+            Question.objects.select_related("set__paper"),
+            pk=pk, set__paper__institution_id=institution_id,
+        )
+        denied = _require_paper_owner(question.set.paper, request)
+        if denied:
+            return denied
         filename = request.data.get("filename", "image.jpg") or "image.jpg"
         content_type = request.data.get("content_type", "image/jpeg") or "image/jpeg"
-
-        error = _validate_image_presign_request(filename, content_type)
+        payload, error = _generate_image_presign(filename, content_type)
         if error:
-            return error_response(error, status_code=400)
-
-        file_key = build_file_key("image", filename)
-        try:
-            upload_url = generate_presigned_upload_url(file_key, content_type)
-        except RuntimeError as exc:
-            logger.error("Storage not configured: %s", exc)
-            return error_response("File storage is not configured.", status_code=503)
-        return success_response(data={
-            "upload_url": upload_url, "file_key": file_key, "cdn_url": get_cdn_url(file_key),
-        })
+            return error
+        return success_response(data=payload)
 
 
 class AdminOptionImagePresignView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def post(self, request, pk, option_pk):
         institution_id = _get_institution_id(request)
-        get_object_or_404(
-            QuestionOption, pk=option_pk, question_id=pk,
+        option = get_object_or_404(
+            QuestionOption.objects.select_related("question__set__paper"),
+            pk=option_pk, question_id=pk,
             question__set__paper__institution_id=institution_id,
         )
+        denied = _require_paper_owner(option.question.set.paper, request)
+        if denied:
+            return denied
         filename = request.data.get("filename", "image.jpg") or "image.jpg"
         content_type = request.data.get("content_type", "image/jpeg") or "image/jpeg"
-
-        error = _validate_image_presign_request(filename, content_type)
+        payload, error = _generate_image_presign(filename, content_type)
         if error:
-            return error_response(error, status_code=400)
+            return error
+        return success_response(data=payload)
 
-        file_key = build_file_key("image", filename)
-        try:
-            upload_url = generate_presigned_upload_url(file_key, content_type)
-        except RuntimeError as exc:
-            logger.error("Storage not configured: %s", exc)
-            return error_response("File storage is not configured.", status_code=503)
-        return success_response(data={
-            "upload_url": upload_url, "file_key": file_key, "cdn_url": get_cdn_url(file_key),
-        })
+
+class AdminSetImagePresignView(APIView):
+    """Presign for a question image before the question itself exists —
+    scoped to the QuestionSet it will be created in, since that's the only
+    stable id available at that point. Without this, content_type='image'
+    or 'both' could never be used on a question's first save: the
+    question-level presign endpoint above needs a question id, but
+    content_type='both' can't be saved without an image already attached
+    (get_content_type_blocker), and content_type='image' shouldn't force
+    typing throwaway text just to unlock the upload UI. Live bug report,
+    2026-08-14 — see AdminSetQuestionsView.post for the matching
+    verify/quota gate applied when this presigned image is attached."""
+    permission_classes = [IsAdminOrSuperAdmin]
+
+    def post(self, request, pk):
+        institution_id = _get_institution_id(request)
+        qset = get_object_or_404(
+            QuestionSet.objects.select_related("paper"),
+            pk=pk, paper__institution_id=institution_id,
+        )
+        denied = _require_paper_owner(qset.paper, request)
+        if denied:
+            return denied
+        filename = request.data.get("filename", "image.jpg") or "image.jpg"
+        content_type = request.data.get("content_type", "image/jpeg") or "image/jpeg"
+        payload, error = _generate_image_presign(filename, content_type)
+        if error:
+            return error
+        return success_response(data=payload)
 
 
 # ── Admin: Batch Assignments ────────────────────────────────────────────────────
@@ -608,11 +764,13 @@ class _RosterSnapshotFailed(Exception):
 
 
 class AdminAssignmentListCreateView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def get(self, request):
         institution_id = _get_institution_id(request)
-        qs = BatchAssignment.objects.filter(institution_id=institution_id)
+        # select_related("paper") makes BatchAssignmentSerializer's new
+        # paper_title field free — one JOIN, not one extra query per row.
+        qs = BatchAssignment.objects.filter(institution_id=institution_id).select_related("paper")
         paper_id = request.query_params.get("paper_id")
         if paper_id:
             qs = qs.filter(paper_id=paper_id)
@@ -625,9 +783,42 @@ class AdminAssignmentListCreateView(APIView):
         paper = get_object_or_404(
             QuestionPaper, pk=request.data.get("paper"), institution_id=institution_id
         )
-        if not paper.sets.exists():
+        # Assigning is part of the paper-authoring flow (initiated from the
+        # paper's own page), not the results/analytics/dashboard side of
+        # this app — so it's gated by the same creator-only restriction as
+        # opening/editing the paper, per the same user decision that
+        # introduced _require_paper_owner.
+        denied = _require_paper_owner(paper, request)
+        if denied:
+            return denied
+        # Publish/unpublish removed from the admin workflow (user decision,
+        # 2026-08-14) — "assign" is now the sole gate a paper must pass
+        # before it can go live, so every readiness check that used to live
+        # behind publish/ (content completeness, correct-answer counts) runs
+        # here instead, plus new cross-set uniformity checks that publish
+        # never enforced as a hard block.
+        blockers = get_assignment_readiness_blockers(paper)
+        if blockers:
             return error_response(
-                "This paper has no question sets — add at least one set before assigning it.",
+                "Cannot assign: " + " ".join(blockers),
+                errors={"assign": blockers},
+                status_code=400,
+            )
+
+        # Same paper -> many different batches is normal usage (e.g. one
+        # mock test rolled out batch by batch). Same paper -> the SAME batch
+        # twice has no legitimate use case — it just double-allocates the
+        # same students into two independently-tracked exam attempts. Only
+        # blocked while an assignment is still SCHEDULED/LIVE — a CLOSED one
+        # doesn't count, so re-assigning the same paper to the same batch
+        # later (e.g. a retake, next term) is still allowed.
+        batch_id = request.data.get("batch_id")
+        if batch_id and BatchAssignment.objects.filter(
+            paper=paper, batch_id=batch_id, institution_id=institution_id,
+            status__in=[ASSIGNMENT_STATUS_SCHEDULED, ASSIGNMENT_STATUS_LIVE],
+        ).exists():
+            return error_response(
+                "This paper is already assigned to this batch and hasn't been closed yet.",
                 status_code=400,
             )
 
@@ -672,8 +863,12 @@ class AdminAssignmentStartView(APIView):
         assignment = get_object_or_404(
             BatchAssignment.objects.select_related("paper"), pk=pk, institution_id=institution_id,
         )
-        if not assignment.paper.is_published:
-            return error_response("Cannot start: this paper is not published.", status_code=400)
+        # Publish/unpublish removed from the admin workflow (2026-08-14) —
+        # readiness (content completeness, correct-answer counts, cross-set
+        # uniformity) is now fully checked at assignment-creation time
+        # (get_assignment_readiness_blockers), and the paper is locked the
+        # moment that assignment exists, so nothing can have regressed by
+        # the time Start Exam is clicked. No separate is_published gate here.
 
         # Conditional UPDATE ... WHERE status=SCHEDULED — race-safe against
         # concurrent Start clicks: only the request that actually flips the
@@ -872,6 +1067,7 @@ class StudentAssignmentListView(APIView):
             results.append({
                 "assignment_id": str(assignment.id),
                 "paper_title": assignment.paper.title,
+                "paper_instructions": assignment.paper.instructions,
                 "status": assignment.status,
                 "exam_duration_minutes": assignment.exam_duration_minutes,
                 "global_start_time": assignment.global_start_time,
@@ -1033,12 +1229,14 @@ class StudentSubmitView(APIView):
 
         session.refresh_from_db()
         result = getattr(session, "result", None)
+        show_result = session.assignment.show_result_to_student
         return success_response(
             data={
                 "session_id": str(session.id),
                 "status": session.status,
-                "score": result.score if result else None,
-                "total_marks": result.total_marks if result else None,
+                "results_visible": show_result,
+                "score": result.score if result and show_result else None,
+                "total_marks": result.total_marks if result and show_result else None,
             },
             message="Submitted",
         )
@@ -1179,33 +1377,47 @@ class StudentResultsView(APIView):
         data = []
         for r in results:
             percentage = round(r.score / r.total_marks * 100, 2) if r.total_marks else 0.0
+            show_result = r.assignment.show_result_to_student
             data.append({
                 "assignment_id": str(r.assignment_id),
                 "paper_title": r.assignment.paper.title,
-                "score": r.score,
-                "total_marks": r.total_marks,
-                "percentage": percentage,
+                "results_visible": show_result,
+                "score": r.score if show_result else None,
+                "total_marks": r.total_marks if show_result else None,
+                "percentage": percentage if show_result else None,
                 "status": r.status,
                 "started_at": r.started_at,
                 "ended_at": r.ended_at,
                 "duration_seconds": r.duration_seconds,
                 "pass_cutoff_percentage": r.assignment.pass_cutoff_percentage,
-                "passed": percentage >= r.assignment.pass_cutoff_percentage,
+                "passed": (percentage >= r.assignment.pass_cutoff_percentage) if show_result else None,
             })
         return success_response(data=data)
 
 
 # ── Admin: Results (Phase 7) ─────────────────────────────────────────────────
 
+# Public sort= query-param values stay the same as before (frontend/exports
+# already use these) even though the underlying annotated field names
+# changed — see _SORT_FIELD_MAP below.
 _RESULTS_ALLOWED_SORTS = {
     "percentage", "-percentage", "duration_seconds", "-duration_seconds",
     "ended_at", "-ended_at", "started_at", "-started_at",
+}
+_SORT_FIELD_MAP = {
+    "percentage": "percentage", "-percentage": "-percentage",
+    "duration_seconds": "duration_seconds", "-duration_seconds": "-duration_seconds",
+    "ended_at": "result_ended_at", "-ended_at": "-result_ended_at",
+    "started_at": "result_started_at", "-started_at": "-result_started_at",
 }
 _PERCENTAGE_ANNOTATION = Case(
     When(total_marks=0, then=Value(0.0)),
     default=ExpressionWrapper(F("score") * 100.0 / F("total_marks"), output_field=FloatField()),
     output_field=FloatField(),
 )
+EXAM_STATUS_PENDING   = "pending"
+EXAM_STATUS_WRITING   = "writing"
+EXAM_STATUS_SUBMITTED = "submitted"
 
 
 def _build_results_queryset(assignment, request, roster_by_user_id):
@@ -1214,36 +1426,122 @@ def _build_results_queryset(assignment, request, roster_by_user_id):
     same filters must apply to both, or a filtered table view and its
     "export these results" button would silently disagree.
 
-    Department filtering can't be a DB column on ResultSummary (department
-    lives in user-service's roster, not locally) — instead, the already
+    Base is StudentSetAllocation (the roster snapshot taken at assignment
+    creation — Task 3.1), not ResultSummary — a table built from
+    ResultSummary alone only ever showed students who'd already submitted;
+    everyone else the paper was assigned to was simply invisible. This way
+    every allocated student has a row from the moment the assignment is
+    created, LEFT JOINed (via correlated subqueries, since AssessmentSession
+    and ResultSummary are both unique per (assignment, student_id) — never
+    more than one row to join) against their session (for exam_status:
+    pending/writing/submitted) and result (for score data, once it exists).
+
+    Department filtering can't be a DB column here (department lives in
+    user-service's roster, not locally) — instead, the already
     roster-fetched student_ids matching that department become a
     `student_id__in=[...]` DB filter, so pagination/sorting still happen
     entirely at the DB level even with a department filter applied (no
     full-table scan, per this task's load requirement).
     """
-    qs = ResultSummary.objects.filter(
-        assignment=assignment, institution_id=assignment.institution_id,
-    ).annotate(percentage=_PERCENTAGE_ANNOTATION)
+    session_sq = AssessmentSession.objects.filter(assignment=assignment, student_id=OuterRef("student_id"))
+    result_sq = ResultSummary.objects.filter(assignment=assignment, student_id=OuterRef("student_id"))
+
+    qs = StudentSetAllocation.objects.filter(assignment=assignment).select_related("set").annotate(
+        session_status=Subquery(session_sq.values("status")[:1]),
+        result_id=Subquery(result_sq.values("id")[:1]),
+        score=Subquery(result_sq.values("score")[:1]),
+        total_marks=Subquery(result_sq.values("total_marks")[:1]),
+        result_started_at=Subquery(result_sq.values("started_at")[:1]),
+        result_ended_at=Subquery(result_sq.values("ended_at")[:1]),
+        duration_seconds=Subquery(result_sq.values("duration_seconds")[:1]),
+        malpractice_flag=Subquery(result_sq.values("malpractice_flag")[:1]),
+    ).annotate(
+        percentage=Case(
+            When(total_marks__gt=0, then=ExpressionWrapper(F("score") * 100.0 / F("total_marks"), output_field=FloatField())),
+            When(total_marks=0, then=Value(0.0)),
+            default=None,
+            output_field=FloatField(),
+        ),
+        exam_status=Case(
+            When(session_status__in=[SESSION_STATUS_SUBMITTED, SESSION_STATUS_AUTO_SUBMITTED], then=Value(EXAM_STATUS_SUBMITTED)),
+            When(session_status=SESSION_STATUS_IN_PROGRESS, then=Value(EXAM_STATUS_WRITING)),
+            default=Value(EXAM_STATUS_PENDING),
+            output_field=CharField(),
+        ),
+    )
 
     department = request.query_params.get("department")
     if department:
         matching_ids = [uid for uid, info in roster_by_user_id.items() if info.get("department") == department]
         qs = qs.filter(student_id__in=matching_ids)
 
-    if str(request.query_params.get("flagged_only", "")).lower() in ("true", "1"):
-        qs = qs.filter(malpractice_flag=True)
+    # Roll-number search — case-insensitive substring match against the
+    # roster (already fetched once above; same no-extra-call pattern as the
+    # department filter), not a DB LIKE, so no wildcard-injection concerns
+    # from user-typed "%"/"_". Composes with department via a second,
+    # separately-ANDed student_id__in — Django ANDs successive .filter()
+    # calls, so "CSE department AND roll contains '004'" narrows correctly
+    # rather than one filter silently overwriting the other.
+    roll_search = request.query_params.get("student_roll_id", "").strip().lower()
+    if roll_search:
+        matching_ids = [
+            uid for uid, info in roster_by_user_id.items()
+            if roll_search in (info.get("student_id") or "").lower()
+        ]
+        qs = qs.filter(student_id__in=matching_ids)
 
+    # "flagged" is the current param (tri-state: true/false/absent);
+    # "flagged_only=true" is kept as a legacy alias for "flagged=true" since
+    # the frontend/exports already shipped with it (Task 7.1).
+    flagged_param = request.query_params.get("flagged")
+    if flagged_param is None and str(request.query_params.get("flagged_only", "")).lower() in ("true", "1"):
+        flagged_param = "true"
+    if flagged_param is not None:
+        if str(flagged_param).lower() in ("true", "1"):
+            qs = qs.filter(malpractice_flag=True)
+        elif str(flagged_param).lower() in ("false", "0"):
+            # Explicit OR-with-isnull, not exclude(malpractice_flag=True) —
+            # SQL's three-valued logic means "NOT (NULL = True)" is itself
+            # NULL/no-match, so a plain exclude() would silently drop
+            # pending/writing students (malpractice_flag NULL — no
+            # ResultSummary yet) instead of counting them as "not flagged".
+            qs = qs.filter(Q(malpractice_flag=False) | Q(malpractice_flag__isnull=True))
+
+    exam_status_param = request.query_params.get("exam_status")
+    if exam_status_param in (EXAM_STATUS_PENDING, EXAM_STATUS_WRITING, EXAM_STATUS_SUBMITTED):
+        qs = qs.filter(exam_status=exam_status_param)
+
+    passed_param = request.query_params.get("passed")
+    if passed_param is not None:
+        cutoff = assignment.pass_cutoff_percentage
+        if str(passed_param).lower() in ("true", "1"):
+            qs = qs.filter(percentage__gte=cutoff)
+        elif str(passed_param).lower() in ("false", "0"):
+            # percentage__lt on a NULL percentage (pending/writing) matches
+            # nothing in SQL — pending/writing students are correctly
+            # excluded from "Failed" too, not just "Passed".
+            qs = qs.filter(percentage__lt=cutoff)
+
+    # Lower bound exclusive, upper bound inclusive — so "below 60" and
+    # "above 60" partition the class with no gap and no double-count at
+    # exactly 60%, and "between 40 and 60" behaves identically to
+    # min=40&max=60 rather than needing its own special case.
     min_pct = request.query_params.get("min_percentage")
     if min_pct not in (None, ""):
-        qs = qs.filter(percentage__gte=float(min_pct))
+        qs = qs.filter(percentage__gt=float(min_pct))
     max_pct = request.query_params.get("max_percentage")
     if max_pct not in (None, ""):
         qs = qs.filter(percentage__lte=float(max_pct))
 
-    sort = request.query_params.get("sort", "-ended_at")
-    if sort not in _RESULTS_ALLOWED_SORTS:
-        sort = "-ended_at"
-    return qs.order_by(sort)
+    sort_param = request.query_params.get("sort", "-ended_at")
+    sort = _SORT_FIELD_MAP.get(sort_param, "-result_ended_at")
+    # Pending/writing students have NULL for every sortable field (no
+    # ResultSummary yet) — nulls_last=True pins them to the bottom
+    # regardless of direction, instead of relying on the DB's own
+    # (backend-specific, easy to get backwards) default null-ordering.
+    field_name = sort.lstrip("-")
+    order_expr = F(field_name).desc(nulls_last=True) if sort.startswith("-") else F(field_name).asc(nulls_last=True)
+    return qs.order_by(order_expr, "-pk")  # -pk: stable tiebreak for rows sharing a NULL sort value
 
 
 def _fetch_roster_lookup(assignment, request):
@@ -1255,22 +1553,23 @@ def _fetch_roster_lookup(assignment, request):
     return {s["user_id"]: s for s in roster if s.get("user_id")}
 
 
-def _serialize_result_row(result, roster_by_user_id):
-    info = roster_by_user_id.get(str(result.student_id), {})
+def _serialize_result_row(alloc, roster_by_user_id):
+    info = roster_by_user_id.get(str(alloc.student_id), {})
     return {
-        "result_id": str(result.id),
-        "student_user_id": str(result.student_id),
+        "result_id": str(alloc.result_id) if alloc.result_id else None,
+        "student_user_id": str(alloc.student_id),
         "student_roll_id": info.get("student_id", ""),
         "student_name": info.get("fullname") or "Unknown",
         "department": info.get("department") or "",
-        "started_at": result.started_at,
-        "ended_at": result.ended_at,
-        "duration_seconds": result.duration_seconds,
-        "score": result.score,
-        "total_marks": result.total_marks,
-        "percentage": round(result.percentage, 2),
-        "status": result.status,
-        "malpractice_flag": result.malpractice_flag,
+        "set_label": alloc.set.label,
+        "exam_status": alloc.exam_status,
+        "started_at": alloc.result_started_at,
+        "ended_at": alloc.result_ended_at,
+        "duration_seconds": alloc.duration_seconds,
+        "score": alloc.score,
+        "total_marks": alloc.total_marks,
+        "percentage": round(alloc.percentage, 2) if alloc.percentage is not None else None,
+        "malpractice_flag": bool(alloc.malpractice_flag),
     }
 
 
@@ -1385,8 +1684,8 @@ class _Echo:
 
 
 _EXPORT_HEADER = [
-    "Student Roll No", "Student Name", "Department", "Started At", "Ended At",
-    "Duration (seconds)", "Score", "Total Marks", "Percentage", "Status", "Flagged",
+    "Student Roll No", "Student Name", "Department", "Set", "Status", "Started At", "Ended At",
+    "Duration (seconds)", "Score", "Total Marks", "Percentage", "Flagged",
 ]
 
 
@@ -1402,13 +1701,14 @@ def _export_rows(assignment, request, roster_by_user_id):
             info.get("student_id", ""),
             info.get("fullname") or "Unknown",
             info.get("department") or "",
-            r.started_at.isoformat() if r.started_at else "",
-            r.ended_at.isoformat() if r.ended_at else "",
-            r.duration_seconds,
-            r.score,
-            r.total_marks,
-            f"{round(r.percentage, 2)}",
-            r.status,
+            r.set.label,
+            r.exam_status,
+            r.result_started_at.isoformat() if r.result_started_at else "",
+            r.result_ended_at.isoformat() if r.result_ended_at else "",
+            r.duration_seconds if r.duration_seconds is not None else "",
+            r.score if r.score is not None else "",
+            r.total_marks if r.total_marks is not None else "",
+            f"{round(r.percentage, 2)}" if r.percentage is not None else "",
             "Yes" if r.malpractice_flag else "No",
         ])
 

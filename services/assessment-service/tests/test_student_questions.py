@@ -17,7 +17,7 @@ from .conftest import INSTITUTION_A, ADMIN_USER_ID, STUDENT_USER_ID
 def exam_setup(db):
     paper = QuestionPaper.objects.create(
         institution_id=INSTITUTION_A, title="Questions Endpoint Test",
-        created_by=ADMIN_USER_ID, is_published=True,
+        created_by=ADMIN_USER_ID,
     )
     qset = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
     q1 = Question.objects.create(set=qset, question_text="Q1", marks=2)

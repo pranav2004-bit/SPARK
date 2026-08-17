@@ -40,9 +40,9 @@ def assignment(paper, two_sets):
     )
 
 
-def _roster(n, prefix="S"):
+def _roster(n, prefix="S", department=None):
     return [
-        {"user_id": str(uuid.uuid4()), "student_id": f"{prefix}-{i:04d}"}
+        {"user_id": str(uuid.uuid4()), "student_id": f"{prefix}-{i:04d}", "department": department}
         for i in range(n)
     ]
 
@@ -144,3 +144,77 @@ class TestSnapshotRosterAndAllocate:
         mock_fetch.return_value = good + malformed
         created = snapshot_roster_and_allocate(assignment, "Bearer fake")
         assert created == 5  # only the well-formed entries were allocated
+
+
+# ── Department scoping (live request, 2026-08-15) ───────────────────────────
+
+class TestSnapshotRosterAndAllocateDepartmentFilter:
+    @patch("assessments.allocation.fetch_batch_roster")
+    def test_empty_departments_allocates_every_department(self, mock_fetch, assignment, two_sets):
+        assert assignment.departments == []
+        roster = _roster(5, prefix="CSE", department="CSE") + _roster(5, prefix="ECE", department="ECE")
+        mock_fetch.return_value = roster
+        created = snapshot_roster_and_allocate(assignment, "Bearer fake")
+        assert created == 10
+
+    @patch("assessments.allocation.fetch_batch_roster")
+    def test_narrows_to_selected_departments_only(self, mock_fetch, assignment, two_sets):
+        assignment.departments = ["CSE", "CSD"]
+        assignment.save(update_fields=["departments"])
+        roster = (
+            _roster(4, prefix="CSE", department="CSE")
+            + _roster(3, prefix="CSD", department="CSD")
+            + _roster(6, prefix="ECE", department="ECE")
+        )
+        mock_fetch.return_value = roster
+        created = snapshot_roster_and_allocate(assignment, "Bearer fake")
+        assert created == 7  # 4 CSE + 3 CSD, ECE excluded
+
+    @patch("assessments.allocation.fetch_batch_roster")
+    def test_department_match_is_case_insensitive(self, mock_fetch, assignment, two_sets):
+        assignment.departments = ["cse"]
+        assignment.save(update_fields=["departments"])
+        mock_fetch.return_value = _roster(4, department="CSE")  # roster has upper, filter has lower
+        created = snapshot_roster_and_allocate(assignment, "Bearer fake")
+        assert created == 4
+
+    @patch("assessments.allocation.fetch_batch_roster")
+    def test_no_matching_department_on_first_snapshot_raises_and_creates_nothing(self, mock_fetch, assignment, two_sets):
+        assignment.departments = ["MECH"]
+        assignment.save(update_fields=["departments"])
+        mock_fetch.return_value = _roster(10, department="CSE")  # batch has students, none in MECH
+        with pytest.raises(RuntimeError):
+            snapshot_roster_and_allocate(assignment, "Bearer fake")
+        assert StudentSetAllocation.objects.filter(assignment=assignment).count() == 0
+
+    @patch("assessments.allocation.fetch_batch_roster")
+    def test_resync_with_zero_new_matches_is_not_an_error(self, mock_fetch, assignment, two_sets):
+        # First snapshot allocates the CSE students that exist today.
+        assignment.departments = ["CSE"]
+        assignment.save(update_fields=["departments"])
+        cse_roster = _roster(3, prefix="CSE", department="CSE")
+        mock_fetch.return_value = cse_roster
+        snapshot_roster_and_allocate(assignment, "Bearer fake")
+
+        # Resync: batch now also has new ECE students, but nothing new in CSE.
+        # Must NOT raise — there's already an allocation for this assignment.
+        mock_fetch.return_value = cse_roster + _roster(2, prefix="ECE", department="ECE")
+        added = snapshot_roster_and_allocate(assignment, "Bearer fake")
+        assert added == 0
+        assert StudentSetAllocation.objects.filter(assignment=assignment).count() == 3
+
+    @patch("assessments.allocation.fetch_batch_roster")
+    def test_resync_still_excludes_non_matching_departments(self, mock_fetch, assignment, two_sets):
+        # Same cse_roster reused across both calls — a fresh _roster() call
+        # generates new random UUIDs each time, which would make the "same"
+        # 3 CSE students look like 3 brand-new ones on the second call.
+        assignment.departments = ["CSE"]
+        assignment.save(update_fields=["departments"])
+        cse_roster = _roster(3, prefix="CSE", department="CSE")
+        mock_fetch.return_value = cse_roster
+        snapshot_roster_and_allocate(assignment, "Bearer fake")
+
+        mock_fetch.return_value = cse_roster + _roster(4, prefix="ECE", department="ECE")
+        added = snapshot_roster_and_allocate(assignment, "Bearer fake")
+        assert added == 0  # the 4 new ECE students are correctly never allocated
+        assert StudentSetAllocation.objects.filter(assignment=assignment).count() == 3

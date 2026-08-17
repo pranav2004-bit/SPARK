@@ -26,7 +26,7 @@ def clear_throttle_cache():
 def exam_setup(db):
     paper = QuestionPaper.objects.create(
         institution_id=INSTITUTION_A, title="Activity Log Test Paper",
-        created_by=ADMIN_USER_ID, is_published=True,
+        created_by=ADMIN_USER_ID,
     )
     qset = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
     Question.objects.create(set=qset, question_text="Q1", marks=1)
@@ -160,7 +160,7 @@ class TestActivityLogIngestion:
         # session's throttle state — the limit is keyed by session id.
         session_a = exam_setup["session"]
         paper_b = QuestionPaper.objects.create(
-            institution_id=INSTITUTION_A, title="Second Paper", created_by=ADMIN_USER_ID, is_published=True,
+            institution_id=INSTITUTION_A, title="Second Paper", created_by=ADMIN_USER_ID,
         )
         qset_b = QuestionSet.objects.create(paper=paper_b, label="Set A", order=1)
         assignment_b = BatchAssignment.objects.create(

@@ -21,8 +21,8 @@ path (Phase 5) never calls user-service live.
 Configuration (via Django settings / environment variables)
 ------------------------------------------------------------
   USER_SERVICE_URL           — base URL of user-service        (default: http://user-service:8000)
-  USER_SERVICE_TIMEOUT       — per-attempt timeout in seconds   (default: 5)
-  USER_SERVICE_RETRIES       — total number of attempts (1 = no retry) (default: 3)
+  USER_SERVICE_TIMEOUT       — per-attempt timeout in seconds   (default: 3)
+  USER_SERVICE_RETRIES       — total number of attempts (1 = no retry) (default: 2)
   USER_SERVICE_RETRY_BACKOFF — base seconds for exponential backoff (default: 0.3)
 """
 
@@ -65,8 +65,8 @@ _MAX_PAGES = 200  # 200 pages × 200 page_size = 40,000 students — far above V
 def _cfg() -> dict:
     return {
         "url":     getattr(settings, "USER_SERVICE_URL", "http://user-service:8000"),
-        "timeout": int(getattr(settings, "USER_SERVICE_TIMEOUT", 5)),
-        "retries": int(getattr(settings, "USER_SERVICE_RETRIES", 3)),
+        "timeout": int(getattr(settings, "USER_SERVICE_TIMEOUT", 3)),
+        "retries": int(getattr(settings, "USER_SERVICE_RETRIES", 2)),
         "backoff": float(getattr(settings, "USER_SERVICE_RETRY_BACKOFF", 0.3)),
     }
 

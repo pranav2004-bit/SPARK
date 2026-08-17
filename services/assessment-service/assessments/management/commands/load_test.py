@@ -229,7 +229,7 @@ class Command(BaseCommand):
 
         paper = QuestionPaper.objects.create(
             institution_id=LOAD_TEST_INSTITUTION_ID, title=f"Load Test Paper {uuid.uuid4().hex[:8]}",
-            created_by=LOAD_TEST_ADMIN_ID, is_published=True,
+            created_by=LOAD_TEST_ADMIN_ID,
         )
         qset = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
         questions = []

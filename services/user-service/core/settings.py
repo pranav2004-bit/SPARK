@@ -131,8 +131,12 @@ SERVICE_KEY = os.environ.get("SERVICE_KEY", "")
 # AUTH_SERVICE_RETRIES    — total number of attempts (1 = no retry).
 # AUTH_SERVICE_RETRY_BACKOFF — base seconds for exponential backoff between retries
 #                              (attempt 1 waits backoff*1, attempt 2 waits backoff*2, …).
-AUTH_SERVICE_TIMEOUT = int(os.environ.get("AUTH_SERVICE_TIMEOUT", "5"))
-AUTH_SERVICE_RETRIES = int(os.environ.get("AUTH_SERVICE_RETRIES", "3"))
+# Trimmed from the original 5s/3 (2026-08-17): a stale connection to
+# auth-service should fail fast rather than hang the calling request for a
+# full 5 seconds — see assessment-service/core/settings.py's
+# AUTH_SERVICE_TIMEOUT comment for the incident this responds to.
+AUTH_SERVICE_TIMEOUT = int(os.environ.get("AUTH_SERVICE_TIMEOUT", "3"))
+AUTH_SERVICE_RETRIES = int(os.environ.get("AUTH_SERVICE_RETRIES", "2"))
 AUTH_SERVICE_RETRY_BACKOFF = float(os.environ.get("AUTH_SERVICE_RETRY_BACKOFF", "0.3"))
 
 OUTBOX_POLL_INTERVAL = int(os.environ.get("OUTBOX_POLL_INTERVAL", "30"))

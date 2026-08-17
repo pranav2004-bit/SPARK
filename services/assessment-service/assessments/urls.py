@@ -3,7 +3,7 @@ from .views import (
     HealthView,
     AdminPaperListCreateView,
     AdminPaperDetailView,
-    AdminPaperPublishView,
+    AdminPaperInstructionsView,
     AdminPaperSetsView,
     AdminSetDetailView,
     AdminSetQuestionsView,
@@ -12,6 +12,7 @@ from .views import (
     AdminQuestionOptionDetailView,
     AdminQuestionImagePresignView,
     AdminOptionImagePresignView,
+    AdminSetImagePresignView,
     AdminAssignmentListCreateView,
     AdminAssignmentDetailView,
     AdminAssignmentStartView,
@@ -44,12 +45,13 @@ urlpatterns = [
     # Admin — question papers
     path("admin/papers/",                                  AdminPaperListCreateView.as_view(),   name="admin_paper_list_create"),
     path("admin/papers/<uuid:pk>/",                         AdminPaperDetailView.as_view(),       name="admin_paper_detail"),
-    path("admin/papers/<uuid:pk>/publish/",                 AdminPaperPublishView.as_view(),      name="admin_paper_publish"),
+    path("admin/papers/<uuid:pk>/instructions/",             AdminPaperInstructionsView.as_view(), name="admin_paper_instructions"),
     path("admin/papers/<uuid:pk>/sets/",                    AdminPaperSetsView.as_view(),         name="admin_paper_sets"),
 
     # Admin — sets
     path("admin/sets/<uuid:pk>/",                           AdminSetDetailView.as_view(),         name="admin_set_detail"),
     path("admin/sets/<uuid:pk>/questions/",                 AdminSetQuestionsView.as_view(),      name="admin_set_questions"),
+    path("admin/sets/<uuid:pk>/image-presign/",              AdminSetImagePresignView.as_view(),   name="admin_set_image_presign"),
 
     # Admin — questions
     path("admin/questions/<uuid:pk>/",                      AdminQuestionDetailView.as_view(),    name="admin_question_detail"),

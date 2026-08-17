@@ -29,7 +29,6 @@ class Command(BaseCommand):
             title="Aptitude Mock Test — Demo Paper",
             defaults={
                 "description": "Seed data for local dev testing (Task 2.1).",
-                "is_published": True,
                 "created_by": DEV_ADMIN_ID,
             },
         )

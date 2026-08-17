@@ -18,7 +18,9 @@ import pytest
 from django.utils import timezone
 
 from assessments.models import (
-    QuestionPaper, QuestionSet, Question, QuestionOption, MCQ_TYPE_SINGLE,
+    QuestionPaper, QuestionSet, Question, QuestionOption,
+    MCQ_TYPE_SINGLE, MCQ_TYPE_MULTIPLE,
+    QUESTION_CONTENT_IMAGE, QUESTION_CONTENT_BOTH,
 )
 
 from .conftest import INSTITUTION_A, ADMIN_USER_ID
@@ -40,6 +42,11 @@ def paper_chain(db):
     option = QuestionOption.objects.create(
         question=question, label="A", text="4", is_correct=True, order=1,
     )
+    # A 2nd option — assignment-readiness now requires >=2 options per
+    # question (get_assignment_readiness_blockers), and TestLockedPaperBlocks
+    # EveryMutation._lock() below creates a real assignment against this
+    # exact chain, so it must already be assignment-ready.
+    QuestionOption.objects.create(question=question, label="B", text="5", is_correct=False, order=2)
     return {"paper": paper, "qset": qset, "question": question, "option": option}
 
 
@@ -63,6 +70,50 @@ class TestPaperListCreateIDOR:
         assert resp.status_code == 403
 
 
+class TestPaperListCreatorEnrichment:
+    """"Created by <name>" on each paper card (frontend/admin/assessments/
+    papers/page.tsx) — created_by_name/created_by_email resolved via
+    core.auth_service_client.resolve_user_names, one batch call for the
+    whole page. conftest.py's autouse _mock_resolve_user_names fixture
+    stubs this to {} for every other test in the suite; these tests
+    override it locally to verify the enrichment wiring itself."""
+
+    @patch("assessments.views.resolve_user_names")
+    def test_resolved_name_and_email_attached_to_each_row(self, mock_resolve, admin_client, paper_chain):
+        mock_resolve.return_value = {
+            str(ADMIN_USER_ID): {"name": "Dr. Author", "email": "author@test.com"},
+        }
+        resp = admin_client.get("/api/assessments/admin/papers/")
+        assert resp.status_code == 200
+        row = next(p for p in resp.json()["results"] if p["id"] == str(paper_chain["paper"].id))
+        assert row["created_by_name"] == "Dr. Author"
+        assert row["created_by_email"] == "author@test.com"
+        # Called with exactly this page's distinct creator ids — not every
+        # user in the system.
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args[0][0] == [str(ADMIN_USER_ID)]
+
+    @patch("assessments.views.resolve_user_names")
+    def test_unresolved_creator_gets_empty_strings_not_an_error(self, mock_resolve, admin_client, paper_chain):
+        # resolve_user_names degrading to {} (its own documented best-effort
+        # failure mode) must never break the papers list itself.
+        mock_resolve.return_value = {}
+        resp = admin_client.get("/api/assessments/admin/papers/")
+        assert resp.status_code == 200
+        row = next(p for p in resp.json()["results"] if p["id"] == str(paper_chain["paper"].id))
+        assert row["created_by_name"] == ""
+        assert row["created_by_email"] == ""
+
+    @patch("assessments.views.resolve_user_names")
+    def test_empty_papers_list_never_calls_resolve(self, mock_resolve, admin_b_client):
+        # admin_b_client's institution has no papers here — no creator ids
+        # to resolve, so the batch lookup shouldn't fire at all.
+        resp = admin_b_client.get("/api/assessments/admin/papers/")
+        assert resp.status_code == 200
+        assert resp.json()["results"] == []
+        mock_resolve.assert_not_called()
+
+
 class TestPaperDetailIDOR:
     def test_cross_institution_get_404(self, admin_b_client, paper_chain):
         resp = admin_b_client.get(f"/api/assessments/admin/papers/{paper_chain['paper'].id}/")
@@ -83,18 +134,6 @@ class TestPaperDetailIDOR:
 
     def test_student_forbidden(self, student_client, paper_chain):
         resp = student_client.get(f"/api/assessments/admin/papers/{paper_chain['paper'].id}/")
-        assert resp.status_code == 403
-
-
-class TestPaperPublishIDOR:
-    def test_cross_institution_404(self, admin_b_client, paper_chain):
-        resp = admin_b_client.patch(f"/api/assessments/admin/papers/{paper_chain['paper'].id}/publish/")
-        assert resp.status_code == 404
-        paper_chain["paper"].refresh_from_db()
-        assert paper_chain["paper"].is_published is False
-
-    def test_student_forbidden(self, student_client, paper_chain):
-        resp = student_client.patch(f"/api/assessments/admin/papers/{paper_chain['paper'].id}/publish/")
         assert resp.status_code == 403
 
 
@@ -337,3 +376,190 @@ class TestLockedPaperBlocksEveryMutation:
         self._lock(admin_client, paper_chain)
         resp = admin_client.delete(f"/api/assessments/admin/papers/{paper_chain['paper'].id}/")
         assert resp.status_code == 403
+
+
+class TestMcqTypeTransitionValidation:
+    """Live bug report: the frontend's "Answer Type" toggle used to be
+    local-only (no PATCH), so a question could end up single-choice with
+    2+ correct options already persisted via the option-level endpoints
+    (which only guard *their own* single-choice invariant, not a
+    subsequent mcq_type change on the question itself). Covers both the
+    pre-existing option-level guard and the new question-level guard
+    added to close the reverse direction."""
+
+    def test_option_level_rejects_second_correct_option_on_single_choice(self, admin_client, paper_chain):
+        # paper_chain's question is MCQ_TYPE_SINGLE with one correct option already.
+        second = QuestionOption.objects.create(
+            question=paper_chain["question"], label="B", text="5", is_correct=False, order=2,
+        )
+        resp = admin_client.patch(
+            f"/api/assessments/admin/questions/{paper_chain['question'].id}/options/{second.id}/",
+            {"is_correct": True}, format="json",
+        )
+        assert resp.status_code == 400
+        second.refresh_from_db()
+        assert second.is_correct is False
+
+    def test_switch_to_multiple_then_marking_second_option_correct_succeeds(self, admin_client, paper_chain):
+        resp = admin_client.patch(
+            f"/api/assessments/admin/questions/{paper_chain['question'].id}/",
+            {"mcq_type": MCQ_TYPE_MULTIPLE}, format="json",
+        )
+        assert resp.status_code == 200
+        second = QuestionOption.objects.create(
+            question=paper_chain["question"], label="B", text="5", is_correct=False, order=2,
+        )
+        resp = admin_client.patch(
+            f"/api/assessments/admin/questions/{paper_chain['question'].id}/options/{second.id}/",
+            {"is_correct": True}, format="json",
+        )
+        assert resp.status_code == 200
+        second.refresh_from_db()
+        assert second.is_correct is True
+
+    def test_switch_to_single_with_two_correct_options_already_set_is_rejected(self, admin_client, paper_chain):
+        admin_client.patch(
+            f"/api/assessments/admin/questions/{paper_chain['question'].id}/",
+            {"mcq_type": MCQ_TYPE_MULTIPLE}, format="json",
+        )
+        second = QuestionOption.objects.create(
+            question=paper_chain["question"], label="B", text="5", is_correct=True, order=2,
+        )
+        resp = admin_client.patch(
+            f"/api/assessments/admin/questions/{paper_chain['question'].id}/",
+            {"mcq_type": MCQ_TYPE_SINGLE}, format="json",
+        )
+        assert resp.status_code == 400
+        assert "more than one correct option" in resp.json()["message"]
+        paper_chain["question"].refresh_from_db()
+        assert paper_chain["question"].mcq_type == MCQ_TYPE_MULTIPLE
+
+    def test_switch_to_single_with_at_most_one_correct_option_succeeds(self, admin_client, paper_chain):
+        admin_client.patch(
+            f"/api/assessments/admin/questions/{paper_chain['question'].id}/",
+            {"mcq_type": MCQ_TYPE_MULTIPLE}, format="json",
+        )
+        resp = admin_client.patch(
+            f"/api/assessments/admin/questions/{paper_chain['question'].id}/",
+            {"mcq_type": MCQ_TYPE_SINGLE}, format="json",
+        )
+        assert resp.status_code == 200
+        paper_chain["question"].refresh_from_db()
+        assert paper_chain["question"].mcq_type == MCQ_TYPE_SINGLE
+
+
+class TestSetImagePresignIDOR:
+    """AdminSetImagePresignView — presign for a question image before the
+    question exists yet, scoped to the QuestionSet (Live bug report,
+    2026-08-14). Same IDOR shape as the question/option presign endpoints
+    already covered above."""
+
+    def test_cross_institution_404(self, admin_b_client, paper_chain):
+        resp = admin_b_client.post(
+            f"/api/assessments/admin/sets/{paper_chain['qset'].id}/image-presign/",
+            {"filename": "x.jpg", "content_type": "image/jpeg"}, format="json",
+        )
+        assert resp.status_code == 404
+
+    def test_student_forbidden(self, student_client, paper_chain):
+        resp = student_client.post(
+            f"/api/assessments/admin/sets/{paper_chain['qset'].id}/image-presign/",
+            {"filename": "x.jpg", "content_type": "image/jpeg"}, format="json",
+        )
+        assert resp.status_code == 403
+
+
+class TestQuestionCreateWithImage:
+    """Live bug report, 2026-08-14: selecting "Text + Image" (or "Image")
+    on a brand-new question was a dead end — the create endpoint requires
+    an image already attached for content_type='both', but the frontend
+    only allowed image upload *after* the question was saved. Fixed by
+    letting the image be presigned/uploaded against the QuestionSet before
+    the question exists (TestSetImagePresignIDOR above), then attached on
+    the question's first save. These tests cover that first-save path,
+    including that the same verify/scan/quota gate PATCH already applies
+    to later image changes is also applied here, not skipped."""
+
+    def test_both_without_image_still_rejected(self, admin_client, paper_chain):
+        # Exact scenario from the bug report: 'both' selected, no image
+        # attached yet — must still be rejected, not silently accepted.
+        resp = admin_client.post(
+            f"/api/assessments/admin/sets/{paper_chain['qset'].id}/questions/",
+            {"question_content_type": QUESTION_CONTENT_BOTH, "question_text": "Solve: 84÷7", "marks": 1},
+            format="json",
+        )
+        assert resp.status_code == 400
+        assert "requires both text and an image" in resp.json()["message"]
+
+    @patch("assessments.views.scan_image_for_malware", return_value=None)
+    @patch("assessments.views.verify_uploaded_image", return_value=(2048, None))
+    def test_both_with_presigned_image_succeeds_on_first_save(self, mock_verify, mock_scan, admin_client, paper_chain):
+        resp = admin_client.post(
+            f"/api/assessments/admin/sets/{paper_chain['qset'].id}/questions/",
+            {
+                "question_content_type": QUESTION_CONTENT_BOTH,
+                "question_text": "Solve: 84÷7",
+                "question_image_key": "uploads/image/fake-key.jpg",
+                "marks": 1,
+            },
+            format="json",
+        )
+        assert resp.status_code == 201
+        question = Question.objects.get(pk=resp.json()["data"]["id"])
+        assert question.question_content_type == QUESTION_CONTENT_BOTH
+        assert question.question_image_key == "uploads/image/fake-key.jpg"
+        assert question.question_image_size_bytes == 2048
+        mock_verify.assert_called_once_with("uploads/image/fake-key.jpg")
+
+    @patch("assessments.views.scan_image_for_malware", return_value=None)
+    @patch("assessments.views.verify_uploaded_image", return_value=(2048, None))
+    def test_image_only_with_no_text_succeeds(self, mock_verify, mock_scan, admin_client, paper_chain):
+        resp = admin_client.post(
+            f"/api/assessments/admin/sets/{paper_chain['qset'].id}/questions/",
+            {
+                "question_content_type": QUESTION_CONTENT_IMAGE,
+                "question_image_key": "uploads/image/fake-key.jpg",
+                "marks": 1,
+            },
+            format="json",
+        )
+        assert resp.status_code == 201
+
+    @patch("assessments.views.delete_file")
+    @patch("assessments.views.scan_image_for_malware", return_value="Malware detected in uploaded file.")
+    @patch("assessments.views.verify_uploaded_image", return_value=(2048, None))
+    def test_infected_image_rejected_and_cleaned_up(self, mock_verify, mock_scan, mock_delete, admin_client, paper_chain):
+        before_count = Question.objects.count()
+        resp = admin_client.post(
+            f"/api/assessments/admin/sets/{paper_chain['qset'].id}/questions/",
+            {
+                "question_content_type": QUESTION_CONTENT_BOTH,
+                "question_text": "Solve: 84÷7",
+                "question_image_key": "uploads/image/infected.jpg",
+                "marks": 1,
+            },
+            format="json",
+        )
+        assert resp.status_code == 400
+        assert Question.objects.count() == before_count
+        mock_delete.assert_called_once_with("uploads/image/infected.jpg")
+
+    @patch("assessments.views.delete_file")
+    @patch("assessments.views.scan_image_for_malware", return_value=None)
+    @patch("assessments.views.verify_uploaded_image", return_value=(250 * 1024 * 1024, None))
+    def test_over_quota_image_rejected_and_cleaned_up(self, mock_verify, mock_scan, mock_delete, admin_client, paper_chain):
+        before_count = Question.objects.count()
+        resp = admin_client.post(
+            f"/api/assessments/admin/sets/{paper_chain['qset'].id}/questions/",
+            {
+                "question_content_type": QUESTION_CONTENT_BOTH,
+                "question_text": "Solve: 84÷7",
+                "question_image_key": "uploads/image/huge.jpg",
+                "marks": 1,
+            },
+            format="json",
+        )
+        assert resp.status_code == 400
+        assert "storage limit" in resp.json()["message"]
+        assert Question.objects.count() == before_count
+        mock_delete.assert_called_once_with("uploads/image/huge.jpg")

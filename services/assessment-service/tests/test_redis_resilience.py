@@ -57,7 +57,7 @@ class TestAnalyticsDashboardDegradeOnRedisFailure:
     def assignment_setup(self, db):
         paper = QuestionPaper.objects.create(
             institution_id=INSTITUTION_A, title="Redis Resilience Paper",
-            created_by=ADMIN_USER_ID, is_published=True,
+            created_by=ADMIN_USER_ID,
         )
         qset = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
         assignment = BatchAssignment.objects.create(
@@ -89,7 +89,7 @@ class TestAnalyticsDashboardDegradeOnRedisFailure:
 class TestFinalizeSessionsSurvivesRedisFailure:
     def test_submit_succeeds_even_if_dashboard_cache_invalidation_fails(self, db):
         paper = QuestionPaper.objects.create(
-            institution_id=INSTITUTION_A, title="X", created_by=ADMIN_USER_ID, is_published=True,
+            institution_id=INSTITUTION_A, title="X", created_by=ADMIN_USER_ID,
         )
         qset = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
         assignment = BatchAssignment.objects.create(
@@ -118,7 +118,7 @@ class TestFinalizeSessionsSurvivesRedisFailure:
 class TestThrottleFailsOpenOnRedisFailure:
     def test_answer_submit_throttle_allows_request_when_redis_down(self, db):
         paper = QuestionPaper.objects.create(
-            institution_id=INSTITUTION_A, title="X", created_by=ADMIN_USER_ID, is_published=True,
+            institution_id=INSTITUTION_A, title="X", created_by=ADMIN_USER_ID,
         )
         qset = QuestionSet.objects.create(paper=paper, label="Set A", order=1)
         q = Question.objects.create(set=qset, question_text="Q", marks=1, mcq_type=MCQ_TYPE_SINGLE)
