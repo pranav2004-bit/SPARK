@@ -1,0 +1,239 @@
+name: CI
+
+# Gate for merging into master, not a deploy pipeline. Every one of the 7
+# Django services and the frontend get their own job; a bad Postgres/JS
+# runtime doesn't reach master. This file alone does not block a merge by
+# itself — GitHub must be told (once, in repo Settings -> Branches) that the
+# "CI Result" job below is a required check on `master`. Step-by-step setup
+# instructions: PRODUCTION_CHECKLIST.md, "Items Added During Development".
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+# Least-privilege default: nothing in this workflow writes to the repo,
+# comments on PRs, or touches packages/deployments — read-only is all any
+# job here ever needs, so that's all GITHUB_TOKEN gets, regardless of the
+# org/repo's own default token permissions.
+permissions:
+  contents: read
+
+# A new commit on the same PR (or branch) cancels whatever CI run for that
+# same PR/branch is still in flight — only the latest commit's result
+# matters, running both to completion just burns CI minutes for no reason.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Path filter — this is a monorepo of 7 independent Django services
+  # plus one frontend, none of which import each other's code. A change to
+  # only resource-service has no way to break auth-service's tests, so
+  # running all 8 suites for every single commit (a doc fix included) would
+  # be pure waste at this repo's size. Skipped jobs below are exactly why
+  # the final aggregate job exists — see its own comment.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+      auth-service: ${{ steps.filter.outputs.auth-service }}
+      user-service: ${{ steps.filter.outputs.user-service }}
+      resource-service: ${{ steps.filter.outputs.resource-service }}
+      practice-service: ${{ steps.filter.outputs.practice-service }}
+      notification-service: ${{ steps.filter.outputs.notification-service }}
+      analytics-service: ${{ steps.filter.outputs.analytics-service }}
+      assessment-service: ${{ steps.filter.outputs.assessment-service }}
+    steps:
+      # fetch-depth: 0 (full history) only matters for the `push` trigger —
+      # on push, paths-filter diffs against the pre-push commit via git, and
+      # a shallow (default depth-1) clone won't have that commit locally.
+      # Without it, every push to master after a merge would silently fall
+      # back to "everything changed" and run all 7 services + frontend
+      # regardless of what the merge touched. `pull_request` runs don't
+      # actually need this (paths-filter uses the GitHub API for those), but
+      # this job is just a fast diff, not a build — a full clone here costs
+      # a few seconds, not worth branching the checkout by event type for.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            frontend:
+              - 'frontend/**'
+            auth-service:
+              - 'services/auth-service/**'
+            user-service:
+              - 'services/user-service/**'
+            resource-service:
+              - 'services/resource-service/**'
+            practice-service:
+              - 'services/practice-service/**'
+            notification-service:
+              - 'services/notification-service/**'
+            analytics-service:
+              - 'services/analytics-service/**'
+            assessment-service:
+              - 'services/assessment-service/**'
+
+  # ── Backend — one matrix job per service, each independently skippable.
+  #
+  # No Postgres/Redis service containers here on purpose, not an oversight:
+  # every service ships its own core/test_settings.py (sqlite3 :memory:,
+  # LocMemCache, and every required env var defaulted via
+  # os.environ.setdefault) specifically so the test suite is fully
+  # self-contained — verified directly against all 7 services before
+  # writing this, not assumed. Adding real Postgres/Redis containers here
+  # would only slow CI down for zero additional correctness signal, since
+  # the test suite deliberately never talks to either.
+  backend-tests:
+    needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - auth-service
+          - user-service
+          - resource-service
+          - practice-service
+          - notification-service
+          - analytics-service
+          - assessment-service
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # `matrix` is not available in a job-level `if:` (only github/needs/
+      # vars/inputs are) — confirmed via actionlint before shipping this,
+      # not assumed. So the skip decision has to live at step level, where
+      # both `matrix` and `needs` ARE available. Every step below re-checks
+      # this same output rather than the job being skipped outright: a
+      # matrix job with all steps no-op'd still reports "success" (never
+      # "skipped"), which is exactly what a per-service required status
+      # check needs — see the ci-result job for why "skipped" is the
+      # dangerous outcome to avoid.
+      #
+      # Deliberately NOT a job-level `defaults.run.working-directory` here:
+      # this very first step runs before `actions/checkout` below, and a
+      # job-level working-directory applies to every `run:` step including
+      # this one — pointing it at services/${{ matrix.service }} before that
+      # directory exists (nothing is checked out yet) fails the step outright
+      # on every single run. Each step below that actually touches the repo
+      # sets `working-directory` on itself instead, after checkout has run.
+      - name: Determine whether this service changed
+        id: relevant
+        run: echo "changed=${{ needs.changes.outputs[matrix.service] }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.relevant.outputs.changed == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.relevant.outputs.changed == 'true'
+        with:
+          python-version: '3.12'  # matches this service's own Dockerfile base image exactly
+          cache: 'pip'
+          cache-dependency-path: services/${{ matrix.service }}/requirements.txt
+
+      - name: Install dependencies
+        if: steps.relevant.outputs.changed == 'true'
+        working-directory: services/${{ matrix.service }}
+        run: pip install -r requirements.txt
+
+      # Catches "changed a model, forgot to run makemigrations" before it
+      # ever reaches a real database. Verified this passes cleanly today
+      # under core.test_settings for all 7 services before adding it as a
+      # gate — this is not a check being turned on blind.
+      - name: Check for missing migrations
+        if: steps.relevant.outputs.changed == 'true'
+        working-directory: services/${{ matrix.service }}
+        run: python manage.py makemigrations --check --dry-run --settings=core.test_settings
+
+      # Catches unsafe migration patterns (DROP COLUMN, RENAME COLUMN, a
+      # NOT NULL column with no default) before they reach a live database —
+      # a different concern from the check above, which only catches a
+      # forgotten `makemigrations`, not a dangerous one. django_celery_beat
+      # and token_blacklist are excluded because they're vendored migrations
+      # from third-party packages (django-celery-beat,
+      # djangorestframework-simplejwt) — we can't fix someone else's
+      # migration file, so flagging them is just noise. Migrations that
+      # predate this check's adoption (2026-09-08) are individually marked
+      # with IgnoreMigration() in their own source — see
+      # PRODUCTION_CHECKLIST.md "Items Added During Development" — this
+      # step only guards new migrations going forward.
+      - name: Lint migrations for unsafe schema changes
+        if: steps.relevant.outputs.changed == 'true'
+        working-directory: services/${{ matrix.service }}
+        run: >
+          python manage.py lintmigrations --settings=core.test_settings
+          --exclude-apps django_celery_beat token_blacklist
+
+      - name: Run tests
+        if: steps.relevant.outputs.changed == 'true'
+        working-directory: services/${{ matrix.service }}
+        run: pytest  # DJANGO_SETTINGS_MODULE=core.test_settings comes from this service's own pytest.ini
+
+  # ── Frontend ──────────────────────────────────────────────────────────────
+  frontend-tests:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Run tests
+        run: npm test -- --ci
+
+      - name: Production build
+        run: npm run build
+
+  # ── Required status check — point branch protection at THIS job, not at
+  # backend-tests or frontend-tests directly.
+  #
+  # Why this job has to exist: `frontend-tests` above is genuinely skipped
+  # (job-level `if:`) on a PR that never touched frontend/ — and GitHub's
+  # branch protection can't safely require a check that sometimes never
+  # reports back at all; a required check stuck on "skipped" blocks the
+  # merge button forever, not just on failure. (backend-tests avoids this
+  # itself — its matrix jobs always run and report success/failure, never
+  # skipped, by design — see its own comment — but frontend-tests still
+  # needs this job's protection.) This job runs unconditionally
+  # (`if: always()`), inspects every upstream job's actual result, and is
+  # the one single check branch protection needs to require. It fails the
+  # merge on a real `failure`/`cancelled`, and correctly ignores a
+  # legitimate `skipped` (nothing in that area changed).
+  ci-result:
+    name: CI Result
+    if: always()
+    needs: [changes, backend-tests, frontend-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Confirm nothing actually failed
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "At least one required job failed."
+            exit 1
+          fi
+          if [[ "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "At least one required job was cancelled."
+            exit 1
+          fi
+          echo "All required jobs passed or were correctly skipped (no relevant changes)."

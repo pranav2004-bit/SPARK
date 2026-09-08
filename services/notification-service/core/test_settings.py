@@ -10,6 +10,10 @@ os.environ.setdefault("DEBUG", "True")
 
 from .settings import *  # noqa: E402, F401, F403
 
+# CI-only — never installed in production settings.py. Backs the
+# `lintmigrations` step in .github/workflows/ci.yml.
+INSTALLED_APPS = list(INSTALLED_APPS) + ["django_migration_linter"]
+
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",

@@ -3,6 +3,7 @@
 import django.db.models.deletion
 import uuid
 from django.db import migrations, models
+from django_migration_linter import IgnoreMigration
 
 
 class Migration(migrations.Migration):
@@ -12,6 +13,11 @@ class Migration(migrations.Migration):
     dependencies = []
 
     operations = [
+        # Already applied before django-migration-linter was adopted
+        # (2026-09-08) — grandfathered, not a statement that this
+        # migration's pattern is safe to repeat. See
+        # PRODUCTION_CHECKLIST.md 'Items Added During Development'.
+        IgnoreMigration(),
         migrations.CreateModel(
             name="PracticeQuestion",
             fields=[
