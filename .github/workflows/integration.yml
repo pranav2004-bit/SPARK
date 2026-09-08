@@ -19,14 +19,14 @@ name: Integration
 # blindly re-run red checks instead of trusting them.
 #
 # So this runs where a full-stack smoke/integration suite belongs: right
-# after a merge lands on master (fast enough to catch and revert a real
+# after a merge lands on main (fast enough to catch and revert a real
 # cross-service regression) and on demand via workflow_dispatch (e.g.
 # before a release, or to re-verify after an infra change). A failure here
 # does not block anything automatically — it surfaces as a failed run on
-# master for a human to act on.
+# main for a human to act on.
 on:
   push:
-    branches: [master]
+    branches: [main]
   workflow_dispatch: {}
 
 permissions:

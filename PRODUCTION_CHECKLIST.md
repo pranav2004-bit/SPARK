@@ -398,10 +398,10 @@ Add new items here as you discover them. Format: `- [ ] Description — discover
 - [ ] Zero Downtime Deployment via Expand and Contract: every schema change must be backward-compatible; schema contracts (DROP/RENAME) deployed in a separate commit after confirming zero usage of old column — discovered during Phase 7 planning
 - [ ] Gmail SMTP credentials (`EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `ALERT_EMAIL_RECIPIENTS`) must be set in outbox-worker production environment before go-live — credentials intentionally blank in dev; see Section 12 for full setup steps — added during outbox dead-letter alert implementation (2026-06-07)
 - [ ] Production CORS domain + ClamAV first-boot DB download + live scan verification — see Section 13 — added during resource-service upload-security hardening (2026-07-10)
-- [ ] GitHub branch protection on `master` must require the `CI Result` status check (`.github/workflows/ci.yml`) before this repo's "no merge without green CI" rule is actually enforced — the workflow file alone only makes the check available, it does not block merges by itself. One-time manual step, only possible once the repo has a remote and at least one CI run has completed:
-  1. Push to GitHub and open one PR (or push to `master` once) so the `CI Result` check runs at least once — GitHub will not offer a check as a branch-protection option until it has appeared in at least one run.
+- [ ] GitHub branch protection on `main` must require the `CI Result` status check (`.github/workflows/ci.yml`) before this repo's "no merge without green CI" rule is actually enforced — the workflow file alone only makes the check available, it does not block merges by itself. One-time manual step, only possible once the repo has a remote and at least one CI run has completed:
+  1. Push to GitHub and open one PR (or push to `main` once) so the `CI Result` check runs at least once — GitHub will not offer a check as a branch-protection option until it has appeared in at least one run.
   2. Repo → **Settings → Branches → Add branch protection rule** (or **Add rule**).
-  3. Branch name pattern: `master`.
+  3. Branch name pattern: `main`.
   4. Enable **Require status checks to pass before merging**, then search for and select **CI Result** (not `backend-tests` or `frontend-tests` individually — see `ci.yml`'s own comment on why).
   5. (Recommended, not required by this checklist) Enable **Require branches to be up to date before merging** so a stale PR can't merge on a since-fixed base.
   6. Save. Confirm by opening a throwaway PR that fails a test on purpose — the merge button must be blocked.

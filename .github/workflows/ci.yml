@@ -1,16 +1,16 @@
 name: CI
 
-# Gate for merging into master, not a deploy pipeline. Every one of the 7
+# Gate for merging into main, not a deploy pipeline. Every one of the 7
 # Django services and the frontend get their own job; a bad Postgres/JS
-# runtime doesn't reach master. This file alone does not block a merge by
+# runtime doesn't reach main. This file alone does not block a merge by
 # itself — GitHub must be told (once, in repo Settings -> Branches) that the
-# "CI Result" job below is a required check on `master`. Step-by-step setup
+# "CI Result" job below is a required check on `main`. Step-by-step setup
 # instructions: PRODUCTION_CHECKLIST.md, "Items Added During Development".
 on:
   pull_request:
-    branches: [master]
+    branches: [main]
   push:
-    branches: [master]
+    branches: [main]
 
 # Least-privilege default: nothing in this workflow writes to the repo,
 # comments on PRs, or touches packages/deployments — read-only is all any
@@ -49,7 +49,7 @@ jobs:
       # fetch-depth: 0 (full history) only matters for the `push` trigger —
       # on push, paths-filter diffs against the pre-push commit via git, and
       # a shallow (default depth-1) clone won't have that commit locally.
-      # Without it, every push to master after a merge would silently fall
+      # Without it, every push to main after a merge would silently fall
       # back to "everything changed" and run all 7 services + frontend
       # regardless of what the merge touched. `pull_request` runs don't
       # actually need this (paths-filter uses the GitHub API for those), but
