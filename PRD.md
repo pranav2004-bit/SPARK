@@ -68,13 +68,22 @@ Institution training administrators responsible for:
 - Student readiness monitoring
 - Assessment creation and management
 - Contest management
-- Student communication
 
 ### Super Admin (Dean / Principal)
 Institution leadership responsible for:
 - Institutional oversight
-- Faculty admin account management
 - Enterprise-level analytics and platform engagement review
+- Read-only visibility into faculty admin accounts (management moved to IT, 2026-08-19)
+- Provisioned by IT (2026-08-20) — no longer bootstrapped, no IT account management authority (reversed the same day)
+
+### IT (Platform Operations)
+Platform operations staff — the platform's bootstrapped root account (2026-08-20; a single account seeded from `.env`, replacing Super Admin in that role), responsible for:
+- Student communication (inquiries)
+- Outbox delivery-failure monitoring (Dead Letter Queue)
+- Batch and student account management (exclusive — Admin and Super Admin have read-only access)
+- Faculty admin account management (exclusive — Super Admin has read-only access, moved 2026-08-19)
+- Super Admin account management (exclusive — Super Admin has zero access to this, moved 2026-08-20)
+- Department master-data management (exclusive to IT, added 2026-08-20) — the department list every create/assign form and filter across the platform reads from; Admin and Super Admin have read-only access
 
 ---
 
@@ -89,22 +98,35 @@ Institution leadership responsible for:
 
 ### 5.2 Admin (Faculty)
 - Full access to all content modules
-- Create and manage batches
-- Manage student accounts
+- View batches, including each batch's student roster (read-only — CRUD is IT-exclusive, revised 2026-08-19)
+- No standalone Students module — removed entirely (2026-08-19); Batches is Admin's only student-facing module
+- Read-only visibility into the department list (CRUD is IT-exclusive, added 2026-08-20) — consumed as dropdown/filter options in student creation, batch filters, and assessment assignment/results filters
 - Upload and manage resources
 - Create and manage practice content
 - Create, schedule, and manage assessments
 - Create and manage contests
 - View institutional analytics
 - Manage announcements and scrolling updates
-- View and respond to student inquiries
 
 ### 5.3 Super Admin (Dean / Principal)
 - Full read access across all modules
-- Create, manage, and deactivate admin accounts
-- View all batches and students across departments
+- View admin accounts (read-only — creation/management moved to IT, 2026-08-19)
+- View all batches across departments, including each batch's roster (read-only) — no standalone Students module (removed 2026-08-19, same as Admin)
+- Read-only visibility into the department list (CRUD is IT-exclusive, added 2026-08-20)
 - Access full enterprise-level analytics and reports
 - No content creation or operational management
+- No longer bootstrapped and no longer manages IT accounts (2026-08-20) — Super Admin is now itself created and managed by IT, the same way Admin and Student accounts are; zero access to the IT roster or to other Super Admin accounts
+- Self-service "My Profile" (view/edit own name, change own password) and Scrollbar (manage the student-facing announcement bar) — opened 2026-08-20, the same modules Admin already had
+
+### 5.4 IT (Platform Operations)
+- The platform's bootstrapped root account (2026-08-20) — a single account seeded from `IT_EMAIL`/`IT_PASSWORD` in `.env` on first container startup (`create_default_it`), replacing Super Admin in that role. No public sign-up; no UI creates additional IT accounts.
+- View and respond to student inquiries
+- Monitor and retry outbox dead-letter events (Dead Letter Queue)
+- Exclusive owner of the Students module and all Batches/Students account management — create, edit, delete, toggle status, bulk import, and reset student passwords (Admin and Super Admin both have read-only access to Batches, including a batch's roster, but neither has a Students module at all — briefly had shared write access 2026-08-19, reversed the same day; Students then dropped from Admin, then from Super Admin, entirely the same day)
+- Exclusive owner of Admin (faculty) account management — create, edit (name and department), deactivate/reactivate, delete, and reset password (Super Admin has read-only access to the account list/detail; moved from Super Admin 2026-08-19 — briefly shared full access to validate parity, then Super Admin restricted to read-only the same day, same treatment as Batches). Every Admin account is mapped to a department, chosen from the live Departments list at creation and editable afterward. Bulk CSV import (2026-08-20) — a single-column `email` file plus one Department picked in the UI, applied to every account created; per-row created/rejected results, same mechanism as Student bulk import.
+- Exclusive owner of Super Admin account management — create, edit (name and department), deactivate/reactivate, delete, and reset password (2026-08-20; unlike Admin, Super Admin has zero access here at all, not even read — same as Admin has zero visibility into other Admin accounts). Same department mapping and bulk CSV import as Admin account management.
+- Exclusive owner of Department master data — create, edit (name only — the code is immutable after creation), deactivate/reactivate, and permanently delete departments (2026-08-20; Admin and Super Admin have read-only access, same treatment as Batches). This is the canonical list every department dropdown/filter across all three portals reads from live — a CRUD change here updates every open tab without a rebuild or reload (same-tab via shared state, other tabs via a broadcast event). Renaming or deleting a department does not retroactively change student/admin records that already reference the old code — it only affects what's offered going forward.
+- No access to other academic content (resources, practice, assessments)
 
 ---
 
@@ -113,10 +135,12 @@ Institution leadership responsible for:
 | Tab | Purpose |
 |-----|---------|
 | **Overview** | Institution-wide KPIs — total students, batches, active admins, platform engagement |
-| **Admin Management** | Create, deactivate, and manage faculty admin accounts |
-| **Batches** | Read-only view of all batches and student counts |
-| **Students** | Read-only view of all students across all departments and batches |
+| **Admins** | Read-only view of faculty admin accounts (managed by IT, revised 2026-08-19) |
+| **Batches** | Read-only view of all batches, student counts, and each batch's roster |
+| **Scrollbar** | Manage the live scrolling announcement bar shown to students — same module and endpoints as Admin's, added 2026-08-20 |
 | **Analytics** | Full enterprise analytics — top performers, weak topic trends, resource utilization, assessment and contest participation, department-wise and batch-wise breakdowns |
+
+Also available from the header dropdown (not a nav tab, same as Admin): **My Profile** — view/edit own name, change own password. Added 2026-08-20.
 
 ---
 
@@ -124,11 +148,9 @@ Institution leadership responsible for:
 
 | Tab | Purpose | Version |
 |-----|---------|---------|
-| **Batches** | Create and manage student batches | V1 |
-| **Students** | Add, import, and manage student accounts | V1 |
+| **Batches** | View student batches, including each batch's roster (read-only — managed by IT, revised 2026-08-19) | V1 |
 | **Resources** | Manage company-wise preparation resources | V1 |
 | **Practice** | Manage practice modules, sections, and questions | V1 |
-| **Inquiries** | View and manage student inquiries | V1 |
 | **Scrollbar** | Manage live scrolling announcements shown to students | V1 |
 | **Assessments** | Create, schedule, assign, and monitor assessments | V2 |
 | **Contests** | Create and manage contests and leaderboards | V2 |
@@ -143,13 +165,34 @@ Institution leadership responsible for:
 | **Companies** | Browse company-wise preparation resources | V1 |
 | **Practice** | Topic-wise practice questions | V1 |
 | **My Profile** | View and update personal profile | V1 |
-| **Contact** | Submit inquiries to admin | V1 |
+| **Contact** | Submit inquiries (reviewed by IT) | V1 |
 | **Assessments** | View and attempt assigned assessments | V2 |
 | **Contests** | Join contests and view leaderboards | V2 |
 
 ---
 
-## 9. Release Strategy
+## 9. IT Portal — Navigation Tabs
+
+Added 2026-08-18. As of 2026-08-20, IT is the platform's bootstrapped root account — a single
+account seeded from `IT_EMAIL`/`IT_PASSWORD` in `.env` on first container startup
+(`create_default_it`), replacing Super Admin in that role (see §5.4). No public sign-up, no
+link from the marketing site, and no UI creates additional IT accounts. Every module below is
+exclusive to IT — either moved wholesale from its previous owner, or reserved for IT-only CRUD
+from the start. Further modules are added here as decided.
+
+| Tab | Purpose | Relationship to Admin/Super Admin |
+|-----|---------|------------|
+| **Super Admins** | Create (with department), edit (name/department), deactivate/reactivate, delete, reset password, and bulk-import via CSV (email list + one shared department) super admin accounts | Exclusive to IT — Super Admin has **zero** access here, not even read (moved from Super Admin 2026-08-20, alongside IT becoming the bootstrapped root; no transitional shared-access phase — this is a new capability, not a restriction of an existing one) |
+| **Admins** | Create (with department), edit (name/department), deactivate/reactivate, delete, reset password, and bulk-import via CSV (email list + one shared department) faculty admin accounts | Exclusive to IT — Super Admin has read-only access on `/super-admin/admins` (moved from Super Admin 2026-08-19; briefly shared full access to validate parity, then restricted the same day) |
+| **Departments** | Create departments (code + optional name), edit name, deactivate/reactivate, and permanently delete (2026-08-20) | Exclusive to IT — Admin and Super Admin both have read-only access, same treatment as Batches. A separate module from Super Admins/Admins, not merged into either — it's reference data consumed by account creation, student creation, and batch/assessment filters across every portal. CRUD here propagates live to every dropdown app-wide, no rebuild needed. |
+| **Batches** | Create, edit, and delete student batches | Exclusive to IT — Admin and Super Admin both have read-only access on `/admin/batch` / `/super-admin/batches`, including a batch's roster (briefly shared write access 2026-08-19, reversed the same day) |
+| **Students** | Add, import, edit, delete, and manage student accounts (status toggle, password reset) | Exclusive to IT — neither Admin nor Super Admin has any access (briefly shared write access, then read-only, both on 2026-08-19; the standalone module was removed from Admin, then from Super Admin, entirely later the same day — `/admin/students` and `/super-admin/students` no longer exist, old links redirect to their portal's Batches page) |
+| **Dead Letter Queue** | Monitor and retry outbox events that exhausted all delivery retries | Moved from Super Admin (2026-08-18) — Super Admin no longer has access |
+| **Inquiries** | View and manage student inquiries | Moved from Admin (2026-08-18) — Admin no longer has access |
+
+---
+
+## 10. Release Strategy
 
 The platform is delivered in two versions released within a short interval.
 
@@ -165,7 +208,7 @@ The platform is delivered in two versions released within a short interval.
 
 ---
 
-## 10. Functional Modules
+## 11. Functional Modules
 
 ### 10.1 Authentication — V1
 
@@ -277,7 +320,7 @@ PDFs, notes, interview experiences, previous questions, coding sheets, HR prepar
 
 ---
 
-## 11. Analytics & Reporting
+## 12. Analytics & Reporting
 
 ### Student-Level Analytics
 - Practice completion and accuracy
@@ -301,7 +344,7 @@ PDFs, notes, interview experiences, previous questions, coding sheets, HR prepar
 
 ---
 
-## 12. Notifications
+## 13. Notifications
 
 | Notification Type | Triggered By | Delivery | Version |
 |------------------|-------------|---------|---------|
@@ -313,7 +356,7 @@ PDFs, notes, interview experiences, previous questions, coding sheets, HR prepar
 
 ---
 
-## 13. Architecture
+## 14. Architecture
 
 ### Pattern
 | Scope | Pattern |
@@ -342,7 +385,7 @@ PDFs, notes, interview experiences, previous questions, coding sheets, HR prepar
 
 ---
 
-## 14. API Protocols
+## 15. API Protocols
 
 | Protocol | Used Where | Version |
 |----------|-----------|---------|
@@ -351,7 +394,7 @@ PDFs, notes, interview experiences, previous questions, coding sheets, HR prepar
 
 ---
 
-## 15. Infrastructure
+## 16. Infrastructure
 
 | Component | Technology |
 |-----------|-----------|
@@ -366,7 +409,7 @@ PDFs, notes, interview experiences, previous questions, coding sheets, HR prepar
 
 ---
 
-## 16. Technology Stack
+## 17. Technology Stack
 
 | Layer | Technology | Language |
 |-------|-----------|----------|
@@ -396,7 +439,7 @@ PDFs, notes, interview experiences, previous questions, coding sheets, HR prepar
 
 ---
 
-## 17. Scale & Performance Requirements
+## 18. Scale & Performance Requirements
 
 | Requirement | Target |
 |------------|--------|
@@ -409,7 +452,7 @@ PDFs, notes, interview experiences, previous questions, coding sheets, HR prepar
 
 ---
 
-## 18. Non-Functional Requirements
+## 19. Non-Functional Requirements
 
 ### Performance
 - Fast page loads across all modules
@@ -441,7 +484,7 @@ PDFs, notes, interview experiences, previous questions, coding sheets, HR prepar
 
 ---
 
-## 19. Success Metrics
+## 20. Success Metrics
 
 ### Student Metrics
 - Daily active users
@@ -457,7 +500,7 @@ PDFs, notes, interview experiences, previous questions, coding sheets, HR prepar
 
 ---
 
-## 20. Future Expansion Scope
+## 21. Future Expansion Scope
 
 - Placement outcome tracking and success rate reporting
 - AI-powered preparation recommendations

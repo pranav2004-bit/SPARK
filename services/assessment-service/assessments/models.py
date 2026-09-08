@@ -68,6 +68,33 @@ class QuestionSet(models.Model):
         return self.questions.aggregate(total=models.Sum("marks"))["total"] or 0
 
 
+# ── Question Sections ─────────────────────────────────────────────────────────
+# A grouping layer between a QuestionSet and its Questions (e.g. "Quantitative
+# Aptitude", "Logical Reasoning" within one set). Questions still carry a
+# direct FK to QuestionSet too (unchanged) so existing set-level aggregates
+# (total_marks, question counts) keep working untouched — section is an
+# additional organisational layer, not a replacement for the set relationship.
+
+class QuestionSection(models.Model):
+    id     = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    set    = models.ForeignKey(
+        QuestionSet,
+        on_delete=models.CASCADE,
+        related_name="sections",
+        db_index=True,
+    )
+    title  = models.CharField(max_length=100)
+    order  = models.PositiveIntegerField(default=0, db_index=True)
+
+    class Meta:
+        db_table = "assessment_question_sections"
+        ordering = ["order"]
+        unique_together = [("set", "title")]
+
+    def __str__(self):
+        return f"{self.set.label} — {self.title}"
+
+
 # ── Questions ──────────────────────────────────────────────────────────────────
 
 QUESTION_TYPE_MCQ = "mcq"
@@ -96,6 +123,12 @@ class Question(models.Model):
     id              = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     set             = models.ForeignKey(
         QuestionSet,
+        on_delete=models.CASCADE,
+        related_name="questions",
+        db_index=True,
+    )
+    section         = models.ForeignKey(
+        QuestionSection,
         on_delete=models.CASCADE,
         related_name="questions",
         db_index=True,
@@ -131,6 +164,16 @@ class Question(models.Model):
         ]
 
     def save(self, *args, **kwargs):
+        if self._state.adding and self.section_id is None:
+            # Callers that don't explicitly pick a section (older/internal
+            # code, tests) fall into a default "Section 1" per set rather
+            # than erroring — mirrors the migration 0018 backfill for
+            # pre-existing rows. The admin question-creation endpoint always
+            # passes an explicit section from the section-first UI, so this
+            # is a safety net, not the primary path.
+            self.section, _ = QuestionSection.objects.get_or_create(
+                set=self.set, title="Section 1", defaults={"order": 1},
+            )
         if self._state.adding and self.question_number == 0:
             from django.db.models import Max
             # Scoped to this set — every set's questions are numbered
@@ -329,6 +372,23 @@ SESSION_STATUS_NOT_STARTED       = "NOT_STARTED"
 SESSION_STATUS_IN_PROGRESS       = "IN_PROGRESS"
 SESSION_STATUS_SUBMITTED         = "SUBMITTED"
 SESSION_STATUS_AUTO_SUBMITTED    = "AUTO_SUBMITTED"
+# Reserved, not currently set anywhere (audited 2026-08-17): ADR 001's
+# original design was a ResultSummary row written with this status once an
+# allocated-but-never-started student's assignment closes, so Results could
+# distinguish "didn't attempt" from "attempted and scored." What actually
+# shipped instead is simpler and needs no extra write path at all — a
+# no-show has no AssessmentSession row, so `views.py`'s
+# `_build_results_queryset` (built from StudentSetAllocation, not
+# ResultSummary) just reads that absence as `exam_status="pending"` at
+# request time. That already serves the same "who never showed up" need
+# the admin Results table has today, so this value is kept defined (both
+# AssessmentSession.status and ResultSummary.status share this enum, per
+# docs/assessment-service-api.md) rather than wired up for real — implementing
+# the original write-path would mean auditing every completion-rate/
+# analytics aggregate that currently assumes a ResultSummary row means
+# "actually completed," to make sure an EXPIRED_UNSTARTED row wouldn't get
+# miscounted as one. Not worth that risk for a state the read-time
+# computation already covers.
 SESSION_STATUS_EXPIRED_UNSTARTED = "EXPIRED_UNSTARTED"
 SESSION_STATUS_CHOICES = [
     (SESSION_STATUS_NOT_STARTED,       "Not started"),
@@ -345,13 +405,30 @@ SESSION_TERMINAL_STATUSES = {SESSION_STATUS_SUBMITTED, SESSION_STATUS_AUTO_SUBMI
 
 class AssessmentSession(models.Model):
     id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # Nullable since 2026-08-27 — an admin "mock test" trial run (taken
+    # either before an assignment exists, from the assign form's Final
+    # Review step, or repeatably afterward from an existing assignment's
+    # toolbar) is a real session on a real QuestionSet, but deliberately has
+    # no BatchAssignment: no batch, no roster, no global timer, no
+    # malpractice tracking. NULL here is the sole, unambiguous marker of a
+    # trial session — every real student session still always has one.
     assignment = models.ForeignKey(
         BatchAssignment,
         on_delete=models.PROTECT,  # a session with results must never silently vanish via cascade
         related_name="sessions",
         db_index=True,
+        null=True, blank=True,
     )
-    # JWT user_id claim — matches StudentSetAllocation.student_id's convention.
+    # JWT user_id claim — matches StudentSetAllocation.student_id's
+    # convention. For a trial session (assignment is None) this holds the
+    # trialing ADMIN's own user_id instead of a student's — there's no
+    # separate "who does this session belong to" concept, and reusing this
+    # column lets every ownership check across the codebase
+    # (`student_id=request.user.id`) work unchanged for both cases. It also
+    # means Postgres's unique_together below never blocks a retake: two
+    # trial rows both have assignment=NULL, and SQL never considers two
+    # NULLs equal for uniqueness purposes, so the same admin can retake the
+    # same paper as many times as they want.
     student_id = models.UUIDField(db_index=True)
     set = models.ForeignKey(
         QuestionSet,
@@ -398,9 +475,18 @@ class ResultSummary(models.Model):
     session    = models.OneToOneField(
         AssessmentSession, on_delete=models.PROTECT, related_name="result",
     )
+    # Nullable since 2026-08-27, mirroring AssessmentSession.assignment
+    # above — a trial (admin mock test) result has no assignment. See that
+    # field's comment for why NULL is the sole trial marker, and
+    # scoring.py's finalize_sessions() for how institution_id (still NOT
+    # NULL below — every result needs SOME tenant) is resolved from the
+    # paper instead of the assignment when this is None.
     assignment = models.ForeignKey(
         BatchAssignment, on_delete=models.PROTECT, related_name="results", db_index=True,
+        null=True, blank=True,
     )
+    # Trial results: the trialing admin's own user_id — see
+    # AssessmentSession.student_id's comment.
     student_id     = models.UUIDField(db_index=True)
     institution_id = models.UUIDField(db_index=True)
 
@@ -499,6 +585,33 @@ ACTIVITY_EVENT_FULLSCREEN_EXIT = "fullscreen_exit"
 ACTIVITY_EVENT_COPY            = "copy"
 ACTIVITY_EVENT_PASTE           = "paste"
 ACTIVITY_EVENT_CONTEXTMENU     = "contextmenu"
+# Added 2026-08-18 — full-transparency audit trail, not just anti-cheat
+# signals: every student action during the exam, plus session-affecting
+# admin actions, so the timeline (AdminSessionTimelineView) is a complete
+# record, not just a violation log. question_answered/question_answer_changed
+# are written server-side (StudentAnswerView), never by the client batcher —
+# the server already knows definitively whether a PUT was a first answer or
+# a genuine change, so there's no client-side detection to get wrong or spoof.
+ACTIVITY_EVENT_QUESTION_ANSWERED       = "question_answered"
+ACTIVITY_EVENT_QUESTION_ANSWER_CHANGED = "question_answer_changed"
+# Client-detected, same best-effort caveat as the existing signals above —
+# see useActivityCapture.ts's docstring for exactly what this can and can't see.
+ACTIVITY_EVENT_SCREENSHOT_ATTEMPT = "screenshot_attempt"
+# Logged once connectivity is restored (with the true original loss time in
+# occurred_at and duration_seconds in metadata) — a client can't reliably
+# POST an event about losing its own network at the exact moment it happens.
+ACTIVITY_EVENT_CONNECTION_LOST = "connection_lost"
+# Server-authored (AdminAssignmentExtendSessionView), not client-reported —
+# an administrative action that affects the exam, not a student action, but
+# still part of "everything that happened during this session."
+ACTIVITY_EVENT_ADMIN_EXTENDED_TIME = "admin_extended_time"
+# Client-detected (useActivityCapture.ts, via the exam page's active-question
+# navigation) — logged once the student navigates away from a question (or
+# submits), covering only foreground/visible time: the tab-hidden window is
+# excluded, so switching away mid-question doesn't inflate its time. Feeds
+# both this session's own timeline and the cohort-level "average time per
+# question" analytics (assessments/views.py's _question_time_spent).
+ACTIVITY_EVENT_QUESTION_TIME_SPENT = "question_time_spent"
 ACTIVITY_EVENT_TYPE_CHOICES = [
     (ACTIVITY_EVENT_TAB_SWITCH,      "Tab switch"),
     (ACTIVITY_EVENT_WINDOW_BLUR,     "Window blur"),
@@ -506,7 +619,25 @@ ACTIVITY_EVENT_TYPE_CHOICES = [
     (ACTIVITY_EVENT_COPY,            "Copy"),
     (ACTIVITY_EVENT_PASTE,           "Paste"),
     (ACTIVITY_EVENT_CONTEXTMENU,     "Right-click"),
+    (ACTIVITY_EVENT_QUESTION_ANSWERED,       "Answered a question"),
+    (ACTIVITY_EVENT_QUESTION_ANSWER_CHANGED, "Changed an answer"),
+    (ACTIVITY_EVENT_SCREENSHOT_ATTEMPT,      "Screenshot attempt"),
+    (ACTIVITY_EVENT_CONNECTION_LOST,         "Lost internet connection"),
+    (ACTIVITY_EVENT_ADMIN_EXTENDED_TIME,     "Admin extended exam time"),
+    (ACTIVITY_EVENT_QUESTION_TIME_SPENT,     "Time spent on a question"),
 ]
+
+
+# How long a raw ActivityLog row (a single tab-switch/copy/paste/etc.
+# event) is kept before the daily purge_old_activity_logs task (tasks.py)
+# deletes it. This is a storage/cost retention window for the raw audit
+# trail specifically — NOT the exam record itself: AssessmentResponse,
+# ResultSummary, and every score/pass-fail/malpractice_flag/reasons value
+# are permanent academic records, never touched by this. A single source
+# of truth (not duplicated as a bare "15" in tasks.py and the admin
+# timeline view's response) so the purge task and the UI's own "deleted
+# after N days" notice can never silently drift apart.
+ACTIVITY_LOG_RETENTION_DAYS = 15
 
 
 class ActivityLog(models.Model):
@@ -514,7 +645,9 @@ class ActivityLog(models.Model):
     session = models.ForeignKey(
         AssessmentSession, on_delete=models.PROTECT, related_name="activity_logs", db_index=True,
     )
-    event_type = models.CharField(max_length=20, choices=ACTIVITY_EVENT_TYPE_CHOICES, db_index=True)
+    # 30: comfortably fits the longest current value
+    # (question_answer_changed, 23 chars) with headroom for a future one.
+    event_type = models.CharField(max_length=30, choices=ACTIVITY_EVENT_TYPE_CHOICES, db_index=True)
     # Client-reported event time — unlike session.ends_at/scoring (AT1),
     # trusting the client here is low-risk: falsifying WHEN a tab-switch
     # appeared to happen doesn't grant extra marks or time, it only

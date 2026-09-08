@@ -8,7 +8,6 @@ import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Modal } from "@/components/ui/Modal";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
@@ -63,21 +62,20 @@ export default function StudentAssessmentsPage() {
   const [items, setItems] = useState<StudentAssignmentListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
-  const [rulesGate, setRulesGate] = useState<StudentAssignmentListItem | null>(null);
-  const [rulesAgreed, setRulesAgreed] = useState(false);
 
+  // The pre-exam briefing (assessment facts, identity confirmation, admin
+  // instructions, system rules, readiness checklist) now lives on the exam
+  // page itself (2026-08-27) rather than a modal here — a full page does
+  // that content justice, and it means the exact same briefing shows up
+  // correctly whether a student arrives via this list or a direct/
+  // bookmarked link. That page fetches this assignment's own current
+  // session_status fresh on load and decides for itself whether to show
+  // the full briefing (never started), a lightweight resume screen
+  // (already IN_PROGRESS — re-showing the full briefing would just burn
+  // remaining time for no reason), or skip straight through (already
+  // finished) — so this click is just a plain navigation either way.
   function handleEnter(item: StudentAssignmentListItem) {
-    // Resuming an already-started session skips the gate entirely — the
-    // student's timer is already running, re-showing rules would just
-    // burn their remaining time for no reason. Only a brand-new start
-    // (never opened this session before), and only if the admin actually
-    // set rules text, shows the gate first.
-    if (item.session_status === "IN_PROGRESS" || !item.paper_instructions.trim()) {
-      router.push(`/students/assessments/${item.assignment_id}`);
-      return;
-    }
-    setRulesAgreed(false);
-    setRulesGate(item);
+    router.push(`/students/assessments/${item.assignment_id}`);
   }
 
   // On failure this must not just toast and fall through to "No assessments
@@ -98,7 +96,7 @@ export default function StudentAssessmentsPage() {
 
   return (
     <StudentLayout>
-      <PageWrapper className="max-w-3xl">
+      <PageWrapper>
         <PageHeader
           title="Assessments"
           subtitle="Timed exams assigned to you. You can enter once your admin starts the timer."
@@ -110,8 +108,8 @@ export default function StudentAssessmentsPage() {
         />
 
         {loading ? (
-          <div className="space-y-3">
-            {[1, 2].map(i => <Skeleton key={i} className="h-24 w-full rounded-[var(--radius-xl)]" />)}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {[1, 2, 3].map(i => <Skeleton key={i} className="h-44 w-full rounded-[var(--radius-xl)]" />)}
           </div>
         ) : loadError ? (
           <EmptyState
@@ -127,79 +125,41 @@ export default function StudentAssessmentsPage() {
             subtitle="Assessments assigned to your batch will appear here automatically."
           />
         ) : (
-          <div className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {items.map(item => {
               const completed = item.session_status === "SUBMITTED" || item.session_status === "AUTO_SUBMITTED";
               const canEnter = item.status === "LIVE" && !completed;
               return (
                 <div
                   key={item.assignment_id}
-                  className="rounded-[var(--radius-xl)] p-5"
+                  className="rounded-[var(--radius-xl)] p-5 flex flex-col gap-4"
                   style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", boxShadow: "var(--shadow-sm)" }}
                 >
-                  <div className="flex items-start justify-between gap-4 flex-wrap">
-                    <div>
-                      <div className="mb-2"><StatusPill item={item} /></div>
-                      <h3 className="text-base font-semibold" style={{ color: "var(--color-text)" }}>{item.paper_title}</h3>
-                      <p className="text-xs mt-1 flex items-center gap-1.5" style={{ color: "var(--color-text-subtle)" }}>
-                        <Clock size={11} /> {item.exam_duration_minutes} minutes · closes {formatDateTime(item.global_expire_time)}
-                      </p>
-                    </div>
-                    {canEnter && (
-                      <Button
-                        variant="primary"
-                        onClick={() => handleEnter(item)}
-                      >
-                        {item.session_status === "IN_PROGRESS" ? "Resume Exam" : "Start Exam"}
-                      </Button>
-                    )}
+                  <div>
+                    <div className="mb-2"><StatusPill item={item} /></div>
+                    <h3 className="text-base font-semibold leading-snug" style={{ color: "var(--color-text)" }}>{item.paper_title}</h3>
+                    <p className="text-xs mt-2 flex items-center gap-1.5" style={{ color: "var(--color-text-subtle)" }}>
+                      <Clock size={11} /> {item.exam_duration_minutes} minutes
+                    </p>
+                    <p className="text-xs mt-1 flex items-center gap-1.5" style={{ color: "var(--color-text-subtle)" }}>
+                      closes {formatDateTime(item.global_expire_time)}
+                    </p>
                   </div>
+                  {canEnter && (
+                    <Button
+                      variant="primary"
+                      className="mt-auto self-start"
+                      onClick={() => handleEnter(item)}
+                    >
+                      {item.session_status === "IN_PROGRESS" ? "Resume Exam" : "Start Exam"}
+                    </Button>
+                  )}
                 </div>
               );
             })}
           </div>
         )}
       </PageWrapper>
-
-      <Modal
-        isOpen={rulesGate !== null}
-        onClose={() => setRulesGate(null)}
-        title="Before you start"
-        maxWidth="lg"
-      >
-        {rulesGate && (
-          <>
-            <p className="text-sm font-semibold mb-2" style={{ color: "var(--color-text)" }}>{rulesGate.paper_title}</p>
-            <div
-              className="text-sm leading-relaxed whitespace-pre-wrap max-h-72 overflow-y-auto p-4 rounded-[var(--radius-md)] mb-4"
-              style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", color: "var(--color-text-muted)" }}
-            >
-              {rulesGate.paper_instructions}
-            </div>
-            <label className="flex items-start gap-2.5 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={rulesAgreed}
-                onChange={e => setRulesAgreed(e.target.checked)}
-                className="mt-0.5 h-4 w-4 shrink-0 rounded border-[var(--color-border)] text-[var(--color-accent)] focus:ring-[var(--color-accent)]"
-              />
-              <span className="text-sm" style={{ color: "var(--color-text)" }}>
-                I have read all the instructions above.
-              </span>
-            </label>
-            <div className="flex justify-end gap-3 mt-5">
-              <Button variant="secondary" type="button" onClick={() => setRulesGate(null)}>Cancel</Button>
-              <Button
-                type="button"
-                disabled={!rulesAgreed}
-                onClick={() => router.push(`/students/assessments/${rulesGate.assignment_id}`)}
-              >
-                Start Exam
-              </Button>
-            </div>
-          </>
-        )}
-      </Modal>
     </StudentLayout>
   );
 }

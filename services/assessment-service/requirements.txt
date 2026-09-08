@@ -8,6 +8,7 @@ clamd==1.0.2
 celery==5.4.0
 django-celery-beat==2.7.0
 uvicorn[standard]==0.32.0
+gunicorn==23.0.0
 sentry-sdk[django]==2.17.0
 python-dotenv==1.0.1
 Pillow==11.0.0

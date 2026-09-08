@@ -153,6 +153,80 @@ class TestAnswerPut:
         assert resp.status_code == 404
 
 
+# ── Answer activity logging (2026-08-18) ─────────────────────────────────────
+# StudentAnswerView writes its own ActivityLog entries for the admin
+# timeline's "every single student action" requirement — a first answer and
+# a genuine change are both real behavior worth showing; a resave of the
+# exact same value (a debounced autosave retry, a network retry) is not.
+
+class TestAnswerActivityLogging:
+    def test_first_answer_logs_question_answered(self, student_client, exam_setup):
+        from assessments.models import ActivityLog
+        session, q1, opt = exam_setup["session"], exam_setup["q1"], exam_setup["q1_correct"]
+
+        student_client.put(_answer_url(session.id, q1.id), {"selected_option_ids": [str(opt.id)]}, format="json")
+
+        logs = ActivityLog.objects.filter(session=session)
+        assert logs.count() == 1
+        assert logs.first().event_type == "question_answered"
+        assert logs.first().metadata == {"question_number": q1.question_number}
+
+    def test_changing_the_answer_logs_question_answer_changed(self, student_client, exam_setup):
+        from assessments.models import ActivityLog
+        session, q1 = exam_setup["session"], exam_setup["q1"]
+        wrong = q1.options.filter(is_correct=False).first()
+        correct = exam_setup["q1_correct"]
+
+        student_client.put(_answer_url(session.id, q1.id), {"selected_option_ids": [str(wrong.id)]}, format="json")
+        student_client.put(_answer_url(session.id, q1.id), {"selected_option_ids": [str(correct.id)]}, format="json")
+
+        logs = list(ActivityLog.objects.filter(session=session).order_by("occurred_at"))
+        assert [l.event_type for l in logs] == ["question_answered", "question_answer_changed"]
+
+    def test_resaving_the_identical_answer_logs_nothing_new(self, student_client, exam_setup):
+        # A debounced autosave firing twice, or a network retry, with the
+        # exact same payload — not a "change", must not spam the timeline.
+        from assessments.models import ActivityLog
+        session, q1, opt = exam_setup["session"], exam_setup["q1"], exam_setup["q1_correct"]
+
+        student_client.put(_answer_url(session.id, q1.id), {"selected_option_ids": [str(opt.id)]}, format="json")
+        student_client.put(_answer_url(session.id, q1.id), {"selected_option_ids": [str(opt.id)]}, format="json")
+
+        logs = ActivityLog.objects.filter(session=session)
+        assert logs.count() == 1  # just the original "answered", not a second event
+
+    def test_answering_multiple_questions_logs_each_separately(self, student_client, exam_setup):
+        from assessments.models import ActivityLog
+        session = exam_setup["session"]
+
+        student_client.put(_answer_url(session.id, exam_setup["q1"].id), {"selected_option_ids": [str(exam_setup["q1_correct"].id)]}, format="json")
+        student_client.put(_answer_url(session.id, exam_setup["q3"].id), {"selected_option_ids": [str(exam_setup["q3_correct"].id)]}, format="json")
+
+        logs = ActivityLog.objects.filter(session=session, event_type="question_answered")
+        assert {l.metadata.get("question_number") for l in logs} == {exam_setup["q1"].question_number, exam_setup["q3"].question_number}
+
+    def test_lost_upsert_race_does_not_double_log(self, student_client, exam_setup, monkeypatch):
+        # Simulates two near-simultaneous identical PUTs colliding on the
+        # same (session, question) unique constraint — the losing request's
+        # own IntegrityError branch must not also write an activity event,
+        # since the winner's request already logged the one real write.
+        from unittest.mock import patch
+        from django.db import IntegrityError
+        from assessments.models import ActivityLog, AssessmentResponse
+
+        session, q1, opt = exam_setup["session"], exam_setup["q1"], exam_setup["q1_correct"]
+        # Pre-create the row out-of-band, simulating the concurrent winner,
+        # then force this request's update_or_create to still raise
+        # IntegrityError as if it lost the race.
+        AssessmentResponse.objects.create(session=session, question=q1, selected_option_ids=[str(opt.id)])
+
+        with patch("assessments.models.AssessmentResponse.objects.update_or_create", side_effect=IntegrityError("dup")):
+            resp = student_client.put(_answer_url(session.id, q1.id), {"selected_option_ids": [str(opt.id)]}, format="json")
+
+        assert resp.status_code == 200
+        assert ActivityLog.objects.filter(session=session).count() == 0
+
+
 # ── Submit & scoring ─────────────────────────────────────────────────────────
 
 class TestSubmitAndScoring:

@@ -114,3 +114,67 @@ def sweep_expired_sessions(self):
                 self.request.retries + 1, _MAX_RETRIES, exc,
             )
             raise self.retry(exc=exc, countdown=_RETRY_BACKOFF_SECONDS * (self.request.retries + 1))
+
+
+# purge_old_activity_logs runs once/day (CELERY_BEAT_SCHEDULE), not every
+# 20s like the two sweeps above — this is low-urgency storage housekeeping,
+# not exam-timing enforcement, so it doesn't need their tight cadence.
+_PURGE_BATCH_SIZE = 1000
+# Safety cap, same convention as allocation.py's _MAX_PAGES: bounds one
+# run's worst case (500k rows/run) instead of one run silently churning
+# through an unbounded backlog forever if the schedule was ever paused for
+# a long stretch and there's a huge purge queued up. The *next* day's run
+# picks up wherever this one left off — nothing is lost, just deferred.
+_PURGE_MAX_BATCHES = 500
+
+
+@shared_task(bind=True, base=DeadLetteringTask, max_retries=_MAX_RETRIES, default_retry_delay=_RETRY_BACKOFF_SECONDS)
+def purge_old_activity_logs(self):
+    """Deletes ActivityLog rows older than ACTIVITY_LOG_RETENTION_DAYS
+    (models.py) — the raw tab-switch/copy/paste/etc. audit trail only.
+    AssessmentResponse, ResultSummary, and every score/malpractice value
+    are permanent academic records and are never touched here.
+
+    Two safety properties, both deliberate:
+      1. Only ever deletes logs belonging to a session that has already
+         finished (status != IN_PROGRESS) — even though 15 days is
+         hugely longer than any realistic exam duration and this could
+         never matter in practice, an active session's own audit trail
+         must never be a candidate no matter what, on principle.
+      2. Deletes in small batches (_PURGE_BATCH_SIZE), not one unbounded
+         DELETE — keeps each individual transaction/lock short instead of
+         holding the whole (potentially huge) backlog in one transaction,
+         same batching discipline as allocation.py's bulk_create and
+         scoring.py's bulk_update.
+    """
+    from .models import ActivityLog, ACTIVITY_LOG_RETENTION_DAYS, SESSION_STATUS_IN_PROGRESS
+
+    with bind_request_id(self.request.id):
+        try:
+            cutoff = timezone.now() - timezone.timedelta(days=ACTIVITY_LOG_RETENTION_DAYS)
+            total_deleted = 0
+            for _ in range(_PURGE_MAX_BATCHES):
+                stale_ids = list(
+                    ActivityLog.objects.filter(occurred_at__lt=cutoff)
+                    .exclude(session__status=SESSION_STATUS_IN_PROGRESS)
+                    .values_list("id", flat=True)[:_PURGE_BATCH_SIZE]
+                )
+                if not stale_ids:
+                    break
+                ActivityLog.objects.filter(id__in=stale_ids).delete()
+                total_deleted += len(stale_ids)
+            else:
+                logger.warning(
+                    "purge_old_activity_logs: hit the %d-batch safety cap (%d rows deleted this "
+                    "run) — there may still be more stale rows left; tomorrow's run will continue.",
+                    _PURGE_MAX_BATCHES, total_deleted,
+                )
+            if total_deleted:
+                logger.info("purge_old_activity_logs: deleted %d row(s) older than %d days.", total_deleted, ACTIVITY_LOG_RETENTION_DAYS)
+            return {"deleted": total_deleted}
+        except Exception as exc:
+            logger.error(
+                "purge_old_activity_logs failed (attempt %d/%d): %s",
+                self.request.retries + 1, _MAX_RETRIES, exc,
+            )
+            raise self.retry(exc=exc, countdown=_RETRY_BACKOFF_SECONDS * (self.request.retries + 1))

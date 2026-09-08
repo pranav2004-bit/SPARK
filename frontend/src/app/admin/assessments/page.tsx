@@ -66,7 +66,7 @@ export default function AdminAssessmentsLandingPage() {
 
   return (
     <AdminLayout>
-      <PageWrapper className="max-w-5xl">
+      <PageWrapper>
         <PageHeader
           title="Assessments"
           subtitle="Author exams, then review how students did."

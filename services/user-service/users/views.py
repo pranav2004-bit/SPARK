@@ -5,10 +5,10 @@ from users.models import OutboxEvent
 from django.db.models import Count, Q
 from django.contrib.auth.hashers import make_password
 from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, SAFE_METHODS
 from rest_framework.generics import get_object_or_404
 
-from core.permissions import IsAdminUser, IsStudentUser, IsAdminOrSuperAdmin, IsSuperAdminUser
+from core.permissions import IsAdminUser, IsStudentUser, IsAdminOrSuperAdmin, IsSuperAdminUser, IsITUser, IsAdminOrSuperAdminOrIT
 from core.pagination import StandardResultsPagination
 from core.responses import success_response, error_response
 from .models import Batch, Student, Inquiry, ScrollConfig, ScrollUpdate, OutboxEvent
@@ -68,7 +68,11 @@ def _batch_queryset(institution_id=None):
 
 
 class BatchListCreateView(APIView):
-    permission_classes = [IsAdminOrSuperAdmin]
+    def get_permissions(self):
+        # Admin/Super Admin/IT can all read; only IT can create.
+        if self.request.method in SAFE_METHODS:
+            return [IsAdminOrSuperAdminOrIT()]
+        return [IsITUser()]
 
     def get(self, request):
         institution_id = getattr(request.user, "institution_id", None)
@@ -88,7 +92,11 @@ class BatchListCreateView(APIView):
 
 
 class BatchDetailView(APIView):
-    permission_classes = [IsAdminOrSuperAdmin]
+    def get_permissions(self):
+        # Admin/Super Admin/IT can all read; only IT can update/delete.
+        if self.request.method in SAFE_METHODS:
+            return [IsAdminOrSuperAdminOrIT()]
+        return [IsITUser()]
 
     def _get_batch(self, pk, institution_id=None):
         qs = Batch.objects.annotate(student_count=Count("students"))
@@ -146,6 +154,15 @@ def _student_queryset(institution_id=None):
 def _apply_student_filters(qs, request):
     search = request.query_params.get("search", "").strip()
     department = request.query_params.get("department", "").strip()
+    # Plural, comma-separated — added for the admin Assign page's live
+    # "students attending this assessment" count, which can scope to more
+    # than one department at once. Matched case-insensitively against a
+    # stripped-and-lowered set, mirroring assessment-service's
+    # snapshot_roster_and_allocate exactly (assessments/allocation.py) so
+    # the preview count and the actual allocation never disagree. Composes
+    # with `department` (singular) only in that both narrow further if both
+    # are somehow passed together; no existing caller does that.
+    departments = request.query_params.get("departments", "").strip()
     batch_id = request.query_params.get("batch_id", "").strip()
     if search:
         qs = qs.filter(
@@ -153,21 +170,29 @@ def _apply_student_filters(qs, request):
         )
     if department:
         qs = qs.filter(department__iexact=department)
+    if departments:
+        wanted = [d.strip() for d in departments.split(",") if d.strip()]
+        if wanted:
+            match = Q()
+            for d in wanted:
+                match |= Q(department__iexact=d)
+            qs = qs.filter(match)
     if batch_id:
         qs = qs.filter(batch_id=batch_id)
     return qs
 
 
 class AdminStudentListCreateView(APIView):
-    permission_classes = [IsAdminOrSuperAdmin]
-
-    def _institution_id(self, request):
-        if request.user.role == "super_admin":
-            return None
-        return getattr(request.user, "institution_id", None)
+    # Students module removed entirely from both Admin and Super Admin
+    # (2026-08-19) — IT is the sole owner of this endpoint, read and write
+    # alike. Batches (including a batch's own roster) remains the shared
+    # read-only module for Admin/Super Admin; this standalone student
+    # search/list is not part of that.
+    permission_classes = [IsITUser]
 
     def get(self, request):
-        qs = _apply_student_filters(_student_queryset(self._institution_id(request)), request)
+        institution_id = getattr(request.user, "institution_id", None)
+        qs = _apply_student_filters(_student_queryset(institution_id), request)
         paginator = StandardResultsPagination()
         page = paginator.paginate_queryset(qs, request)
         return paginator.get_paginated_response(StudentListSerializer(page, many=True).data)
@@ -186,11 +211,11 @@ class AdminStudentListCreateView(APIView):
 
 
 class AdminStudentDetailView(APIView):
-    permission_classes = [IsAdminOrSuperAdmin]
+    # Students module removed entirely from both Admin and Super Admin
+    # (2026-08-19) — see AdminStudentListCreateView above.
+    permission_classes = [IsITUser]
 
     def _institution_id(self, request):
-        if request.user.role == "super_admin":
-            return None
         return getattr(request.user, "institution_id", None)
 
     def _get(self, pk, institution_id=None):
@@ -244,7 +269,7 @@ class AdminStudentDetailView(APIView):
 
 
 class AdminStudentToggleStatusView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsITUser]
 
     def patch(self, request, pk):
         institution_id = getattr(request.user, "institution_id", None)
@@ -259,7 +284,7 @@ class AdminStudentToggleStatusView(APIView):
 
 
 class AdminBatchStudentsView(APIView):
-    permission_classes = [IsAdminOrSuperAdmin]
+    permission_classes = [IsAdminOrSuperAdminOrIT]
 
     def get(self, request, batch_id):
         institution_id = None if request.user.role == "super_admin" else getattr(request.user, "institution_id", None)
@@ -276,7 +301,7 @@ class AdminBatchStudentsView(APIView):
 # ── Bulk Student Import ────────────────────────────────────────────────────────
 
 class AdminStudentBulkCreateView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsITUser]
     MAX_IMPORT = 1000
 
     def post(self, request):
@@ -459,7 +484,9 @@ class StudentInquiryView(APIView):
 
 
 class AdminInquiryListView(APIView):
-    permission_classes = [IsAdminUser]
+    """Moved from Admin to IT (2026-08-18) — same endpoint, ownership
+    transferred wholesale, not duplicated."""
+    permission_classes = [IsITUser]
 
     def get(self, request):
         institution_id = getattr(request.user, "institution_id", None)
@@ -477,7 +504,9 @@ class AdminInquiryListView(APIView):
 
 
 class AdminInquiryMarkReadView(APIView):
-    permission_classes = [IsAdminUser]
+    """Moved from Admin to IT (2026-08-18) — same endpoint, ownership
+    transferred wholesale, not duplicated."""
+    permission_classes = [IsITUser]
 
     def patch(self, request, pk):
         institution_id = getattr(request.user, "institution_id", None)
@@ -494,7 +523,9 @@ class AdminInquiryMarkReadView(APIView):
 # ── Scroll Config & Updates ───────────────────────────────────────────────────
 
 class AdminScrollConfigView(APIView):
-    permission_classes = [IsAdminUser]
+    # Opened to Super Admin 2026-08-20, mirroring the Scrollbar module Admin
+    # already had — both roles manage their own institution's announcement bar.
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def _get_config(self, institution_id):
         config, _ = ScrollConfig.objects.get_or_create(institution_id=institution_id)
@@ -515,7 +546,7 @@ class AdminScrollConfigView(APIView):
 
 
 class AdminScrollUpdateListCreateView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def get(self, request):
         institution_id = getattr(request.user, "institution_id", None)
@@ -534,7 +565,7 @@ class AdminScrollUpdateListCreateView(APIView):
 
 
 class AdminScrollUpdateDetailView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def _get(self, pk, institution_id):
         return get_object_or_404(ScrollUpdate, pk=pk, institution_id=institution_id)
@@ -559,7 +590,7 @@ class AdminScrollUpdateDetailView(APIView):
 
 
 class AdminScrollReorderView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def post(self, request):
         institution_id = getattr(request.user, "institution_id", None)
@@ -608,9 +639,10 @@ class OutboxDeadLetterListView(APIView):
     """
     GET /api/users/admin/outbox/dead-letters/
     Returns a paginated list of dead_letter OutboxEvent records, newest first.
-    Permission: IsSuperAdminUser only.
+    Permission: IsITUser only (moved from Super Admin, 2026-08-18 — same
+    endpoint, ownership transferred wholesale, not duplicated).
     """
-    permission_classes = [IsSuperAdminUser]
+    permission_classes = [IsITUser]
 
     def get(self, request):
         qs = OutboxEvent.objects.filter(
@@ -627,9 +659,9 @@ class OutboxDeadLetterRetryView(APIView):
     Resets a single dead_letter event back to pending so the worker picks it
     up on the next poll cycle.  Returns 404 if the event does not exist or is
     not currently in dead_letter status.
-    Permission: IsSuperAdminUser only.
+    Permission: IsITUser only (moved from Super Admin, 2026-08-18).
     """
-    permission_classes = [IsSuperAdminUser]
+    permission_classes = [IsITUser]
 
     def post(self, request, pk):
         event = get_object_or_404(
@@ -655,9 +687,9 @@ class OutboxHealthView(APIView):
     """
     GET /api/users/admin/outbox/health/
     Returns event counts per status for a health summary widget.
-    Permission: IsSuperAdminUser only.
+    Permission: IsITUser only (moved from Super Admin, 2026-08-18).
     """
-    permission_classes = [IsSuperAdminUser]
+    permission_classes = [IsITUser]
 
     def get(self, request):
         counts = (

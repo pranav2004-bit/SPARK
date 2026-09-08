@@ -216,6 +216,12 @@ CELERY_BEAT_SCHEDULE = {
         "task": "assessments.tasks.sweep_expired_sessions",
         "schedule": 20.0,
     },
+    # Storage housekeeping, not exam-timing enforcement — daily is plenty
+    # (ACTIVITY_LOG_RETENTION_DAYS is a 15-day window, models.py).
+    "purge-old-activity-logs": {
+        "task": "assessments.tasks.purge_old_activity_logs",
+        "schedule": 86400.0,
+    },
 }
 
 # ── user-service (roster snapshot, Task 3.1) ───────────────────────────────────

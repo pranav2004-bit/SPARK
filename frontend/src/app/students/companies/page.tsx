@@ -171,7 +171,7 @@ export default function StudentCompaniesPage() {
 
   return (
     <StudentLayout>
-      <PageWrapper className="max-w-5xl py-8">
+      <PageWrapper className="py-8">
         <PageHeader
           title="Companies"
           subtitle="Browse placement materials by company."

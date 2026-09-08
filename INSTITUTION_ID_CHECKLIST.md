@@ -188,11 +188,12 @@ Go through each item and confirm:
 
 ## Rule 8 — Credentials Must Never Be Hardcoded
 
-All default passwords (super admin, admin, student) must be read from environment variables — never hardcoded in source code. The credentials live in `auth-service/.env`:
+All default passwords (IT, super admin, admin, student) must be read from environment variables — never hardcoded in source code. The credentials live in `auth-service/.env`. As of 2026-08-20, IT is the platform's bootstrapped root account (replacing super_admin in that role); Super Admin, Admin, and Student accounts are all created afterward by IT:
 
 ```
-SUPERADMIN_EMAIL=spark@gmail.com
-SUPERADMIN_PASSWORD=<strong-unique-password>
+IT_EMAIL=ithead@gmail.com
+IT_PASSWORD=<strong-unique-password>
+SUPERADMIN_DEFAULT_PASSWORD=<strong-default>
 ADMIN_DEFAULT_PASSWORD=<strong-default>
 STUDENT_DEFAULT_PASSWORD=<strong-default>
 ```
@@ -203,7 +204,7 @@ In production: set strong values in `.env` before first deployment. Never commit
 
 ## Rule 9 — Force Password Change on First Login
 
-Every account created by the system (super admin, admin, student) must have `force_password_change=True`. The JWT carries this flag. The frontend must check it on every login response and redirect to the password change screen if `True`. After a successful password change, the flag is cleared and new tokens are issued.
+Every account created by the system (super admin, admin, student, IT) must have `force_password_change=True`. The JWT carries this flag. The frontend must check it on every login response and redirect to the password change screen if `True`. After a successful password change, the flag is cleared and new tokens are issued.
 
 ---
 
@@ -226,25 +227,25 @@ Copy the printed value into that deployment's `services/auth-service/.env`:
 INSTITUTION_ID=<the-value-you-copied>
 ```
 
-This only matters the **first time** the super-admin account is created on an empty database — `create_default_superadmin` reads it once at that point and stamps it onto the new super-admin record. On every later container start, if `.env`'s `INSTITUTION_ID` differs from what's already saved in the database, the container **refuses to start** (`CommandError`) rather than silently applying the wrong value — this is the hard boundary protection described above, enforced at startup, every time.
+This only matters the **first time** the IT account is created on an empty database — `create_default_it` (replaced `create_default_superadmin` 2026-08-20, when IT became the bootstrapped root role) reads it once at that point and stamps it onto the new IT record. On every later container start, if `.env`'s `INSTITUTION_ID` differs from what's already saved in the database, the container **refuses to start** (`CommandError`) rather than silently applying the wrong value — this is the hard boundary protection described above, enforced at startup, every time.
 
 ---
 
 ## Rule 12 — Backfill Is Loud, Audit Cross-Account Drift Separately
 
-**Backfill case:** if an existing super-admin account has no `institution_id` yet (e.g., created before this field existed), `create_default_superadmin` fills it in from `.env` automatically. This is a one-way action — any later `.env` value that differs will be rejected by the mismatch guard (Rule 11). Because of that, the backfill emits a `WARNING`-level log entry, not a quiet success message, so a wrong UUID is never silently locked in without anyone noticing:
+**Backfill case:** if an existing IT account has no `institution_id` yet (e.g., created before this field existed), `create_default_it` fills it in from `.env` automatically. This is a one-way action — any later `.env` value that differs will be rejected by the mismatch guard (Rule 11). Because of that, the backfill emits a `WARNING`-level log entry, not a quiet success message, so a wrong UUID is never silently locked in without anyone noticing:
 
 ```
-institution_id BACKFILLED for super-admin '...' -> <uuid>. ... STOP and fix INSTITUTION_ID in .env now if unexpected.
+institution_id BACKFILLED for IT account '...' -> <uuid>. ... STOP and fix INSTITUTION_ID in .env now if unexpected.
 ```
 
-**Cross-account drift:** `create_default_superadmin` only validates the super-admin's *own* record — it has no visibility into whether admin or student accounts already have a different or missing `institution_id`. Run this separately to check everyone else:
+**Cross-account drift:** `create_default_it` only validates the IT account's *own* record — it has no visibility into whether super_admin, admin, or student accounts already have a different or missing `institution_id`. Run this separately to check everyone else:
 
 ```bash
 docker exec <auth-service-container> python manage.py audit_institution_consistency
 ```
 
-It compares every non-super-admin account against the super-admin's `institution_id` and raises `CommandError` listing every mismatched or `NULL` account if any are found. This is not run automatically on startup — run it manually or on a schedule (e.g., a periodic cron/monitoring job) to catch data drift the startup check cannot see.
+It compares every non-IT account against the IT account's `institution_id` (2026-08-20: previously compared against the super-admin's, back when super_admin was the bootstrapped root) and raises `CommandError` listing every mismatched or `NULL` account if any are found. This is not run automatically on startup — run it manually or on a schedule (e.g., a periodic cron/monitoring job) to catch data drift the startup check cannot see.
 
 ---
 
@@ -272,11 +273,30 @@ All existing models, views, cache keys, and serializers across all 6 microservic
 - institution_id backfill made loud — `WARNING`-level log instead of a quiet success message (Gap 15)
 - `audit_institution_consistency` command added — checks all admin/student accounts against the super-admin's institution_id, catching cross-account drift the startup check cannot see (Gap 16)
 
+**Update (2026-08-18) — IT role added (auth-service, 4th role alongside super_admin/admin/student):** compliant with Rules 8–10, verified via a dedicated 21-test file (`services/auth-service/tests/test_it_management.py`) plus the 200% Rule (backend 135/135, frontend 234/234 across two consecutive runs). IT accounts are created/managed by super_admin only, via the same mechanism as Admin account management (`ITListCreateView`/`ITDetailView`/`ITResetDefaultPasswordView` mirror `AdminListCreateView`/`AdminDetailView`/`AdminResetDefaultPasswordView` exactly), on their own independent roster (`/api/auth/it-accounts/`) rather than folded into the Admin list. `institution_id` is stamped from the creating super_admin's own record (Rule 2), never accepted from the request body (Rule 3). `IT_DEFAULT_PASSWORD` follows Rule 8; `force_password_change=True` on creation follows Rule 9; `token_version` incremented on password reset follows Rule 10. The role currently has no functional modules beyond account creation/login — a temporary placeholder page (`/it/welcome`) is the only authenticated view — so there is nothing further for this checklist to cover yet.
+*(Superseded 2026-08-20 — see the update below. `ITListCreateView`/`ITDetailView`/`ITResetDefaultPasswordView` and `/api/auth/it-accounts/` no longer exist.)*
+
+**Update (2026-08-20) — account-provisioning root inverted: IT replaces super_admin as the bootstrapped role.** `create_default_it` (auth-service management command, run by `entrypoint.sh` on every startup) replaces `create_default_superadmin` — reads `IT_EMAIL`/`IT_PASSWORD` from `.env`, stamps `institution_id` from `INSTITUTION_ID` exactly as the old command did for super_admin (Rule 2/11 mechanics unchanged, just retargeted). `rotate_it_password` replaces `rotate_superadmin_password` for the same reason (see `IT_PASSWORD_ROTATION.md`, replacing `SUPERADMIN_PASSWORD_ROTATION.md`). `audit_institution_consistency` now compares every non-IT account against the IT account's `institution_id` (previously non-super-admin against super-admin's).
+
+Super Admin, Admin, and Student accounts are now all created by IT through the ordinary account-management UI — same as Admin already worked (2026-08-19). New `SuperAdminListCreateView`/`SuperAdminDetailView`/`SuperAdminResetDefaultPasswordView` (`permission_classes = [IsITUser]` throughout, no read-only remnant for Super Admin — unlike Admin management, Super Admin has zero access to this resource, not even GET) replace the old `ITListCreateView`/`ITDetailView`/`ITResetDefaultPasswordView` at a new `/api/auth/super-admins/` roster. `institution_id` is stamped from the creating IT user's own record (Rule 2), never accepted from the request body (Rule 3). `SUPERADMIN_DEFAULT_PASSWORD` follows Rule 8; `force_password_change=True` on creation follows Rule 9; `token_version` incremented on password reset follows Rule 10.
+
+Verified via a dedicated 26-test file (`services/auth-service/tests/test_superadmin_management.py`) plus the 200% Rule (backend 189/189, frontend 269/269 across two consecutive runs) and live curl through nginx covering the full lifecycle: IT logs in from `.env` credentials, creates a super_admin, the new super_admin logs in successfully and is confirmed blocked (403) on every `/api/auth/super-admins/*` endpoint including GET, and IT can edit/toggle/reset-password/delete the account it created.
+
+**Update (2026-08-20) — Department master data added (auth-service), new `Department` model.** IT's Departments module — the canonical, backend-driven department list every dropdown/filter across the platform now reads from, replacing the frontend's old hardcoded `DEPARTMENTS` constant. Follows Rule 1 (`institution_id` field + dedicated index on `Department`), Rules 2–3 (`DepartmentListCreateView.get()` filters by `request.user.institution_id`, `super_admin` sees cross-institution same as Batch; `.post()` stamps `institution_id` from the creating IT user's own record, never accepted from the request body), Rule 4 (`DepartmentDetailView` 404s on a cross-institution `pk`, not 403). New `IsAdminOrSuperAdminOrIT` permission class added to auth-service's `core/permissions.py` (read = Admin + Super Admin + IT, write = IT-only) — mirrors user-service's existing class of the same name, the pattern already established for Batches. `code` is immutable after creation (enforced by the update serializer simply not declaring the field) since it's the free-text string `user-service Student.department` and `assessment-service BatchAssignment.departments` already match against with zero shared validation — deliberately **not** retrofitted into a cross-service FK; those two services keep their existing free-text fields unchanged, only the frontend's source-of-truth for the valid-values list moved off a hardcoded constant.
+
+A one-off data migration (`0008_seed_departments`, dependent on the new `0007_department` schema migration) seeded the 11 codes the old frontend constant held, for every `institution_id` already present in the `users` table — idempotent, skips any `(institution_id, code)` pair that already exists.
+
+Verified via a dedicated 39-test file (`services/auth-service/tests/test_department_management.py`, covering list/create/detail/patch/delete, code uniqueness, code immutability on PATCH, 3-way read vs IT-only write, and institution scoping) plus `services/auth-service/tests/test_department_seed_migration.py` for the seed migration's idempotency, the full backend suite (380+ tests) and frontend suite (288/288 across two consecutive runs), and live curl through nginx: create/duplicate-reject/PATCH-ignores-code/deactivate/delete, plus a 401 for unauthenticated.
+
+**Update (2026-08-20) — `department` added to Admin/Super Admin accounts, plus bulk CSV import.** `User.department` (already Rule-1-compliant, pre-existing field) is now set on creation and editable via PATCH for both roles, through the same `AdminCreateSerializer`/`AdminUpdateExtendedSerializer` both endpoints already shared — no new institution_id surface. New bulk-import endpoints `POST /api/auth/admins/import/` and `POST /api/auth/super-admins/import/` (`AdminBulkCreateView`/`SuperAdminBulkCreateView`, both `IsITUser`-only) share a private `_bulk_create_accounts(request, role, default_password)` helper: `institution_id` is stamped once from `request.user.institution_id` (Rule 2/3, identical to the single-create views — never accepted from the request body) and applied to every account the request creates, mirroring `AdminStudentBulkCreateView`'s existing pattern in user-service. The CSV itself is email-only; department is a single value picked in the UI and applied to the whole import (not a per-row column), so there's only one institution-scoping decision per request, not one per row.
+
+Verified via 18 new tests across `test_admin_bulk_import.py`/`test_superadmin_bulk_import.py` (institution_id stamped correctly on created accounts, IT-only access, row-level validation) plus the full backend suite and frontend suite (24 suites/299 tests across two consecutive runs), and live curl through nginx: bulk-created accounts carry the creating IT user's institution_id, non-IT roles blocked.
+
 **Re-verified on 2026-07-10 after resource-service migration (commit `0a4e7c4`):** the `ResourceModule`/`Resource` models named below were replaced by `Company`/`Module`/`Section`/`ModuleSection`/`Upload`/`ModuleUpload` when general resource models moved from user-service into resource-service. `institution_id` scoping was carried over correctly — `Company` and `Module` carry `institution_id` directly; `Section`, `ModuleSection`, `Upload`, and `ModuleUpload` inherit scope through their FK chain. All admin/student views filter via `request.user.institution_id`, single-object fetches 404 (not 403) across institutions, and `institution_id` is never a writable serializer field. Cross-institution isolation is covered by explicit tests in `services/resource-service/tests/test_companies.py` and `test_modules.py` (e.g. `test_admin_b_cannot_see_institution_a_companies`, `test_section_idor`, `test_upload_idor`, `test_student_institution_idor`, `test_module_idor_other_institution`).
 
 | Service | Models with institution_id | Views scoped | Migrations |
 |---|---|---|---|
-| auth-service | User (via JWT) | AdminListCreateView, StudentPasswordResetView | — |
+| auth-service | User (via JWT), Department | AdminListCreateView, SuperAdminListCreateView, DepartmentListCreateView, DepartmentDetailView, StudentPasswordResetView | 0005, 0007, 0008 |
 | user-service | Student, Batch, ScrollConfig, ScrollUpdate | All student + scroll views | 0008 |
 | practice-service | PracticeModule, PracticeSection, PracticeQuestion, PracticeQuestionProgress, PracticeQuestionAttempt | All admin + student practice views | 0003 |
 | analytics-service | PracticeEvent, ResourceViewEvent, DailyEngagementSnapshot, InstitutionSnapshot | StudentAnalyticsView, InternalEventView | — |

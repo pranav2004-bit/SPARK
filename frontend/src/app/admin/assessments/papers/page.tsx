@@ -203,7 +203,7 @@ export default function AdminAssessmentPapersPage() {
 
   return (
     <AdminLayout>
-      <PageWrapper className="max-w-5xl">
+      <PageWrapper>
 
         <PageHeader
           title="Question Bank"

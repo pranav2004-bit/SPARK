@@ -1811,9 +1811,12 @@ All 13 identified threats must be resolved before V1 launch. Each threat is assi
 - [ ] Student navigates to Companies tab → sees test company → opens resource → resource loads (CDN URL)
 - [ ] Student navigates to Practice tab → sees test module → attempts all 3 questions → sees explanations → progress updates
 - [ ] Student checks My Profile → analytics show correct attempt data
-- [ ] Student submits a Contact inquiry → inquiry appears in admin Inquiries tab
+- [ ] Student submits a Contact inquiry → inquiry appears in IT Inquiries tab (moved from Admin, 2026-08-18)
 - [ ] Super Admin logs in via `/super-admin/login` → Overview tab loads with KPIs
-- [ ] Super Admin navigates to all 5 tabs → all render without errors
+- [ ] Super Admin navigates to all tabs (incl. IT Accounts) → all render without errors
+- [ ] IT logs in via `/it/login` → Welcome page loads, nav shows Dead Letter Queue + Inquiries
+- [ ] IT navigates to Inquiries tab → sees the test inquiry submitted above, marks it read
+- [ ] Admin logs in via `/admin/login` → confirms Inquiries tab is gone (moved to IT)
 - [ ] All smoke test steps pass: 0 errors in browser console, 0 errors in Sentry, all API calls return `2xx`
 
 #### Sign-off

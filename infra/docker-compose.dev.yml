@@ -178,11 +178,12 @@ services:
       DB_USER: auth_db_user
       DB_PASSWORD: auth_dev_password_2024
       # The UUID that identifies this institution (college).
-      # Every super-admin account and faculty account they create is scoped to this institution.
+      # Every account IT creates is scoped to this institution.
       # Set this once per deployment — the IT team changes it only when onboarding a new college.
       INSTITUTION_ID: "1470350a-1765-41d1-92b9-bf7b040ddaf9"
-      SUPERADMIN_EMAIL: "spark@gmail.com"
-      SUPERADMIN_PASSWORD: "000346"
+      IT_EMAIL: "ithead@gmail.com"
+      IT_PASSWORD: "000346"
+      SUPERADMIN_DEFAULT_PASSWORD: "spark@123"
       ADMIN_DEFAULT_PASSWORD: "spark@123"
       STUDENT_DEFAULT_PASSWORD: "ANITS@123"
     depends_on:
@@ -255,6 +256,40 @@ services:
       user-service:
         condition: service_healthy
       auth-service:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  # cleanup_outbox itself is fully built, tested, and its own docstring says
+  # "Safe to schedule as a nightly cron job" — it just had nothing actually
+  # scheduling it (found during production-readiness audit, 2026-09-08),
+  # so DONE outbox events accumulated in the table forever. This is a
+  # dedicated sidecar, not folded into run_outbox_worker's loop: that loop's
+  # whole design is fast 30s polling for event delivery, a different concern
+  # from once-a-day housekeeping, and keeping them separate means this can
+  # never risk that already-proven delivery loop. Same image as
+  # outbox-worker (and same reasoning — it's user-service's own codebase),
+  # just a different command; no new Dockerfile, dependency, or source file.
+  # Runs once immediately on start (so a bad deploy is caught right away
+  # instead of silently waiting 24h) then once daily. Only depends on
+  # pgbouncer + user-service (whose own entrypoint runs migrations) — unlike
+  # outbox-worker it never calls auth-service, so it has no dependency on it.
+  outbox-cleanup:
+    build:
+      context: ../services/user-service
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *shared-env
+      SECRET_KEY: dev-user-service-secret-key-replace-before-production-xxxxxxxxxxx
+      DB_NAME: user_db
+      DB_USER: user_db_user
+      DB_PASSWORD: user_dev_password_2024
+    entrypoint: ["sh", "-c", "while true; do python manage.py cleanup_outbox; sleep 86400; done"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      user-service:
         condition: service_healthy
     networks:
       - spark-internal

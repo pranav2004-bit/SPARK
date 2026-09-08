@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import { GraduationCap, ChevronDown } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -8,7 +9,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { SearchInput } from "@/components/ui/SearchInput";
 import { Pagination } from "@/components/ui/Pagination";
 import api, { getErrorMessage } from "@/lib/api";
-import { DEPARTMENTS } from "@/lib/constants";
+import { useDepartments } from "@/lib/departmentsContext";
 import type { PaginatedResponse, Batch } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -43,6 +44,8 @@ function TableSkeleton() {
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function SuperAdminStudentsPage() {
+  const { departments } = useDepartments();
+  const searchParams = useSearchParams();
   const [students, setStudents] = useState<StudentRecord[]>([]);
   const [batches, setBatches] = useState<Batch[]>([]);
   const [loading, setLoading] = useState(true);
@@ -52,7 +55,11 @@ export default function SuperAdminStudentsPage() {
   const [totalPages, setTotalPages] = useState(1);
   const [search, setSearch] = useState("");
   const [department, setDepartment] = useState("");
-  const [batchFilter, setBatchFilter] = useState("");
+  // Pre-filled when arriving from a Batches card's "View students" link
+  // (/super-admin/students?batch_id=<id>) — read once on mount, same as
+  // any other initial-state seed; the filter dropdown remains fully
+  // interactive afterwards.
+  const [batchFilter, setBatchFilter] = useState(() => searchParams.get("batch_id") ?? "");
 
   // Fetch batches for filter dropdown
   useEffect(() => {
@@ -135,8 +142,8 @@ export default function SuperAdminStudentsPage() {
             style={{ borderColor: "var(--color-border)", color: "var(--color-text)", width: 170 }}
           >
             <option value="">All departments</option>
-            {DEPARTMENTS.map((d) => (
-              <option key={d} value={d}>{d}</option>
+            {departments.map((d) => (
+              <option key={d.id} value={d.code}>{d.name || d.code}</option>
             ))}
           </select>
           <ChevronDown size={14} className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--color-text-muted)" }} />

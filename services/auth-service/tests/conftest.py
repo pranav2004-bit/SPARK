@@ -53,3 +53,13 @@ def super_admin_user(db):
         role="super_admin",
         institution_id=INSTITUTION_ID,
     )
+
+
+@pytest.fixture
+def it_user(db):
+    return User.objects.create_user(
+        email="it@test.com",
+        password="It@pass123",
+        role="it",
+        institution_id=INSTITUTION_ID,
+    )

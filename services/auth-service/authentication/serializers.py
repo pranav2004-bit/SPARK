@@ -1,9 +1,11 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
+from .models import Department
+
 User = get_user_model()
 
-VALID_ROLES = ("admin", "student", "super_admin")
+VALID_ROLES = ("admin", "student", "super_admin", "it")
 
 # ── Admin management serializers ───────────────────────────────────────────────
 
@@ -18,6 +20,12 @@ class AdminSerializer(serializers.ModelSerializer):
 class AdminCreateSerializer(serializers.Serializer):
     name  = serializers.CharField(max_length=150, trim_whitespace=True, required=False, allow_blank=True, default="")
     email = serializers.EmailField()
+    # Shared by Admin and Super Admin creation (2026-08-20) — optional at this
+    # layer so Admin creation (whose UI doesn't send it) keeps working
+    # unchanged; the Super Admin creation form enforces it as required
+    # client-side instead of here, to avoid a breaking change to the shared
+    # serializer's contract.
+    department = serializers.CharField(max_length=100, trim_whitespace=True, required=False, allow_blank=True, default="")
 
     def validate_email(self, value):
         return value.lower().strip()
@@ -25,21 +33,28 @@ class AdminCreateSerializer(serializers.Serializer):
     def validate_name(self, value):
         return value.strip()
 
+    def validate_department(self, value):
+        return value.strip()
+
 
 class AdminUpdateExtendedSerializer(serializers.Serializer):
     """
-    Super-admin PATCH on an admin account.
-    Both fields are optional; at least one must be supplied.
+    Super-admin/IT PATCH on an admin or super_admin account.
+    All fields are optional; at least one must be supplied.
     """
     name = serializers.CharField(max_length=150, trim_whitespace=True, required=False, allow_blank=True)
     is_active = serializers.BooleanField(required=False)
+    department = serializers.CharField(max_length=100, trim_whitespace=True, required=False, allow_blank=True)
 
     def validate_name(self, value):
         return value.strip()
 
+    def validate_department(self, value):
+        return value.strip()
+
     def validate(self, attrs):
         if not attrs:
-            raise serializers.ValidationError("At least one field (name, is_active) must be provided.")
+            raise serializers.ValidationError("At least one field (name, is_active, department) must be provided.")
         return attrs
 
 
@@ -137,3 +152,57 @@ class StudentPasswordResetSerializer(serializers.Serializer):
 
 class AdminPasswordResetSerializer(serializers.Serializer):
     new_password = serializers.CharField(write_only=True, min_length=6)
+
+
+# ── Department management serializers ───────────────────────────────────────────
+
+class DepartmentSerializer(serializers.ModelSerializer):
+    """Read serializer for department records."""
+    class Meta:
+        model = Department
+        fields = ["id", "code", "name", "is_active", "created_at", "updated_at"]
+        read_only_fields = fields
+
+
+class DepartmentCreateSerializer(serializers.Serializer):
+    code = serializers.CharField(max_length=20)
+    name = serializers.CharField(max_length=150, trim_whitespace=True, required=False, allow_blank=True, default="")
+    is_active = serializers.BooleanField(required=False, default=True)
+
+    def validate_code(self, value):
+        value = value.strip().upper()
+        if not value:
+            raise serializers.ValidationError("Code cannot be empty.")
+        return value
+
+    def validate_name(self, value):
+        return value.strip()
+
+    def validate(self, attrs):
+        code = attrs.get("code", "")
+        institution_id = self.context.get("institution_id")
+        qs = Department.objects.filter(code__iexact=code)
+        if institution_id:
+            qs = qs.filter(institution_id=institution_id)
+        if qs.exists():
+            raise serializers.ValidationError({"code": "A department with this code already exists."})
+        return attrs
+
+
+class DepartmentUpdateSerializer(serializers.Serializer):
+    """
+    IT PATCH on a department. `code` is deliberately not a field here — it's
+    immutable after creation since other services match against it as free
+    text with no cascading-rename mechanism. All fields optional; at least
+    one must be supplied.
+    """
+    name = serializers.CharField(max_length=150, trim_whitespace=True, required=False, allow_blank=True)
+    is_active = serializers.BooleanField(required=False)
+
+    def validate_name(self, value):
+        return value.strip()
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError("At least one field (name, is_active) must be provided.")
+        return attrs

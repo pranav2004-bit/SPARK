@@ -14,13 +14,13 @@ Gaps deliberately deferred from Version 1. Implement before launching multi-coll
 
 ---
 
-## Gap 2 — Same Super Admin Email Across Deployments
+## Gap 2 — Same IT Email Across Deployments
 
-**Current:** `SUPERADMIN_EMAIL` defaults to `spark@gmail.com` in every deployment. Deployers must manually change it per college.
+**Current:** `IT_EMAIL` defaults to `it@spark.test` in every deployment (2026-08-20: IT is now the bootstrapped root account, replacing super_admin in that role — see `create_default_it`). Deployers must manually change it per college.
 
 **When it breaks:** Single deployment, multiple colleges — email uniqueness constraint breaks.
 
-**What to build:** When Gap 1 (Institution model) is implemented, super admin accounts are created per institution with unique emails — no longer a manual deployment concern.
+**What to build:** When Gap 1 (Institution model) is implemented, the bootstrapped IT account is created per institution with a unique email — no longer a manual deployment concern.
 
 ---
 

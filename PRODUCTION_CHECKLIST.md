@@ -112,7 +112,7 @@ Missing either one causes the silent pure Python fallback described above.
 - [ ] `services/assessment-service/Dockerfile` — add `libpq-dev gcc` in build stage, `libpq5` in runtime stage
 
 **After all 21 files are changed:**
-- [ ] Rebuild all 7 Docker images — `docker-compose up --build` (with no service names, this also rebuilds every worker/beat container — `outbox-worker`, `resource-worker`, `notification-worker`/`notification-beat`, `analytics-worker`/`analytics-beat`, `assessment-worker`/`assessment-beat` — since each builds from the same Dockerfile/context as its parent service, just a different `entrypoint`; verified by inspecting `docker-compose.dev.yml`. Only a problem if someone rebuilds by naming services individually instead of using the bare `--build` flag.)
+- [ ] Rebuild all 7 Docker images — `docker-compose up --build` (with no service names, this also rebuilds every worker/beat container — `outbox-worker`, `outbox-cleanup`, `resource-worker`, `notification-worker`/`notification-beat`, `analytics-worker`/`analytics-beat`, `assessment-worker`/`assessment-beat` — since each builds from the same Dockerfile/context as its parent service, just a different `entrypoint`; verified by inspecting `docker-compose.dev.yml`. Only a problem if someone rebuilds by naming services individually instead of using the bare `--build` flag.)
 - [ ] Run all 413 pre-assessment-service tests + assessment-service's own 267 (680 total as of `LIVETRACKER2_V1.md` Phase 13 — re-check the live count before relying on this number, it will have moved) twice (200% Rule) before promoting to production
 
 ---
@@ -144,12 +144,12 @@ Missing either one causes the silent pure Python fallback described above.
   2. Restart PgBouncer second: `docker-compose restart pgbouncer`
   3. Restart all 7 services **and every dedicated worker/beat container** last — every one of these holds its own long-lived DB connection(s) that were opened under the old auth config, and a stale worker left running after a PgBouncer/Postgres auth change means its queries start failing with auth errors (or, worse, its connection sits idle until PgBouncer recycles it) until someone notices and restarts it separately. Audited against `infra/docker-compose.dev.yml` and `docker-compose.prod.yml` directly (not assumed) — not every service has a worker/beat pair, and the ones that do aren't symmetric (some have both, `resource-service` has only a worker, three services have neither):
      ```
-     docker-compose restart auth-service user-service resource-service practice-service notification-service analytics-service assessment-service outbox-worker resource-worker notification-worker notification-beat analytics-worker analytics-beat assessment-worker assessment-beat
+     docker-compose restart auth-service user-service resource-service practice-service notification-service analytics-service assessment-service outbox-worker outbox-cleanup resource-worker notification-worker notification-beat analytics-worker analytics-beat assessment-worker assessment-beat
      ```
      | Service | Has worker? | Has beat? |
      |---|---|---|
      | auth-service | — | — |
-     | user-service | `outbox-worker` | — |
+     | user-service | `outbox-worker`, `outbox-cleanup` | — |
      | resource-service | `resource-worker` | — |
      | practice-service | — | — |
      | notification-service | `notification-worker` | `notification-beat` |
@@ -157,6 +157,8 @@ Missing either one causes the silent pure Python fallback described above.
      | assessment-service | `assessment-worker` | `assessment-beat` |
 
      **Gap noticed while auditing this, since fixed:** `pgbouncer`, `outbox-worker`, and `db-backup` were entirely absent from `docker-compose.prod.yml` — confirmed real (not just a naming difference) by checking every service's own `.env.example`, which already documents `DB_HOST=pgbouncer` as the expected production value, meaning `CONN_MAX_AGE=0` (Section 2) was pointing production at a connection pooler that didn't exist in this file. All three added, mirroring `docker-compose.dev.yml`'s structure (secrets via `env_file`/`${VAR}` substitution instead of dev's hardcoded values), plus `backup_data` added to the top-level `volumes:` block and the 7 per-service DB passwords `db-backup` needs added to `infra/.env.example`. Validated via `docker compose -f docker-compose.prod.yml config` — resolves cleanly, 21 services total, exactly matching `docker-compose.dev.yml`'s 24 minus `minio`/`minio-init`/`frontend` (correctly excluded from prod: R2 replaces MinIO, frontend deploys on Vercel, per Section 9 and the nginx section's own comment). `minio`'s absence from prod was never actually a gap.
+
+     **Second gap noticed, since fixed (2026-09-08):** `cleanup_outbox` — a fully built and tested management command whose own docstring says "Safe to schedule as a nightly cron job" — had nothing actually scheduling it, in either compose file. `DONE` outbox events accumulated in `user_db` forever. Added `outbox-cleanup` as its own container (same image as `outbox-worker`, different entrypoint: `while true; do cleanup_outbox; sleep 86400; done`) to both `docker-compose.dev.yml` and `docker-compose.prod.yml`, deliberately kept separate from `run_outbox_worker`'s loop since that loop's 30s polling is a different concern from once-daily housekeeping. Verified live: built, started, confirmed the command actually ran against the real database (`"No expired outbox events to clean up."`) and the container sat stable afterward rather than crash-looping.
   4. Verify all health endpoints return `db: ok` after restart
 
 - [ ] Remove port `5433:5432` exposure — PostgreSQL must not be reachable from outside the Docker network in production
@@ -241,7 +243,7 @@ Dev uses MinIO as a local S3-compatible store. Production uses Cloudflare R2.
 
 - [ ] Set up error tracking (Sentry or equivalent) — add DSN to each service, including assessment-service (already wired to a `before_send` correlation-ID hook per Task 13.2, DSN just needs populating — see Task 15.2's own checklist item for this)
 - [ ] Set up uptime monitoring on all 7 health endpoints (`/api/assessments/health/` included — already exists and is deliberately never throttled, Task 13.2)
-- [ ] Set up liveness monitoring for the 6 worker/beat containers separately (`outbox-worker`, `resource-worker`, `notification-worker`/`notification-beat`, `analytics-worker`/`analytics-beat`, `assessment-worker`/`assessment-beat`) — they have no HTTP endpoint to poll, so uptime monitoring on the 7 services above doesn't cover them at all; a dead worker fails silently until someone notices queued tasks aren't executing. Use `celery inspect ping` (or equivalent, e.g. Flower/a scheduled `docker ps` health check) against each, not an HTTP check.
+- [ ] Set up liveness monitoring for the 7 worker/beat containers separately (`outbox-worker`, `outbox-cleanup`, `resource-worker`, `notification-worker`/`notification-beat`, `analytics-worker`/`analytics-beat`, `assessment-worker`/`assessment-beat`) — they have no HTTP endpoint to poll, so uptime monitoring on the 7 services above doesn't cover them at all; a dead worker fails silently until someone notices queued tasks aren't executing. Use `celery inspect ping` (or equivalent, e.g. Flower/a scheduled `docker ps` health check) against each, not an HTTP check. `outbox-cleanup` specifically spends most of its life asleep by design (once daily) — for it, "container is running" (a plain `docker ps` check) is the right liveness signal, not "is it actively doing work."
 - [ ] Set up log aggregation — all service logs to a central store
 - [ ] Set up backup failure alerting — backup.sh should notify on non-zero exit
 
@@ -252,7 +254,7 @@ Dev uses MinIO as a local S3-compatible store. Production uses Cloudflare R2.
 The outbox worker sends an alert email every time an `OutboxEvent` transitions to `dead_letter`
 status (10 failed delivery attempts). A dead-letter means a student was deleted from user-service
 but their auth account was not cleaned up — they can still log in. This is a security gap.
-Email + the Super Admin DLQ tab are the two safety nets. Neither replaces the other.
+Email + the IT DLQ tab are the two safety nets. Neither replaces the other. (Moved from Super Admin to IT, 2026-08-18 — same mechanism, ownership transferred wholesale.)
 
 > **Why it is blank in dev:** Credentials are intentionally absent from `docker-compose.dev.yml`.
 > In dev, SMTP failure is caught and logged — nothing breaks. The DLQ tab still shows all events.
@@ -301,7 +303,7 @@ All listed addresses receive every dead-letter alert.
 - [ ] `EMAIL_HOST_PASSWORD` set in outbox-worker production environment
 - [ ] `ALERT_EMAIL_RECIPIENTS` set — at least one real address that someone actively monitors
 - [ ] Test email received and verified before launch
-- [ ] Super Admin DLQ tab verified in production (visit `/super-admin/dlq` — dead-letter events
+- [ ] IT DLQ tab verified in production (visit `/it/dlq` — dead-letter events
   should appear in the table; Retry button should reset status to pending)
 
 ### What happens if email is misconfigured in production

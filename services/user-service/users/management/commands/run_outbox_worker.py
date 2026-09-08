@@ -29,6 +29,7 @@ import time
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
+from django.db import close_old_connections
 
 from users.outbox import process_batch, recover_stuck_events
 
@@ -54,13 +55,35 @@ class Command(BaseCommand):
 
         while self._running:
             try:
+                # This loop never goes through Django's WSGI request/response
+                # cycle (or Celery's task_prerun/postrun signals, which the
+                # rest of this platform's beat/worker processes rely on) —
+                # neither of which ever fires here, so nothing else in Django
+                # ever closes a connection this loop broke. Without this,
+                # once the DB connection to pgbouncer drops (idle timeout,
+                # network blip, a postgres restart), Django's own error
+                # wrapper marks it unusable, but that state is only ever
+                # inspected here — the exact same connection keeps getting
+                # reused and keeps raising the exact same error, forever,
+                # on every subsequent poll, until this process is manually
+                # restarted (found live, 2026-08-17: a stale connection from
+                # hours earlier was still failing every single poll).
+                # close_old_connections() is Django's own idiom for exactly
+                # this "long-running process outside a request/task cycle"
+                # case — closes the connection only if it's already unusable
+                # or has exceeded CONN_MAX_AGE, so a healthy connection is
+                # left alone and reused as normal.
+                close_old_connections()
                 recover_stuck_events()
                 count = process_batch()
                 if count:
                     logger.info("Outbox worker processed %d event(s).", count)
             except Exception as exc:
                 # Log and keep running — a transient DB or network error must
-                # not kill the worker process permanently.
+                # not kill the worker process permanently. The
+                # close_old_connections() call above on the *next* iteration
+                # is what actually recovers from a connection-level failure
+                # here; this handler's job is only to survive until then.
                 logger.exception(
                     "Unexpected error in outbox worker main loop: %s", exc
                 )

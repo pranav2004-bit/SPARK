@@ -35,7 +35,8 @@ All primary keys are `UUIDField(default=uuid.uuid4)`. All `institution_id`/`stud
 ```mermaid
 erDiagram
     QuestionPaper ||--o{ QuestionSet : "has"
-    QuestionSet ||--o{ Question : "has"
+    QuestionSet ||--o{ QuestionSection : "has"
+    QuestionSection ||--o{ Question : "has"
     Question ||--o{ QuestionOption : "has"
     QuestionPaper ||--o{ BatchAssignment : "assigned via"
     BatchAssignment ||--o{ StudentSetAllocation : "distributes"
@@ -75,11 +76,27 @@ erDiagram
 
 Sets within a paper are meant to be equivalent alternates for anti-cheating distribution (AT7), not different-difficulty variants — Task 2.2 warns (non-blocking) if their total marks diverge, and Task 7.1/8.1 compare students on different sets by percentage, never raw score, precisely because they *can* diverge.
 
+**`section_count` (response-only, added 2026-08-27):** the set's number of `QuestionSection`s, alongside the existing `question_count`/`total_marks`. Powers the admin Assign page's "Final Review" pre-flight checklist (`GET admin/papers/<pk>/`'s `sets[]`), which surfaces every set's sets/sections/questions/marks for the admin to manually confirm before creating an assignment — a human-awareness gate, not a replacement for the readiness check's own structural validation (Decision below). Annotated in `AdminPaperDetailView.get` alongside `question_count` with `distinct=True` on both `Count()`s — two reverse-relation annotations in one queryset join both tables, and without `distinct` the row fan-out silently inflates one or both counts.
+
+### QuestionSection — added 2026-08-27
+
+**Not in the original Task 0.2 draft** — added post-Phase-0 to support a section-first admin question-authoring UI (a set no longer takes questions directly; it holds sections, each of which holds questions).
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | UUID | PK |
+| `set` | FK → QuestionSet, `related_name="sections"` | |
+| `title` | string | e.g. "Quantitative Aptitude" — unique with `set` |
+| `order` | int | admin-controlled display order within the set |
+
+Readiness check (`get_assignment_readiness_blockers`, `validators.py`) extends the existing equal-question-count/equal-marks-across-sets check (Task 2.2) with two more, only when a paper has more than one set (a single-set paper is never blocked on section shape): every section in every set must have ≥1 question, and every set in the paper must have the same number of sections. A single-set paper is unaffected regardless of how many sections it has.
+
 ### Question — Task 2.1
 | Field | Type | Notes |
 |---|---|---|
 | `id` | UUID | PK |
 | `set` | FK → QuestionSet | |
+| `section` | FK → QuestionSection, `related_name="questions"` | added 2026-08-27, required. A `Question.objects.create(...)` that omits `section` (any caller predating the section-first UI) is auto-assigned into a get-or-created "Section 1" for its set, at the model layer (`Question.save()`) — this is a backward-compatibility fallback, not a path the admin UI itself takes. |
 | `question_number` | int | auto-increment per set (`Max()` aggregate, mirrors `practice-service`) |
 | `question_content_type` | enum | `text` / `image` / `both` |
 | `question_text` | text | |
@@ -132,8 +149,8 @@ Validation (Task 2.2): single-choice → exactly one `is_correct`; multiple-choi
 | Field | Type | Notes |
 |---|---|---|
 | `id` | UUID | PK |
-| `assignment` | FK → BatchAssignment | |
-| `student_id` | UUID | |
+| `assignment` | FK → BatchAssignment, **nullable** (added 2026-08-27) | NULL marks an admin "mock test" trial session — see below |
+| `student_id` | UUID | For a trial session, the trialing admin's own user_id (see below) |
 | `set` | FK → QuestionSet | which set this student was allocated |
 | `started_at` | timestamp | |
 | `ends_at` | timestamp | computed once — see ADR 001, Decision #2 |
@@ -141,13 +158,15 @@ Validation (Task 2.2): single-choice → exactly one `is_correct`; multiple-choi
 
 Index: `(status, ends_at)` — required by the beat sweep (ADR 001) and Task 11.1's audit.
 
+**Admin mock-test trials (added 2026-08-27):** `assignment` is nullable specifically so an admin can take the real exam-taking flow themselves — before an assignment exists (the assign form's Final Review step) or repeatably after one is created (that assignment's own toolbar) — as a scored dry run, without any batch/roster/global-timer concept. NULL is the sole, unambiguous trial marker; `student_id` is reused to hold the trialing admin's own user_id rather than adding a parallel column. Every real-student-facing and real-assignment-scoped query in this service filters by a concrete assignment (directly or via `assignment__...`), so a trial row is automatically invisible to all of them — no per-query trial-exclusion logic needed. The one thing that does still pick up a trial session unscoped is the beat sweep (`ends_at__lte=now()`, no assignment filter), which is intentional: a trial's timer expires and auto-submits exactly like a real one. See "Admin — Mock/Trial Exam Sessions" below for the endpoints, and `enforcement.session_is_writable()` / `scoring.finalize_sessions()` for the two small null-safety fixes this required (skip the assignment-closed check when there's no assignment; resolve `institution_id` from the paper instead of the assignment when there's no assignment).
+
 ### ResultSummary — Task 4.1
 | Field | Type | Notes |
 |---|---|---|
 | `id` | UUID | PK |
 | `session` | FK → AssessmentSession | resolves `result_id` → session for Task 7.2's responses/logs endpoints |
-| `assignment` | FK → BatchAssignment | |
-| `student_id` | UUID | |
+| `assignment` | FK → BatchAssignment, **nullable** (added 2026-08-27) | NULL for a trial result, mirroring `AssessmentSession.assignment` above |
+| `student_id` | UUID | Trial results: the trialing admin's own user_id |
 | `institution_id` | UUID | |
 | `started_at` | timestamp | copied from session |
 | `ended_at` | timestamp | actual finish time — Decision #2 |
@@ -178,9 +197,21 @@ Denormalized on purpose (Task 0.2 Optimization Requirement): written once at sub
 |---|---|---|
 | `id` | UUID | PK |
 | `session` | FK → AssessmentSession | |
-| `event_type` | enum | `tab_switch` / `window_blur` / `fullscreen_exit` / `copy` / `paste` / `contextmenu` |
+| `event_type` | enum | `tab_switch` / `window_blur` / `fullscreen_exit` / `copy` / `paste` / `contextmenu` / `question_answered` / `question_answer_changed` / `screenshot_attempt` / `connection_lost` / `admin_extended_time` / `question_time_spent` |
 | `occurred_at` | timestamp | |
 | `metadata` | JSON | |
+
+**Retention (added 2026-08-17):** raw `ActivityLog` rows are deleted `ACTIVITY_LOG_RETENTION_DAYS` (15) days after `occurred_at`, by the daily `purge_old_activity_logs` beat task — a storage-cost policy for the raw audit trail only. `AssessmentResponse`, `ResultSummary`, and every score/pass-fail/malpractice value are permanent academic records, never touched by this. A still-`IN_PROGRESS` session's logs are never eligible regardless of age (belt-and-suspenders; 15 days already vastly exceeds any real exam's duration).
+
+**Full-transparency event types (added 2026-08-18):** the original six are all client-reported anti-cheat signals; these five extend the audit trail to "every action, not just violations" —
+- `question_answered` / `question_answer_changed` — written server-side by `StudentAnswerView`, never by the client batcher: the server already knows definitively whether a `PUT` was a first answer or a genuine change (by comparing against the prior stored value), so there's nothing for a client to detect or spoof. A resave of the identical value (a debounced autosave retry, a network retry) logs nothing. `metadata: {"question_number": int}`.
+- `screenshot_attempt` — client-detected (PrintScreen key only — see `useActivityCapture.ts` for why this is necessarily best-effort), now also sent to the backend (previously a client-only UX counter, never persisted).
+- `connection_lost` — client-detected via the browser's online/offline events, but only ever *reported* once connectivity returns (nothing can be POSTed while genuinely offline) — `occurred_at` carries the true original loss time, not the recovery time. `metadata: {"duration_seconds": int}`.
+- `admin_extended_time` — written server-side by `AdminAssignmentExtendSessionView` at the moment of a successful extension (never on a rejected/409 attempt). Not client-reported at all — an administrative action affecting the exam, not a student action, but still part of the session's full history. `metadata: {"added_minutes": int}`.
+
+None of the five count toward the malpractice thresholds (`scoring.py`'s `_compute_malpractice` only ever counts `tab_switch`/`fullscreen_exit` rows specifically) — they're visibility-only.
+
+**`question_time_spent` (added 2026-08-18, Task 8.1's analytics audit):** client-detected via the exam page's active-question navigation (`useActivityCapture.ts`'s `notifyActiveQuestion`) — logged once the student navigates to a different question, or the session ends. Only foreground (tab-visible) time counts; a view under 1 second isn't logged at all. `metadata: {"question_number": int, "seconds": int}`. Feeds both this session's own timeline and `AdminAssignmentAnalyticsView`'s cohort-level `question_difficulty[].average_seconds_spent` (`assessments/views.py`'s `_question_time_spent`, keyed by `(session.set_id, question_number)` — not `question_id` alone, since a set-local question_number means a different actual `Question` on each set).
 
 ### FailedJob — Task 13.1
 
@@ -211,17 +242,20 @@ As-implemented — flatter than originally drafted, matching `practice-service`'
 GET/POST                /api/assessments/admin/papers/                                          list (paginated) / create
 GET/PATCH/DELETE         /api/assessments/admin/papers/<uuid:pk>/                                 detail (+ sets) / update / delete
 POST                     /api/assessments/admin/papers/<uuid:pk>/sets/                             create a set under this paper
-GET/PATCH/DELETE         /api/assessments/admin/sets/<uuid:pk>/                                    detail (+ questions) / update / delete
-POST                     /api/assessments/admin/sets/<uuid:pk>/questions/                           create a question under this set
+GET/PATCH/DELETE         /api/assessments/admin/sets/<uuid:pk>/                                    detail (+ sections) / update / delete
+GET/POST                 /api/assessments/admin/sets/<uuid:pk>/sections/                             list / create a section under this set — added 2026-08-27
+GET/PATCH/DELETE         /api/assessments/admin/sections/<uuid:pk>/                                  detail (+ questions) / rename / delete (cascades to its questions) — added 2026-08-27
+POST                     /api/assessments/admin/sections/<uuid:pk>/questions/                        create a question under this section — added 2026-08-27, the admin UI's actual question-creation path
+POST                     /api/assessments/admin/sets/<uuid:pk>/questions/                           legacy: create a question directly under a set, bypassing sections — no longer called by the admin UI, kept for any other integration still pointed at it (falls into the default-section fallback, see QuestionSection above)
 POST                     /api/assessments/admin/sets/<uuid:pk>/image-presign/                       presigned upload for a question's image *before the question exists yet*
-GET/PATCH/DELETE         /api/assessments/admin/questions/<uuid:pk>/                                detail (+ options) / update / delete
+GET/PATCH/DELETE         /api/assessments/admin/questions/<uuid:pk>/                                detail (+ options, + section) / update / delete
 GET/POST                 /api/assessments/admin/questions/<uuid:pk>/options/                        list / create an option
 PATCH/DELETE             /api/assessments/admin/questions/<uuid:pk>/options/<uuid:option_pk>/       update / delete an option
 POST                     /api/assessments/admin/questions/<uuid:pk>/image-presign/                  presigned upload for the question's own image
 POST                     /api/assessments/admin/questions/<uuid:pk>/options/<uuid:option_pk>/image-presign/  presigned upload for an option's image
 ```
 `admin/sets/<pk>/image-presign/` (added 2026-08-14): scoped to the QuestionSet rather than a Question, since `question_content_type='image'`/`'both'` couldn't otherwise ever be used on a question's first save — the question-level presign endpoint needs a question id, but `'both'` can't be saved without an image already attached, and there was no way to get an image attached before the question exists. `AdminSetQuestionsView.post` (question create) now runs the same verify/quarantine-scan + paper image-quota gate on `question_image_key` that `AdminQuestionDetailView.patch` already applied on every later image change, so an image attached at creation time is checked exactly once, not skipped.
-All PATCH/DELETE on a locked (assigned) paper, its sets, questions, or options → `403` "This paper is assigned and locked." Publish/unpublish was removed from the admin workflow (2026-08-14) — `POST /api/assessments/admin/assignments/` is now the sole readiness gate: it runs the full readiness check (every question in every set: has content, ≥2 options, exactly the right correct-answer count, plus equal question counts/marks across sets) and rejects with `400` and the specific reasons if any check fails.
+All PATCH/DELETE on a locked (assigned) paper, its sets, sections, questions, or options → `403` "This paper is assigned and locked." Publish/unpublish was removed from the admin workflow (2026-08-14) — `POST /api/assessments/admin/assignments/` is now the sole readiness gate: it runs the full readiness check (every question in every set: has content, ≥2 options, exactly the right correct-answer count; equal question counts/marks across sets; and, added 2026-08-27, equal section counts across sets with every section non-empty, whenever the paper has more than one set) and rejects with `400` and the specific reasons if any check fails.
 
 ### Admin — Batch Assignment & Timer Control (Task 3.2)
 ```
@@ -240,9 +274,10 @@ POST    /api/assessments/admin/assignments/<id>/resync-roster/                  
 
 ### Admin — Results, Analytics, Dashboard (Task 7.x / 8.x / 9.x)
 ```
-GET  /api/assessments/admin/assignments/<id>/results/              paginated, filterable, percentage-sortable
-GET  /api/assessments/admin/results/<result_id>/responses/         via ResultSummary.session
-GET  /api/assessments/admin/results/<result_id>/logs/              via ResultSummary.session, incl. malpractice_reasons
+GET  /api/assessments/admin/assignments/<id>/results/              paginated, filterable (incl. ?set=<label>, added 2026-08-18), percentage-sortable; also returns available_sets (full roster's set list, independent of any applied filter)
+GET  /api/assessments/admin/results/<result_id>/responses/         via ResultSummary.session — one student, every question
+GET  /api/assessments/admin/assignments/<id>/questions/<question_id>/responses/  added 2026-08-18: the cross-student counterpart — one question, every student on that question's set; Analytics' Per-Question Difficulty drill-down target; paginated
+GET  /api/assessments/admin/sessions/<session_id>/timeline/        added 2026-08-17: plain-English activity timeline (start → each event → submit), keyed by session_id (not result_id) so it also covers a student still mid-exam; capped at 2000 events; includes retention_days — supersedes the removed raw-logs endpoint (2026-08-18: never had a frontend caller, dead on arrival)
 GET  /api/assessments/admin/assignments/<id>/results/export/       streaming CSV, UTF-8 BOM
 GET  /api/assessments/admin/assignments/<id>/analytics/            percentage-normalized across sets
 GET  /api/assessments/admin/assignments/<id>/analytics/export/
@@ -252,15 +287,28 @@ GET  /api/assessments/admin/assignments/<id>/dashboard/export/
 
 ### Student (Task 5.1 / 5.2 / 4.2 / 10.1)
 ```
-GET   /api/assessments/student/assignments/                              gated by StudentSetAllocation + assignment.status
+GET   /api/assessments/student/assignments/                              gated by StudentSetAllocation + assignment.status. Each row also carries total_marks/question_count (added 2026-08-27, for the pre-exam briefing screen) — read from THIS student's own allocated set, safe because the readiness check already enforces equal question counts/marks across every set of a paper before an assignment can be created.
 POST  /api/assessments/student/assignments/<id>/start-session/           idempotent create-or-resume
 GET   /api/assessments/student/server-time/                              {now, ends_at?}
-GET   /api/assessments/student/sessions/<id>/questions/                  session's own set's questions (Task 5.4) — never includes is_correct; added post-Phase-0, not in the original Task 0.2 draft
+GET   /api/assessments/student/sessions/<id>/questions/                  session's own set's questions (Task 5.4) — never includes is_correct; added post-Phase-0, not in the original Task 0.2 draft. Each question also carries section_id/section_title (added 2026-08-28, for the exam-taking screen's sections navigator) and the list is ordered by section then question_number, not just question_number — mirrored identically on the admin trial equivalent below.
 PUT   /api/assessments/student/sessions/<id>/questions/<qid>/answer/     idempotent upsert
 POST  /api/assessments/student/sessions/<id>/submit/                     conditional UPDATE...WHERE status='IN_PROGRESS'
 POST  /api/assessments/student/sessions/<id>/activity-logs/              bulk-insert batch of events (Task 6.1 client batching → Task 6.2), rate-limited per session
 GET   /api/assessments/student/results/                                  own ResultSummary rows only, JWT-scoped
 ```
+
+### Admin — Mock/Trial Exam Sessions (added 2026-08-27)
+
+An admin taking the real exam-taking flow themselves, on a paper they own, as a scored dry run — see the `AssessmentSession`/`ResultSummary` model notes above for why `assignment` is nullable to support this. Deliberately mirrors the Student contract above almost endpoint-for-endpoint (same session/response/scoring engine, reused rather than duplicated) with two differences: no `start-session`-style resume-by-assignment (there is no assignment; `trial/start/` resumes by paper instead) and no activity-log endpoint (no anti-cheat tracking for a trial, by design).
+```
+POST  /api/assessments/admin/papers/<pk>/trial/start/                      start-or-resume a trial on this paper's first set; body: {duration_minutes: int}
+GET   /api/assessments/admin/trial/server-time/                            same shape as student/server-time/, scoped to the requesting admin's own trial
+GET   /api/assessments/admin/trial/sessions/<pk>/questions/                same as student/sessions/<id>/questions/, ownership-scoped to assignment__isnull=True + this admin
+PUT   /api/assessments/admin/trial/sessions/<pk>/questions/<qid>/answer/   same upsert semantics as the student endpoint, minus ActivityLog "answered/changed" events
+POST  /api/assessments/admin/trial/sessions/<pk>/submit/                   reuses finalize_sessions(); always returns score (no assignment.show_result_to_student to gate on)
+GET   /api/assessments/admin/papers/<pk>/trial-results/                    every mock attempt ever taken on this paper (paper-scoped, not assignment-scoped) — powers the Results page's "Mock tests" tab
+```
+Retakes are unlimited: two trial rows both have `assignment=NULL`, and SQL never treats two NULLs as equal for the `(assignment, student_id)` uniqueness constraint, so nothing blocks the same admin retaking the same paper. `trial/start/` resumes an already-`IN_PROGRESS` trial on that paper for that admin (mirroring the real endpoint's resume behavior) rather than creating a duplicate.
 
 ### Health
 ```
@@ -279,6 +327,8 @@ GET  /api/assessments/health/
 
 assessment-service calls `user-service`'s `GET /api/users/batches/<batch_id>/students/` exactly once, at assignment-creation time (Task 3.1), to snapshot the roster into `StudentSetAllocation`. No other service-to-service call exists in V1. This call is wrapped in a circuit breaker/timeout (Task 13.1) — a roster-fetch failure fails that specific admin action cleanly, never degrades the exam-taking path (which never calls `user-service` live).
 
+**Second caller, added 2026-08-27:** the admin Assign page's frontend now also calls this same endpoint directly (browser → user-service, not through assessment-service) for a live "students attending this assessment" preview count — `?departments=<comma-separated>&page_size=1`, reading only the paginated `count`. `departments` (plural) is a new query param on that endpoint (`_apply_student_filters` in `services/user-service/users/views.py`), matched case-insensitively against a stripped set, deliberately identical to `snapshot_roster_and_allocate`'s own matching (`assessments/allocation.py`) so the preview count is never wrong relative to what an actual assignment creation would allocate. Covered by `TestBatchStudentsMultiDepartmentFilter` in `services/user-service/tests/test_batches.py`.
+
 ---
 
 ## Consistency Note
@@ -286,3 +336,11 @@ assessment-service calls `user-service`'s `GET /api/users/batches/<batch_id>/stu
 Every endpoint above maps to a model defined in this document. Task 12.1's IDOR audit checks off against this list directly. If an implementation needs an endpoint not listed here, update this document first — it is the frozen contract, not a suggestion.
 
 **Audit (2026-08-13, Phase 15):** checked this document line-by-line against the live `urls.py`/`models.py`, not assumed current. Found and fixed 4 real gaps where the two had drifted apart: the `FailedJob` model (Task 13.1) was entirely undocumented; two real, working endpoints (`GET .../admin/assignments/` list, `GET .../admin/assignments/<id>/` detail) were missing from the contract; and `GET .../ready/` was documented as real but doesn't exist (confirmed live: `404`). All four fixed in place above. No other drift found in a full pass of every model and every listed endpoint.
+
+**2026-08-27 — Sections feature:** added the `QuestionSection` model and its three endpoints (`admin/sets/<pk>/sections/`, `admin/sections/<pk>/`, `admin/sections/<pk>/questions/`), the required `section` FK on `Question` (with its default-section backward-compat fallback), and the readiness-check extension enforcing equal section counts (and non-empty sections) across a paper's sets when it has more than one. Migration path: `0017` adds the model + nullable FK, `0018` backfills a "Section 1" per existing set-with-questions (data-only RunPython — Postgres rejects an `AlterField` in the same transaction as a preceding bulk `.update()`, hence the split), `0019` tightens the FK to `NOT NULL`. Backend covered by `tests/test_admin_sections.py` (27 tests); full suite 407/407 passing. The old set-level `admin/sets/<pk>/questions/` endpoint is unchanged and still live for backward compatibility (see its row above).
+
+**2026-08-27 — Final Review checklist (Assign page):** added `section_count` to `QuestionSetSerializer` (see QuestionSet above) so the admin Assign page can show every set's structure in a 10-item pre-flight checklist the admin must manually tick through before "Create assignment" unlocks — paper structure (sets/sections/questions/marks), audience (batch/department), timing (duration/global timer), and outcome (cutoff/results visibility), in that order. No new endpoint; purely additive to the existing paper-detail response. Covered by 2 new backend tests (`TestPaperDetailSectionCount` in `test_admin_sections.py`, 409/409 passing) and, after a follow-up visual-audit pass same day, 7 frontend tests (`adminAssessmentAssignFinalReview.test.tsx`): the exact values shown, the disabled-until-fully-ticked gate, ticking resetting on any post-review edit, and — added in the follow-up — a structural-incompleteness warning (a paper with no sets, or a set with zero questions/sections, colors that row's value in `--color-danger` and shows a banner, rather than silently showing a meaningless "0"/"—") plus a unified "·" separator across every multi-value row (the Global timer row previously used "|", inconsistent with the per-set rows' "·").
+
+**2026-08-27 — Admin mock-test feature:** an admin can now take the real exam-taking interface themselves on a paper they own, either from the assign form's Final Review step (before an assignment exists, gated behind a "Are you willing to take the mock test?" Yes/No prompt shown once every checklist item above is ticked) or repeatably from an existing assignment's own "Mock Test" toolbar button, and see their own score immediately. Backend: `AssessmentSession.assignment` and `ResultSummary.assignment` made nullable (migration `0020`, a plain `AlterField` — safe as a single migration since widening NOT NULL → NULL needs no data backfill, unlike the Sections feature's earlier 3-way split); `enforcement.session_is_writable()` skips the assignment-closed check when there's no assignment; `scoring.finalize_sessions()` resolves `institution_id` from the paper when there's no assignment; six new admin-only endpoints (see "Admin — Mock/Trial Exam Sessions" above) reuse the exact same session/response/scoring engine as the real student flow rather than a parallel implementation, deliberately skip all `ActivityLog`/malpractice tracking, and are proven isolated from every real-assignment-scoped query (results, analytics, dashboard, exports) by construction — those all filter by a concrete assignment, which a trial's `NULL` can never match. Frontend: a new `admin/assessments/trial/[session_id]/page.tsx` (forked from the student exam page, with all fullscreen/tab-switch/lockout machinery removed) and a Real/Mock toggle on the Results page reading a paper-scoped trial-results list. Backend covered by `tests/test_admin_trial.py` (24 tests, including an explicit isolation test proving a trial never appears in real results and vice versa); full backend suite 433/433. Frontend covered by 9 new/updated tests in `adminAssessmentAssignFinalReview.test.tsx`, 4 in `adminTrialExamPage.test.tsx`, and 5 in `adminResultsMockToggle.test.tsx`; full frontend suite 335/335.
+
+**2026-08-27 — Pre-exam briefing screen:** `StudentAssignmentListView` now also returns `total_marks`/`question_count` per assignment (from the student's own allocated set), replacing the small "Before you start" modal on the assessments list page with a full page on the exam route itself — assessment facts, identity confirmation (best-effort, from `/users/me/`), the admin's own instructions, the platform's actual enforced system rules (tab-switch/fullscreen-exit limits read from the same constants the enforcement code uses, so the copy can't drift out of sync with real behavior), and a readiness checklist, sized for placement-drive-grade assessments rather than a casual quiz. A resumed (already `IN_PROGRESS`) session skips straight to a lightweight re-entry screen instead of repeating the full briefing. Backend covered by a new test in `test_student_assignments.py` (full suite 434/434); frontend covered by 14 new tests across `studentExamPreExamBriefing.test.tsx` and `studentAssessmentsListPage.test.tsx` (full suite 366/366, twice).

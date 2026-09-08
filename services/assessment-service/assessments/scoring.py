@@ -165,6 +165,11 @@ def finalize_sessions(queryset, new_status: str) -> int:
         queryset.filter(status=SESSION_STATUS_IN_PROGRESS).values(
             "id", "assignment_id", "student_id", "set_id", "started_at",
             "assignment__institution_id",
+            # Fallback source of institution_id for a trial session
+            # (assignment is None, 2026-08-27) — a real session's
+            # assignment__institution_id already covers it, but a trial has
+            # no assignment to resolve that from.
+            "set__paper__institution_id",
         )
     )
     if not candidates:
@@ -236,7 +241,7 @@ def finalize_sessions(queryset, new_status: str) -> int:
             session_id=c["id"],
             assignment_id=c["assignment_id"],
             student_id=c["student_id"],
-            institution_id=c["assignment__institution_id"],
+            institution_id=c["assignment__institution_id"] or c["set__paper__institution_id"],
             started_at=c["started_at"],
             ended_at=now,
             duration_seconds=duration_by_session[c["id"]],
@@ -261,7 +266,10 @@ def finalize_sessions(queryset, new_status: str) -> int:
         # row must have its cached dashboard dropped so the next read
         # recomputes fresh, rather than serving stale KPIs for up to the
         # full defensive-backstop TTL.
-        for assignment_id in {r.assignment_id for r in results}:
+        # Trial results (assignment_id is None, 2026-08-27) have no
+        # dashboard to invalidate — filtered out rather than deleting a
+        # nonsense "assessment_dashboard:None" key.
+        for assignment_id in {r.assignment_id for r in results if r.assignment_id}:
             # safe_cache_delete (Task 13.1): this sits on the critical
             # exam-submit path — a Redis outage must never be able to fail
             # a student's submit or the sweep's finalize pass just because

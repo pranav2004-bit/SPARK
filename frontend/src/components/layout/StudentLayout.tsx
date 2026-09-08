@@ -3,12 +3,13 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Home, Briefcase, BookOpen, ClipboardList, Trophy,
-  LogOut, ChevronDown, UserCircle2, MessageSquare,
+  LogOut, ChevronDown, UserCircle2, MessageSquare, DoorOpen,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
+import { usePortalGuard } from "@/hooks/usePortalGuard";
 import { ScrollingUpdates } from "@/components/ui/ScrollingUpdates";
 import type { StudentUser } from "@/types";
 
@@ -59,16 +60,39 @@ const NAV_ITEMS = [
 export function StudentLayout({
   children,
   hideNav = false,
+  examMode = false,
+  examCenterContent,
+  onExitExam,
 }: {
   children: React.ReactNode;
   hideNav?: boolean;
+  /** Distraction-free header for a live/pending exam (added 2026-08-28):
+   * no promo ticker, no nav links (desktop or mobile), the logo lockup
+   * swaps for a non-clickable text wordmark (a clickable logo would let a
+   * student bypass the Exit Test confirm entirely), and the header's
+   * center/right cells swap from nav+account-menu to caller-supplied
+   * content (e.g. the exam countdown) and an explicit "Exit Test" button.
+   * Implies hideNav. */
+  examMode?: boolean;
+  /** Rendered in the header's center cell while examMode is on — e.g. the
+   * live countdown on the active exam screen. Left empty on screens with
+   * nothing to time yet (briefing, resume, error, finished). */
+  examCenterContent?: React.ReactNode;
+  /** Required in practice whenever examMode is on — falls back to
+   * navigating to the assessments list if the caller omits it, so a
+   * missed prop never leaves the button dead. */
+  onExitExam?: () => void;
 }) {
   const pathname = usePathname();
+  const router = useRouter();
   const { user, logout } = useAuth();
+  usePortalGuard("student");
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
 
   const studentUser = user as StudentUser | null;
+  const compactNav = hideNav || examMode;
+  const handleExitExam = onExitExam ?? (() => router.push("/students/assessments"));
 
   // Close menu on route change
   useEffect(() => {
@@ -96,27 +120,64 @@ export function StudentLayout({
       >
         <div className="w-full h-full px-4 sm:px-6 lg:px-8 grid grid-cols-[auto_1fr_auto] items-center gap-3 sm:gap-5">
 
-          {/* Logo group */}
-          <Link href="/students/home" className="shrink-0 select-none flex items-center gap-2 sm:gap-2.5">
-            <Image
-              src="/institution-logo.svg"
-              alt="Institution"
-              width={0}
-              height={0}
-              className="h-[38px] sm:h-[44px] w-auto"
-            />
-            <div className="w-px h-7 sm:h-8 bg-[var(--color-border)]" />
-            <Image
-              src="/spark-logo.svg"
-              alt="SPARK"
-              width={0}
-              height={0}
-              className="h-[26px] sm:h-[30px] w-auto"
-            />
-          </Link>
+          {/* Logo group — a text wordmark in exam mode, not the clickable
+              logo lockup: a Link out of this screen would let a student
+              leave (and re-enter, restarting the briefing) without ever
+              going through the Exit Test confirm. */}
+          {examMode ? (
+            <div className="shrink-0 select-none leading-tight">
+              <p className="text-sm font-bold" style={{ color: "var(--color-text)" }}>
+                SPARK Proctored <span style={{ color: "var(--color-text-subtle)", fontWeight: 600 }}>v1.0.0</span>
+              </p>
+              <p className="text-[10px] font-semibold uppercase tracking-wider flex items-center gap-1.5" style={{ color: "var(--color-text-subtle)" }}>
+                <span className="relative group inline-flex items-center justify-center shrink-0 w-3 h-3">
+                  <span
+                    className="absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-40 animate-ping"
+                    style={{ animationDuration: "2.5s" }}
+                    aria-hidden="true"
+                  />
+                  <span className="relative w-1.5 h-1.5 rounded-full bg-red-500" aria-hidden="true" />
+                  <span
+                    role="tooltip"
+                    className="pointer-events-none absolute left-0 top-full mt-2 w-max max-w-[200px] px-2.5 py-1.5 rounded-[var(--radius-md)] text-[11px] font-medium normal-case tracking-normal leading-snug opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-50"
+                    style={{ background: "#111827", color: "#fff" }}
+                  >
+                    Your activity is being monitored for exam integrity
+                  </span>
+                </span>
+                Examination Mode
+              </p>
+            </div>
+          ) : (
+            <Link href="/students/home" className="shrink-0 select-none flex items-center gap-2 sm:gap-2.5">
+              <Image
+                src="/institution-logo.png"
+                alt="Institution"
+                width={0}
+                height={0}
+                className="h-[38px] sm:h-[44px] w-auto"
+              />
+              <div className="w-px h-7 sm:h-8 bg-[var(--color-border)]" />
+              <Image
+                src="/spark-logo.svg"
+                alt="SPARK"
+                width={0}
+                height={0}
+                className="h-[26px] sm:h-[30px] w-auto"
+              />
+            </Link>
+          )}
+
+          {/* Exam mode — caller-supplied center content (the live
+              countdown, when there is one), no nav */}
+          {examMode && (
+            <div className="flex items-center justify-center">
+              {examCenterContent}
+            </div>
+          )}
 
           {/* Desktop center nav */}
-          {!hideNav && (
+          {!compactNav && (
             <nav className="hidden md:flex items-center justify-center gap-0.5">
               {NAV_ITEMS.map(({ href, label, match, altMatch, icon: Icon, comingSoon }) => {
                 const isActive =
@@ -169,7 +230,22 @@ export function StudentLayout({
             </nav>
           )}
 
-          {/* User menu — desktop + mobile avatar */}
+          {/* Exam mode — exit button only, no account menu */}
+          {examMode ? (
+            <div className="flex items-center justify-end">
+              <button
+                onClick={handleExitExam}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--radius-md)] text-sm font-medium border transition-colors cursor-pointer"
+                style={{ color: "var(--color-danger)", borderColor: "var(--color-danger)" }}
+                onMouseEnter={e => { e.currentTarget.style.background = "var(--color-danger-bg)"; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}
+              >
+                <DoorOpen size={15} />
+                <span className="hidden sm:inline">Exit Test</span>
+              </button>
+            </div>
+          ) : (
+          /* User menu — desktop + mobile avatar */
           <div className="flex items-center justify-end" ref={userMenuRef}>
             <div className="relative">
 
@@ -272,12 +348,13 @@ export function StudentLayout({
               )}
             </div>
           </div>
+          )}
 
         </div>
       </header>
 
       {/* ── Mobile Bottom Navigation ─────────────────────────────────────────── */}
-      {!hideNav && (
+      {!compactNav && (
         <nav
           className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-white border-t border-[var(--color-border)]"
           style={{
@@ -334,11 +411,13 @@ export function StudentLayout({
       <main
         className={[
           "pt-14 min-h-[calc(100vh-56px)]",
-          !hideNav ? "pb-24 md:pb-8" : "pb-8",
+          !compactNav ? "pb-24 md:pb-8" : "pb-8",
         ].join(" ")}
       >
-        {/* Scrolling updates bar — sticky below fixed header, in document flow */}
-        <ScrollingUpdates context="student" stickyTop={56} />
+        {/* Scrolling updates bar — sticky below fixed header, in document flow.
+            Skipped in exam mode: external promo links have no place in a
+            monitored, distraction-free exam screen. */}
+        {!examMode && <ScrollingUpdates context="student" stickyTop={56} />}
         {children}
       </main>
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { Eye, EyeOff, ArrowLeft } from "lucide-react";
@@ -8,6 +8,8 @@ import type { LucideIcon } from "lucide-react";
 import Image from "next/image";
 import { useAuthStore } from "@/lib/auth-store";
 import { setAuthCookies } from "@/lib/cookies";
+import { useAuth } from "@/hooks/useAuth";
+import { PORTAL_HOME } from "@/lib/portalRouting";
 import api, { getErrorMessage } from "@/lib/api";
 import { ScrollingUpdates } from "@/components/ui/ScrollingUpdates";
 import type { AuthUser, TokenPair } from "@/types";
@@ -43,7 +45,7 @@ export interface PortalLoginFormProps {
   footerHint?: string;
   /** Auth config */
   apiEndpoint: string;
-  cookieRole: "admin" | "super_admin";
+  cookieRole: "admin" | "super_admin" | "it";
   redirectTo: string;
   /** Additional POST body fields (e.g. { role: "super_admin" }) */
   extraBody?: Record<string, string>;
@@ -90,6 +92,21 @@ export function PortalLoginForm({
   const [loading, setLoading] = useState(false);
   const [backLoading, setBackLoading] = useState(false);
 
+  // Already authenticated in THIS tab (added 2026-08-27) — redirects to
+  // that role's own home, not necessarily this form's `redirectTo`: a
+  // student who somehow lands on this admin/super-admin/it form should go
+  // to their own portal, not get funneled toward one they can't access.
+  // Reads the tab-local Zustand store via useAuth(), never the shared
+  // aptlogic_role cookie — see proxy.ts's comment for why that distinction
+  // is the whole point of this fix. Gated on hasHydrated so a genuinely
+  // logged-in tab doesn't flash the form before sessionStorage rehydrates.
+  const { user, isAuthenticated, hasHydrated } = useAuth();
+  useEffect(() => {
+    if (hasHydrated && isAuthenticated && user) {
+      router.replace(PORTAL_HOME[user.role] ?? "/");
+    }
+  }, [hasHydrated, isAuthenticated, user, router]);
+
   const {
     register,
     handleSubmit,
@@ -126,7 +143,7 @@ export function PortalLoginForm({
             {/* Logos */}
             <div className="inline-flex items-center gap-3 mb-8 self-start">
               <Image
-                src="/institution-logo.svg"
+                src="/institution-logo.png"
                 alt="Institution"
                 width={44}
                 height={44}
@@ -201,7 +218,7 @@ export function PortalLoginForm({
             {/* Mobile logos */}
             <div className="lg:hidden flex items-center gap-3 mb-7">
               <Image
-                src="/institution-logo.svg"
+                src="/institution-logo.png"
                 alt="Institution"
                 width={44}
                 height={44}

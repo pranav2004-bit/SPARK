@@ -52,6 +52,31 @@ Layout file: `src/app/super-admin/layout.tsx`
 
 **Never add a `layout.tsx` to `src/app/admin/` or `src/app/students/`** — it would double-render the sidebar. **Never add layout wrapper imports to `src/app/super-admin/` pages** — the file-based layout already provides chrome.
 
+### Every portal layout must call `usePortalGuard`
+
+Route protection is split across two layers (added 2026-08-27, fixing a cross-tab bug — see `src/proxy.ts`'s own comment for the full story):
+
+- **`src/proxy.ts`** (Next.js middleware) only does a coarse "is there any session cookie at all" check. It deliberately does **not** check which role the cookie claims — cookies are shared across every tab of the same browser/origin, but a session is genuinely per-tab (`sessionStorage`, see `src/lib/auth-store.ts`), so role-matching at this layer broke simultaneous multi-tab logins (an admin tab and a student tab open side by side would fight over one shared cookie).
+- **`src/hooks/usePortalGuard.ts`** does the real per-tab role enforcement, client-side, reading the tab's own `useAuth()` state. **Every portal layout must call it**, or that portal silently has no role protection at all beyond the coarse "logged in as *something*" cookie check:
+
+```tsx
+// Pattern A layouts (AdminLayout.tsx, StudentLayout.tsx, ITLayout.tsx)
+export function AdminLayout({ children }: { children: React.ReactNode }) {
+  const { user, logout } = useAuth();
+  usePortalGuard("admin"); // one line, no destructuring needed unless you use `ready`
+  ...
+}
+```
+
+For **Pattern B** (a file-based `layout.tsx` that also wraps its own login page, like `super-admin/layout.tsx`), pass `{ skip: isLoginPage }` — the guard's "redirect to login" direction doesn't apply on the login page itself; that page's own "already logged in, redirect away" check (in `PortalLoginForm.tsx`, or `students/login/page.tsx` for the one login page that doesn't use that shared component) handles the opposite direction instead:
+
+```tsx
+const isLoginPage = pathname === "/super-admin/login";
+usePortalGuard("super_admin", { skip: isLoginPage });
+```
+
+A new portal (a hypothetical `/it/*`-style addition) needs a `usePortalGuard(role)` call in its layout and an "already authenticated, redirect to `PORTAL_HOME[role]`" mount-time check in its login page — see `src/lib/portalRouting.ts` for the shared role/path constants both layers (and `proxy.ts`) read from.
+
 ---
 
 ## SearchInput — Controlled + Debounced

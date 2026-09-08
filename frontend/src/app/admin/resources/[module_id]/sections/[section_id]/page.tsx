@@ -366,7 +366,7 @@ export default function ResourceSectionUploadsPage() {
 
   return (
     <AdminLayout>
-      <PageWrapper className="max-w-5xl py-6 sm:py-8">
+      <PageWrapper className="py-6 sm:py-8">
 
         <PageHeader
           title={sectionName || ""}

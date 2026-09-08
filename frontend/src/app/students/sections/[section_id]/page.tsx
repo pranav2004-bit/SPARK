@@ -198,7 +198,7 @@ function SectionContent() {
   // ── Error state ───────────────────────────────────────────────────────────
   if (error) {
     return (
-      <PageWrapper className="max-w-4xl py-8">
+      <PageWrapper className="py-8">
         <div className="flex flex-col items-center py-20 text-center">
           <div className="w-14 h-14 rounded-[var(--radius-lg)] bg-[var(--color-danger-bg)] flex items-center justify-center mb-4">
             <AlertCircle size={24} className="text-[var(--color-danger)]" />
@@ -216,7 +216,7 @@ function SectionContent() {
   }
 
   return (
-    <PageWrapper className="max-w-4xl py-8">
+    <PageWrapper className="py-8">
 
       {/* ── Page header ─────────────────────────────────────────────────────── */}
       <PageHeader

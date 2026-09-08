@@ -37,10 +37,11 @@ if ENVIRONMENT == "production":
     _require_env("DB_PASSWORD")
     _require_env("JWT_SIGNING_KEY", min_length=32)
     _require_env("INSTITUTION_ID")
-    _require_env("SUPERADMIN_EMAIL")
-    _require_env("SUPERADMIN_PASSWORD", min_length=8)
+    _require_env("IT_EMAIL")
+    _require_env("IT_PASSWORD", min_length=8)
     _require_env("ADMIN_DEFAULT_PASSWORD", min_length=8)
     _require_env("STUDENT_DEFAULT_PASSWORD", min_length=6)
+    _require_env("SUPERADMIN_DEFAULT_PASSWORD", min_length=8)
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
@@ -107,8 +108,8 @@ REST_FRAMEWORK = {
     # -last entry (i.e. what nginx itself appended) as the real client IP.
     "NUM_PROXIES": 1,
     "DEFAULT_THROTTLE_CLASSES": (
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
+        "core.throttling_resilience.ResilientAnonRateThrottle",
+        "core.throttling_resilience.ResilientUserRateThrottle",
     ),
     "DEFAULT_THROTTLE_RATES": {
         "anon": "60/min",
@@ -143,8 +144,14 @@ CACHES = {
 }
 
 # ── Auth credentials (from env — never hardcoded) ─────────────────────────────
-SUPERADMIN_EMAIL = os.environ.get("SUPERADMIN_EMAIL", "spark@gmail.com")
-SUPERADMIN_PASSWORD = os.environ.get("SUPERADMIN_PASSWORD", "000346")
+# IT is the platform's bootstrapped root (2026-08-20, replacing super_admin
+# in that role) — IT_EMAIL/IT_PASSWORD seed the one IT account on first
+# startup (create_default_it). Super Admin, Admin, and Student accounts are
+# all created afterward by IT through the ordinary account-management UI,
+# each assigned their own *_DEFAULT_PASSWORD on creation.
+IT_EMAIL = os.environ.get("IT_EMAIL", "it@spark.test")
+IT_PASSWORD = os.environ.get("IT_PASSWORD", "000346")
+SUPERADMIN_DEFAULT_PASSWORD = os.environ.get("SUPERADMIN_DEFAULT_PASSWORD", "spark@123")
 ADMIN_DEFAULT_PASSWORD = os.environ.get("ADMIN_DEFAULT_PASSWORD", "spark@123")
 STUDENT_DEFAULT_PASSWORD = os.environ.get("STUDENT_DEFAULT_PASSWORD", "ANITS@123")
 

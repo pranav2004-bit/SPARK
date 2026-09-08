@@ -26,23 +26,23 @@ export function LandingMobileMenu() {
           style={{ top: "100%" }} // Anchors exactly below the navbar
         >
           <div className="px-6 py-3 flex flex-col gap-1 text-left w-full items-start">
-            <a 
-              href="#features" 
-              onClick={() => setIsOpen(false)} 
+            <Link
+              href="/#features"
+              onClick={() => setIsOpen(false)}
               className="block py-2.5 w-full text-[15px] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors font-medium relative"
             >
               Modules
-            </a>
-            <a 
-              href="#how-it-works" 
-              onClick={() => setIsOpen(false)} 
+            </Link>
+            <Link
+              href="/#how-it-works"
+              onClick={() => setIsOpen(false)}
               className="block py-2.5 w-full text-[15px] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors font-medium"
             >
               Process
-            </a>
-            <Link 
-              href="/about" 
-              onClick={() => setIsOpen(false)} 
+            </Link>
+            <Link
+              href="/about"
+              onClick={() => setIsOpen(false)}
               className="block py-2.5 w-full text-[15px] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors font-medium"
             >
               About
@@ -54,8 +54,8 @@ export function LandingMobileMenu() {
           
           {/* Sign In (Centered as per screenshot) */}
           <div className="px-6 py-4">
-            <Link 
-              href="/students/login" 
+            <Link
+              href="/students/login"
               className="block text-[15px] text-[var(--color-text)] font-bold text-center w-full transition-colors hover:text-[var(--color-primary)]"
             >
               Sign In

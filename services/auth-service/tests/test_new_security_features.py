@@ -4,7 +4,8 @@ Tests for new security features introduced in the institution_id / token_version
   - force_password_change=False after password change
   - token_version incremented on password change
   - TokenVersionJWTAuthentication rejects stale (pre-change) tokens
-  - INSTITUTION_ID validation in create_default_superadmin management command
+  - INSTITUTION_ID validation in create_default_it management command (IT is the
+    bootstrapped root as of 2026-08-20, replacing super_admin)
   - force_password_change present in login response body
 """
 
@@ -64,10 +65,11 @@ def _login(email_or_id, password, role):
 # ── force_password_change on account creation ─────────────────────────────────
 
 @pytest.mark.django_db
-def test_admin_created_via_api_has_force_password_change(super_admin_user):
-    """Admin created through the API must have force_password_change=True."""
-    sa_token = _login("superadmin@test.com", "Super@pass1", "super_admin")
-    _post(sa_token, f"{BASE}/admins/", {"email": "newadmin@security.com", "name": "Test"})
+def test_admin_created_via_api_has_force_password_change(it_user):
+    """Admin created through the API must have force_password_change=True.
+    Creator is IT — admin-account creation is IT-exclusive (2026-08-19)."""
+    it_token = _login("it@test.com", "It@pass123", "it")
+    _post(it_token, f"{BASE}/admins/", {"email": "newadmin@security.com", "name": "Test"})
     admin = User.objects.get(email="newadmin@security.com")
     assert admin.force_password_change is True
 
@@ -228,87 +230,89 @@ def test_new_admin_token_valid_after_password_change(admin_user):
 
 
 # ── INSTITUTION_ID management command validation ──────────────────────────────
+# create_default_it (2026-08-20) replaced create_default_superadmin as the
+# bootstrap command — IT is now the platform's bootstrapped root.
 
 @pytest.mark.django_db
-def test_create_default_superadmin_raises_if_institution_id_missing():
+def test_create_default_it_raises_if_institution_id_missing():
     """Management command must fail with CommandError if INSTITUTION_ID is not set."""
     with mock.patch.dict(os.environ, {"INSTITUTION_ID": ""}, clear=False):
         with pytest.raises(CommandError, match="INSTITUTION_ID"):
-            call_command("create_default_superadmin")
+            call_command("create_default_it")
 
 
 @pytest.mark.django_db
-def test_create_default_superadmin_raises_if_institution_id_invalid():
+def test_create_default_it_raises_if_institution_id_invalid():
     """Management command must fail with CommandError if INSTITUTION_ID is not a valid UUID."""
     with mock.patch.dict(os.environ, {"INSTITUTION_ID": "not-a-uuid"}, clear=False):
         with pytest.raises(CommandError, match="not a valid UUID"):
-            call_command("create_default_superadmin")
+            call_command("create_default_it")
 
 
 @pytest.mark.django_db
-def test_create_default_superadmin_raises_on_institution_id_mismatch():
+def test_create_default_it_raises_on_institution_id_mismatch():
     """Management command must fail if INSTITUTION_ID in .env differs from the existing DB record."""
     original_id = uuid.UUID("1470350a-1765-41d1-92b9-bf7b040ddaf9")
     different_id = str(uuid.uuid4())
 
-    # Create super admin with original institution_id
+    # Create IT account with original institution_id
     User.objects.create_user(
-        email=settings.SUPERADMIN_EMAIL,
-        password=settings.SUPERADMIN_PASSWORD,
-        role="super_admin",
+        email=settings.IT_EMAIL,
+        password=settings.IT_PASSWORD,
+        role="it",
         institution_id=original_id,
     )
 
     # Run command with a different INSTITUTION_ID — must fail
     with mock.patch.dict(os.environ, {"INSTITUTION_ID": different_id}, clear=False):
         with pytest.raises(CommandError, match="mismatch"):
-            call_command("create_default_superadmin")
+            call_command("create_default_it")
 
 
 @pytest.mark.django_db
-def test_create_default_superadmin_raises_on_password_drift():
-    """Management command must fail loudly if .env's SUPERADMIN_PASSWORD no longer
+def test_create_default_it_raises_on_password_drift():
+    """Management command must fail loudly if .env's IT_PASSWORD no longer
     matches the live database password — editing .env has no effect on an existing
     account, so this must be a hard failure, not a silent no-op."""
     User.objects.create_user(
-        email=settings.SUPERADMIN_EMAIL,
+        email=settings.IT_EMAIL,
         password="OriginalPass@1",
-        role="super_admin",
+        role="it",
         institution_id=uuid.UUID(os.environ["INSTITUTION_ID"]),
     )
 
-    with mock.patch.object(settings, "SUPERADMIN_PASSWORD", "DifferentPass@9"):
+    with mock.patch.object(settings, "IT_PASSWORD", "DifferentPass@9"):
         with pytest.raises(CommandError, match="does not match the live database password"):
-            call_command("create_default_superadmin")
+            call_command("create_default_it")
 
 
 @pytest.mark.django_db
-def test_create_default_superadmin_no_error_when_password_matches():
-    """No error when .env's SUPERADMIN_PASSWORD matches the live database password."""
+def test_create_default_it_no_error_when_password_matches():
+    """No error when .env's IT_PASSWORD matches the live database password."""
     User.objects.create_user(
-        email=settings.SUPERADMIN_EMAIL,
-        password=settings.SUPERADMIN_PASSWORD,
-        role="super_admin",
+        email=settings.IT_EMAIL,
+        password=settings.IT_PASSWORD,
+        role="it",
         institution_id=uuid.UUID(os.environ["INSTITUTION_ID"]),
     )
 
-    call_command("create_default_superadmin")  # must not raise
+    call_command("create_default_it")  # must not raise
 
 
 @pytest.mark.django_db
-def test_create_default_superadmin_succeeds_with_valid_institution_id():
-    """Management command must create super admin with force_password_change=True."""
-    call_command("create_default_superadmin")
-    user = User.objects.get(email=settings.SUPERADMIN_EMAIL)
+def test_create_default_it_succeeds_with_valid_institution_id():
+    """Management command must create the IT account with force_password_change=True."""
+    call_command("create_default_it")
+    user = User.objects.get(email=settings.IT_EMAIL)
     assert str(user.institution_id) == os.environ["INSTITUTION_ID"]
     assert user.force_password_change is True
-    assert user.role == "super_admin"
+    assert user.role == "it"
 
 
 @pytest.mark.django_db
-def test_create_default_superadmin_idempotent():
+def test_create_default_it_idempotent():
     """Running the command twice must not raise an error or create a duplicate."""
-    call_command("create_default_superadmin")
-    call_command("create_default_superadmin")
-    count = User.objects.filter(email=settings.SUPERADMIN_EMAIL).count()
+    call_command("create_default_it")
+    call_command("create_default_it")
+    count = User.objects.filter(email=settings.IT_EMAIL).count()
     assert count == 1

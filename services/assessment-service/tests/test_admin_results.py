@@ -160,6 +160,34 @@ class TestResultsTable:
         assert rows[0]["student_roll_id"] == "ROLL-002"
 
     @patch("assessments.views.fetch_batch_roster")
+    def test_available_sets_lists_every_set_regardless_of_filters(self, mock_roster, admin_client, results_setup):
+        # Drill-down target from Analytics' Set Fairness panel — each bar
+        # links here with ?set=<label>.
+        mock_roster.return_value = results_setup["roster"]
+        assignment = results_setup["assignment"]
+        qset_b = QuestionSet.objects.create(paper=assignment.paper, label="Set B", order=2)
+        StudentSetAllocation.objects.filter(assignment=assignment, student_id=results_setup["student_d"]).update(set=qset_b)
+
+        resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/results/?set=Set+B")
+        assert resp.status_code == 200
+        body = resp.json()
+        rows = body["results"]
+        assert len(rows) == 1
+        assert rows[0]["student_roll_id"] == "ROLL-004"
+        # Stays the full roster's set list even while ?set= itself is
+        # narrowing the table — otherwise the frontend's Set dropdown would
+        # shrink to one option the moment a set filter is applied.
+        assert body["available_sets"] == ["Set A", "Set B"]
+
+    @patch("assessments.views.fetch_batch_roster")
+    def test_set_filter_unknown_label_returns_no_rows(self, mock_roster, admin_client, results_setup):
+        mock_roster.return_value = results_setup["roster"]
+        assignment = results_setup["assignment"]
+
+        resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/results/?set=Nonexistent")
+        assert resp.json()["results"] == []
+
+    @patch("assessments.views.fetch_batch_roster")
     def test_roll_id_search_exact_match(self, mock_roster, admin_client, results_setup):
         mock_roster.return_value = results_setup["roster"]
         assignment = results_setup["assignment"]
@@ -452,53 +480,194 @@ class TestResultResponses:
         assert resp.status_code == 403
 
 
-class TestResultLogs:
-    def test_shows_full_trace_with_reasons(self, admin_client, results_setup):
-        result_b = results_setup["result_b"]
-        resp = admin_client.get(f"/api/assessments/admin/results/{result_b.id}/logs/")
+class TestQuestionResponses:
+    """The cross-student counterpart to TestResultResponses above — one
+    question, every student on that question's set — the Analytics page's
+    Per-Question Difficulty drill-down target."""
+
+    @patch("assessments.views.fetch_batch_roster")
+    def test_shows_every_students_answer_to_the_question(self, mock_roster, admin_client, results_setup):
+        mock_roster.return_value = results_setup["roster"]
+        assignment = results_setup["assignment"]
+        q1 = results_setup["q1"]
+
+        resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/questions/{q1.id}/responses/")
 
         assert resp.status_code == 200
-        body = resp.json()["data"]
-        assert body["malpractice_flag"] is True
-        assert body["malpractice_reasons"] == ["tab_switch"]
-        assert len(body["logs"]) == 1
-        assert body["logs"][0]["event_type"] == "tab_switch"
+        body = resp.json()
+        assert body["question_number"] == q1.question_number
+        assert body["set_label"] == "Set A"
+        assert body["marks"] == 5
+        assert len(body["options"]) == 2
 
-    def test_unflagged_session_empty_reasons(self, admin_client, results_setup):
-        result_a = results_setup["result_a"]
-        resp = admin_client.get(f"/api/assessments/admin/results/{result_a.id}/logs/")
-        body = resp.json()["data"]
-        assert body["malpractice_flag"] is False
-        assert body["logs"] == []
+        students = {s["student_roll_id"]: s for s in body["students"]}
+        assert len(students) == 4  # all 4 students allocated to Set A
 
-    def test_cross_institution_403(self, admin_b_client, results_setup):
-        resp = admin_b_client.get(f"/api/assessments/admin/results/{results_setup['result_b'].id}/logs/")
+        alice = students["ROLL-001"]  # submitted, answered correctly
+        assert alice["answered"] is True
+        assert alice["is_correct"] is True
+        assert alice["exam_status"] == "submitted"
+
+        bob = students["ROLL-002"]  # auto-submitted (malpractice), never answered q1 at all
+        assert bob["answered"] is False
+        assert bob["is_correct"] is False
+        assert bob["exam_status"] == "submitted"
+
+        carol = students["ROLL-003"]  # pending — never started, no session at all
+        assert carol["answered"] is False
+        assert carol["exam_status"] == "pending"
+
+        dave = students["ROLL-004"]  # writing — session exists, no response yet
+        assert dave["answered"] is False
+        assert dave["exam_status"] == "writing"
+
+    @patch("assessments.views.fetch_batch_roster")
+    def test_students_on_a_different_set_are_excluded_not_shown_as_unanswered(self, mock_roster, admin_client, results_setup):
+        assignment = results_setup["assignment"]
+        q1 = results_setup["q1"]
+
+        # A second set on the same assignment, with its own allocation — a
+        # student here never had q1 (it belongs to Set A only), so they must
+        # not appear at all, not show up as a false "not answered" row.
+        qset_b = QuestionSet.objects.create(paper=assignment.paper, label="Set B", order=2)
+        other_student = uuid.uuid4()
+        StudentSetAllocation.objects.create(assignment=assignment, student_id=other_student, set=qset_b)
+        mock_roster.return_value = results_setup["roster"] + [_roster_entry(other_student, "ROLL-005", "Eve E", "CSE")]
+
+        resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/questions/{q1.id}/responses/")
+        rolls = {s["student_roll_id"] for s in resp.json()["students"]}
+        assert rolls == {"ROLL-001", "ROLL-002", "ROLL-003", "ROLL-004"}
+
+    def test_cross_institution_404(self, admin_b_client, results_setup):
+        assignment = results_setup["assignment"]
+        q1 = results_setup["q1"]
+        resp = admin_b_client.get(f"/api/assessments/admin/assignments/{assignment.id}/questions/{q1.id}/responses/")
         assert resp.status_code == 404
 
-    def test_paginated_not_unbounded(self, admin_client, results_setup):
-        # Task 11.1's pagination audit: this endpoint was previously an
-        # unbounded query — a single session sitting at the throttle
-        # ceiling for a whole exam window could return everything in one
-        # response. "copy" doesn't trip any malpractice threshold, so this
-        # purely exercises pagination without touching result_a's existing
-        # unflagged-session assertions elsewhere in this fixture.
+    def test_student_forbidden(self, student_client, results_setup):
+        assignment = results_setup["assignment"]
+        q1 = results_setup["q1"]
+        resp = student_client.get(f"/api/assessments/admin/assignments/{assignment.id}/questions/{q1.id}/responses/")
+        assert resp.status_code == 403
+
+
+class TestSessionTimeline:
+    """The plain-English "logs/tracking" popup (eye icon in the results
+    table) — keyed by session_id, not result_id, since it also has to work
+    for a student who's still mid-exam (session_d: no ResultSummary yet)."""
+
+    def test_submitted_session_shows_start_and_submit_bookends(self, admin_client, results_setup):
         session_a = results_setup["session_a"]
-        ActivityLog.objects.bulk_create([
-            ActivityLog(session=session_a, event_type="copy", occurred_at=timezone.now())
-            for _ in range(65)
-        ])
-        resp = admin_client.get(f"/api/assessments/admin/results/{results_setup['result_a'].id}/logs/")
+        resp = admin_client.get(f"/api/assessments/admin/sessions/{session_a.id}/timeline/")
         assert resp.status_code == 200
         body = resp.json()["data"]
-        assert body["count"] == 65
-        assert len(body["logs"]) == 50  # StandardResultsPagination's default page_size
-        assert body["total_pages"] == 2
-        assert body["current_page"] == 1
+        assert body["exam_status"] == "submitted"
+        assert body["malpractice_flag"] is False
+        assert body["malpractice_reasons"] == []
+        assert body["retention_days"] == 15
+        assert [e["description"] for e in body["events"]] == ["Started the exam", "Submitted the exam"]
 
-        resp_page2 = admin_client.get(f"/api/assessments/admin/results/{results_setup['result_a'].id}/logs/?page=2")
-        body2 = resp_page2.json()["data"]
-        assert len(body2["logs"]) == 15
-        assert body2["current_page"] == 2
+    def test_auto_submitted_session_shows_plain_english_violation_and_timeout_message(self, admin_client, results_setup):
+        session_b = results_setup["session_b"]
+        resp = admin_client.get(f"/api/assessments/admin/sessions/{session_b.id}/timeline/")
+        body = resp.json()["data"]
+        assert body["exam_status"] == "submitted"
+        assert body["malpractice_flag"] is True
+        descriptions = [e["description"] for e in body["events"]]
+        assert descriptions == [
+            "Started the exam",
+            "Switched away to another browser tab",
+            "Exam was submitted automatically because time ran out",
+        ]
+        # No raw technical event-type strings in the narrative timeline
+        # itself (malpractice_reasons is a separate structured field and
+        # legitimately keeps the raw reason code) — the plain-English
+        # description is the whole point of this feature.
+        assert all("tab_switch" not in e["description"] for e in body["events"])
+
+    def test_in_progress_session_has_no_closing_event_yet(self, admin_client, results_setup):
+        session_d = results_setup["session_d"]
+        resp = admin_client.get(f"/api/assessments/admin/sessions/{session_d.id}/timeline/")
+        body = resp.json()["data"]
+        assert body["exam_status"] == "writing"
+        assert [e["description"] for e in body["events"]] == ["Started the exam"]
+        assert body["malpractice_flag"] is False
+
+    def test_cross_institution_404(self, admin_b_client, results_setup):
+        resp = admin_b_client.get(f"/api/assessments/admin/sessions/{results_setup['session_a'].id}/timeline/")
+        assert resp.status_code == 404
+
+    def test_nonexistent_session_404(self, admin_client):
+        resp = admin_client.get(f"/api/assessments/admin/sessions/{uuid.uuid4()}/timeline/")
+        assert resp.status_code == 404
+
+    def test_event_count_is_capped_but_reports_the_true_total(self, admin_client, results_setup):
+        session_a = results_setup["session_a"]
+        from assessments.views import _SESSION_TIMELINE_EVENT_CAP
+        ActivityLog.objects.bulk_create([
+            ActivityLog(session=session_a, event_type="copy", occurred_at=timezone.now())
+            for _ in range(_SESSION_TIMELINE_EVENT_CAP + 5)
+        ])
+        resp = admin_client.get(f"/api/assessments/admin/sessions/{session_a.id}/timeline/")
+        body = resp.json()["data"]
+        assert body["total_event_count"] == _SESSION_TIMELINE_EVENT_CAP + 5
+        assert body["truncated"] is True
+        # +2 for the "Started"/"Submitted" bookends around the capped logs.
+        assert len(body["events"]) == _SESSION_TIMELINE_EVENT_CAP + 2
+
+    def test_unrecognized_event_type_still_gets_a_plain_english_fallback(self, admin_client, results_setup):
+        # Defensive: today every ACTIVITY_EVENT_TYPE_CHOICES member has a
+        # mapping, but a future event type landing here without one must
+        # never leak a raw technical string to a non-technical viewer.
+        session_a = results_setup["session_a"]
+        ActivityLog.objects.create(session=session_a, event_type="paste", occurred_at=timezone.now())
+        from assessments import views as views_module
+        with patch.dict(views_module._ACTIVITY_EVENT_PLAIN_ENGLISH, {}, clear=True):
+            resp = admin_client.get(f"/api/assessments/admin/sessions/{session_a.id}/timeline/")
+        descriptions = [e["description"] for e in resp.json()["data"]["events"]]
+        assert "Unrecognized activity was recorded" in descriptions
+
+    def test_dynamic_events_render_their_per_occurrence_detail(self, admin_client, results_setup):
+        # 2026-08-18 full-transparency events: unlike the fixed one-liners
+        # (tab_switch etc.), these four carry per-occurrence detail in
+        # metadata that must actually show up in the sentence, not just a
+        # generic label.
+        session_a = results_setup["session_a"]
+        ActivityLog.objects.create(session=session_a, event_type="question_answered", occurred_at=timezone.now(), metadata={"question_number": 3})
+        ActivityLog.objects.create(session=session_a, event_type="question_answer_changed", occurred_at=timezone.now(), metadata={"question_number": 3})
+        ActivityLog.objects.create(session=session_a, event_type="admin_extended_time", occurred_at=timezone.now(), metadata={"added_minutes": 15})
+        ActivityLog.objects.create(session=session_a, event_type="connection_lost", occurred_at=timezone.now(), metadata={"duration_seconds": 125})
+        ActivityLog.objects.create(session=session_a, event_type="screenshot_attempt", occurred_at=timezone.now(), metadata={})
+
+        resp = admin_client.get(f"/api/assessments/admin/sessions/{session_a.id}/timeline/")
+        descriptions = [e["description"] for e in resp.json()["data"]["events"]]
+
+        assert "Answered Question 3" in descriptions
+        assert "Changed the answer for Question 3" in descriptions
+        assert "Exam time was extended by 15 minute(s)" in descriptions
+        assert "Lost internet connection for about 2.1 minute(s)" in descriptions
+        assert "Attempted to take a screenshot" in descriptions
+        # No raw event_type strings or metadata keys leak into the sentences.
+        joined = " ".join(descriptions)
+        for raw in ("question_answered", "question_answer_changed", "admin_extended_time", "connection_lost", "screenshot_attempt", "added_minutes", "duration_seconds"):
+            assert raw not in joined
+
+    def test_dynamic_events_fall_back_gracefully_without_metadata(self, admin_client, results_setup):
+        # Edge case: metadata missing/empty (shouldn't happen in practice
+        # since both writers always populate it, but the description must
+        # never crash or show "None" if it somehow is).
+        session_a = results_setup["session_a"]
+        ActivityLog.objects.create(session=session_a, event_type="question_answered", occurred_at=timezone.now(), metadata={})
+        ActivityLog.objects.create(session=session_a, event_type="admin_extended_time", occurred_at=timezone.now(), metadata={})
+        ActivityLog.objects.create(session=session_a, event_type="connection_lost", occurred_at=timezone.now(), metadata={})
+
+        resp = admin_client.get(f"/api/assessments/admin/sessions/{session_a.id}/timeline/")
+        descriptions = [e["description"] for e in resp.json()["data"]["events"]]
+
+        assert "Answered a question" in descriptions
+        assert "Exam time was extended" in descriptions
+        assert "Lost internet connection" in descriptions
+        assert not any("None" in d for d in descriptions)
 
 
 # ── Task 7.3: CSV export ─────────────────────────────────────────────────────

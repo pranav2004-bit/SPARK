@@ -220,7 +220,7 @@ export default function PracticeSectionPage() {
 
   return (
     <AdminLayout>
-      <PageWrapper className="max-w-5xl">
+      <PageWrapper>
 
         <PageHeader
           title={section?.name ?? ""}

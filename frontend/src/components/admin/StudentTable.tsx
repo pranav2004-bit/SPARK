@@ -12,7 +12,7 @@ import { TableRowSkeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
-import { DEPARTMENTS } from "@/lib/constants";
+import { useDepartments } from "@/lib/departmentsContext";
 import type { Student, Batch, ApiSuccess } from "@/types";
 
 interface StudentTableProps {
@@ -32,6 +32,10 @@ interface StudentTableProps {
   onStudentDeleted: (id: string) => void;
   showBatchColumn?: boolean;
   batches?: Batch[];
+  // When true, hides the Actions column and all edit/toggle/reset/delete
+  // affordances — Admin is read/query-only (2026-08-19), all student
+  // management is IT-exclusive. Default false so IT's usage is unaffected.
+  readOnly?: boolean;
 }
 
 interface EditForm {
@@ -54,6 +58,7 @@ export function StudentTable({
   onStudentDeleted,
   showBatchColumn = false,
   batches = [],
+  readOnly = false,
 }: StudentTableProps) {
   const { error: toastError, success: toastSuccess } = useToast();
   const [editStudent, setEditStudent] = useState<Student | null>(null);
@@ -146,11 +151,14 @@ export function StudentTable({
     }
   }
 
-  const deptOptions = DEPARTMENTS.map((d) => ({ value: d, label: d }));
+  const { activeDepartments } = useDepartments();
+  const deptOptions = activeDepartments.map((d) => ({ value: d.code, label: d.name || d.code }));
   const batchOptions = batches.map((b) => ({
     value: b.id,
     label: b.batch_name,
   }));
+
+  const totalCols = (showBatchColumn ? 7 : 6) - (readOnly ? 1 : 0);
 
   return (
     <>
@@ -197,7 +205,9 @@ export function StudentTable({
                   style={{ color: "var(--color-text-subtle)", width: 90 }}>
                   Status
                 </th>
-                <th className="px-5 py-3" style={{ width: 140 }} aria-label="Actions" />
+                {!readOnly && (
+                  <th className="px-5 py-3" style={{ width: 140 }} aria-label="Actions" />
+                )}
               </tr>
             </thead>
 
@@ -207,12 +217,12 @@ export function StudentTable({
             >
               {loading ? (
                 Array.from({ length: 5 }).map((_, i) => (
-                  <TableRowSkeleton key={i} cols={showBatchColumn ? 7 : 6} />
+                  <TableRowSkeleton key={i} cols={totalCols} />
                 ))
               ) : loadError ? (
                 <tr>
                   <td
-                    colSpan={showBatchColumn ? 7 : 6}
+                    colSpan={totalCols}
                     className="text-center py-14 text-sm"
                     style={{ color: "var(--color-text-muted)" }}
                   >
@@ -237,7 +247,7 @@ export function StudentTable({
               ) : students.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={showBatchColumn ? 7 : 6}
+                    colSpan={totalCols}
                     className="text-center py-14 text-sm"
                     style={{ color: "var(--color-text-muted)" }}
                   >
@@ -329,7 +339,8 @@ export function StudentTable({
                       </Badge>
                     </td>
 
-                    {/* Actions */}
+                    {/* Actions — hidden entirely in read-only (Admin) mode */}
+                    {!readOnly && (
                     <td className="px-5 py-3.5">
                       <div
                         className="flex items-center gap-0.5 justify-end"
@@ -409,6 +420,7 @@ export function StudentTable({
                         </button>
                       </div>
                     </td>
+                    )}
                   </tr>
                 ))
               )}
@@ -425,6 +437,9 @@ export function StudentTable({
         />
       </div>
 
+      {/* Edit/reset/delete affordances — none reachable in read-only (Admin) mode */}
+      {!readOnly && (
+      <>
       {/* Edit Modal */}
       <Modal
         isOpen={!!editStudent}
@@ -484,6 +499,8 @@ export function StudentTable({
         confirmLabel="Permanently Delete"
         loading={actionLoading === "delete"}
       />
+      </>
+      )}
     </>
   );
 }

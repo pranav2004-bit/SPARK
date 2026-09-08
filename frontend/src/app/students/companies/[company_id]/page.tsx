@@ -213,7 +213,7 @@ export default function CompanySectionsPage() {
   if (notFound) {
     return (
       <StudentLayout>
-        <PageWrapper className="max-w-5xl py-8">
+        <PageWrapper className="py-8">
           <PageHeader
             title="Company not found"
             onBack={goBack}
@@ -227,7 +227,7 @@ export default function CompanySectionsPage() {
 
   return (
     <StudentLayout>
-      <PageWrapper className="max-w-5xl py-8">
+      <PageWrapper className="py-8">
         <PageHeader
           onBack={goBack}
           backLoading={backLoading}

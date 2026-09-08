@@ -286,7 +286,7 @@ export default function AdminResourcesPage() {
 
   return (
     <AdminLayout>
-      <PageWrapper className="max-w-5xl">
+      <PageWrapper>
 
         <PageHeader
           title="Resources"

@@ -435,6 +435,41 @@ class TestExtendSessionStub:
         session.refresh_from_db()
         assert abs((session.ends_at - (original_ends_at + timedelta(minutes=30))).total_seconds()) < 5
 
+    def test_successful_extend_logs_an_activity_event(self, admin_client, published_paper):
+        # 2026-08-18: part of the session timeline's "every single action"
+        # requirement — an admin extension affects the exam and belongs in
+        # the audit trail, even though it's server-authored, not
+        # client-reported like every other ActivityLog row.
+        from assessments.models import ActivityLog
+        assignment = self._create_direct(published_paper)
+        session = AssessmentSession.objects.create(
+            assignment=assignment, student_id=STUDENT_USER_ID, set=published_paper.sets.first(),
+            ends_at=timezone.now() + timedelta(hours=1),
+        )
+        admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/sessions/{session.id}/extend/",
+            {"extend_minutes": 15}, format="json",
+        )
+        log = ActivityLog.objects.get(session=session)
+        assert log.event_type == "admin_extended_time"
+        assert log.metadata == {"added_minutes": 15}
+
+    def test_rejected_extend_does_not_log_an_activity_event(self, admin_client, published_paper):
+        # Negative case: a 400/409 rejection must not write a misleading
+        # "the time was extended" event for an extension that never happened.
+        from assessments.models import ActivityLog
+        assignment = self._create_direct(published_paper)
+        session = AssessmentSession.objects.create(
+            assignment=assignment, student_id=STUDENT_USER_ID, set=published_paper.sets.first(),
+            ends_at=timezone.now() + timedelta(hours=1),
+        )
+        resp = admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/sessions/{session.id}/extend/",
+            {"extend_minutes": 0}, format="json",
+        )
+        assert resp.status_code == 400
+        assert not ActivityLog.objects.filter(session=session).exists()
+
 
 # ── Status ───────────────────────────────────────────────────────────────────
 

@@ -9,24 +9,25 @@ logger = logging.getLogger(__name__)
 
 class Command(BaseCommand):
     help = (
-        "Audit every account (admin + student) against the super-admin's institution_id. "
-        "create_default_superadmin only validates the super-admin's own record — this command "
-        "checks everyone else, to catch data drift it cannot see."
+        "Audit every account (super_admin + admin + student) against the IT account's "
+        "institution_id. create_default_it only validates the IT account's own record "
+        "(2026-08-20: IT is now the bootstrapped root, replacing super_admin) — this "
+        "command checks everyone else, to catch data drift it cannot see."
     )
 
     def handle(self, *args, **options):
-        super_admin = User.objects.filter(role="super_admin").order_by("created_at").first()
-        if super_admin is None:
-            raise CommandError("No super-admin account exists — nothing to audit against.")
+        it_user = User.objects.filter(role="it").order_by("created_at").first()
+        if it_user is None:
+            raise CommandError("No IT account exists — nothing to audit against.")
 
-        canonical_id = super_admin.institution_id
+        canonical_id = it_user.institution_id
         if not canonical_id:
             raise CommandError(
-                "Super-admin has no institution_id set — fix that first "
-                "(run create_default_superadmin or check INSTITUTION_ID in .env)."
+                "IT account has no institution_id set — fix that first "
+                "(run create_default_it or check INSTITUTION_ID in .env)."
             )
 
-        suspects = User.objects.exclude(role="super_admin").exclude(institution_id=canonical_id)
+        suspects = User.objects.exclude(role="it").exclude(institution_id=canonical_id)
         count = suspects.count()
 
         if count == 0:

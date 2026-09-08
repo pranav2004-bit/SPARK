@@ -82,7 +82,7 @@ export default function StudentPastResultsPage() {
 
   return (
     <StudentLayout>
-      <PageWrapper className="max-w-3xl">
+      <PageWrapper>
         <PageHeader title="Past Results" subtitle="Every assessment you've completed, with your score and outcome." backHref="/students/assessments" />
 
         {loading ? (

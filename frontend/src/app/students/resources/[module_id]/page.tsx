@@ -87,7 +87,7 @@ export default function StudentModulePage() {
 
   return (
     <StudentLayout>
-      <PageWrapper className="max-w-5xl py-6 sm:py-8">
+      <PageWrapper className="py-6 sm:py-8">
 
         {/* ── Back breadcrumb ──────────────────────────────────────────────────── */}
         <button

@@ -107,7 +107,7 @@ export default function StudentSectionUploadsPage() {
 
   return (
     <StudentLayout>
-      <PageWrapper className="max-w-5xl py-6 sm:py-8">
+      <PageWrapper className="py-6 sm:py-8">
 
         {/* ── Breadcrumb ───────────────────────────────────────────────────────── */}
         <div className="flex items-center gap-1.5 text-sm font-medium mb-5">

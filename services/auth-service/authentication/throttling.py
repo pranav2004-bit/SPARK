@@ -1,7 +1,9 @@
 from rest_framework.throttling import SimpleRateThrottle
 
+from core.throttling_resilience import ResilientThrottleMixin
 
-class LoginAttemptThrottle(SimpleRateThrottle):
+
+class LoginAttemptThrottle(ResilientThrottleMixin, SimpleRateThrottle):
     """
     Per-account login throttle — independent of nginx's per-IP auth_zone.
 

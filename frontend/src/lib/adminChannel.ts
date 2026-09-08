@@ -15,7 +15,11 @@ export type AdminChannelEvent =
   | { type: "ADMIN_UPDATED"; data: { id: string; name: string; is_active: boolean } }
   | { type: "ADMIN_DELETED"; id: string }
   | { type: "ADMIN_PASSWORD_RESET"; id: string }
-  | { type: "PROFILE_UPDATED"; id: string; name: string };
+  | { type: "PROFILE_UPDATED"; id: string; name: string }
+  | { type: "IT_UPDATED"; data: { id: string; name: string; is_active: boolean } }
+  | { type: "IT_DELETED"; id: string }
+  | { type: "IT_PASSWORD_RESET"; id: string }
+  | { type: "DEPARTMENTS_UPDATED" };
 
 /**
  * Fire-and-forget: post an event to every other open tab.

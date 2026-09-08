@@ -15,7 +15,14 @@ from .views import (
     AdminListCreateView,
     AdminDetailView,
     AdminResetDefaultPasswordView,
+    AdminBulkCreateView,
     AdminPasswordResetByIdView,
+    SuperAdminListCreateView,
+    SuperAdminDetailView,
+    SuperAdminResetDefaultPasswordView,
+    SuperAdminBulkCreateView,
+    DepartmentListCreateView,
+    DepartmentDetailView,
     InternalStudentCreateView,
     InternalStudentUpdateView,
     InternalStudentDeleteView,
@@ -38,11 +45,23 @@ urlpatterns = [
     path("admin/<uuid:pk>/reset-password/", AdminPasswordResetView.as_view(), name="admin-reset-password"),
     path("student/change-password/", StudentChangePasswordView.as_view(), name="student-change-password"),
 
-    # Admin management — Super Admin only
+    # Admin management — read: Super Admin + IT; write: IT only
+    path("admins/import/", AdminBulkCreateView.as_view(), name="admin-bulk-create"),
     path("admins/", AdminListCreateView.as_view(), name="admin-list-create"),
     path("admins/<uuid:pk>/", AdminDetailView.as_view(), name="admin-detail"),
     path("admins/<uuid:pk>/reset-default-password/", AdminResetDefaultPasswordView.as_view(), name="admin-reset-default-password"),
     path("admin-password-reset/", AdminPasswordResetByIdView.as_view(), name="admin-password-reset-by-id"),
+
+    # Super admin account management — IT only (2026-08-20; same mechanism as
+    # Admin management above, but no read access for the managed role at all)
+    path("super-admins/import/", SuperAdminBulkCreateView.as_view(), name="super-admin-bulk-create"),
+    path("super-admins/", SuperAdminListCreateView.as_view(), name="super-admin-list-create"),
+    path("super-admins/<uuid:pk>/", SuperAdminDetailView.as_view(), name="super-admin-detail"),
+    path("super-admins/<uuid:pk>/reset-default-password/", SuperAdminResetDefaultPasswordView.as_view(), name="super-admin-reset-default-password"),
+
+    # Department management — read: Admin + Super Admin + IT; write: IT only
+    path("departments/", DepartmentListCreateView.as_view(), name="department-list-create"),
+    path("departments/<uuid:pk>/", DepartmentDetailView.as_view(), name="department-detail"),
 
     # Internal service-to-service endpoints (user-service → auth-service).
     # Only reachable via Docker internal network (http://auth-service:8000).

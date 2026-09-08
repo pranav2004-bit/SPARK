@@ -78,7 +78,7 @@ export default function ContactPage() {
 
   return (
     <StudentLayout>
-      <PageWrapper className="max-w-4xl py-6 sm:py-8">
+      <PageWrapper className="py-6 sm:py-8">
 
         {/* ── Back to Home ───────────────────────────────────────────────────── */}
         <button

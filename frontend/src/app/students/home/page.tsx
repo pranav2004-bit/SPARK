@@ -2,15 +2,27 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, User, GraduationCap, BookOpen, Building2, ClipboardList, Trophy, Lock, Briefcase } from "lucide-react";
+import { ArrowRight, User, GraduationCap, BookOpen, Building2, ClipboardList, Trophy, Lock, Briefcase, PlayCircle, Hourglass } from "lucide-react";
 import { StudentLayout } from "@/components/layout/StudentLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Skeleton, LoadingSpinner } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toast";
 import { useAuthStore } from "@/lib/auth-store";
 import api from "@/lib/api";
-import type { StudentProfile, PaginatedResponse, Company, ApiSuccess, StudentUser } from "@/types";
+import { toTitleCase } from "@/lib/format";
+import type { StudentProfile, PaginatedResponse, Company, ApiSuccess, StudentUser, StudentAssignmentListItem } from "@/types";
 
+// Re-checked periodically (not just on mount) — a SCHEDULED exam can flip
+// to LIVE while a student is sitting on this page, and that's exactly the
+// moment this notification exists to catch. Lighter than the 8s cadence
+// admin live-views use (Task 9.1 convention) since every student's home
+// page polls this independently — no shared cache to protect here.
+const ASSIGNMENT_POLL_INTERVAL_MS = 30000;
+
+function formatDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
 
 // ── Stat card ─────────────────────────────────────────────────────────────────
 function StatCard({
@@ -28,8 +40,8 @@ function StatCard({
     <div
       className="bg-white border border-[var(--color-primary)]/15 rounded-[var(--radius-xl)] p-5 flex items-center gap-4 shadow-[var(--shadow-sm)]"
     >
-      <div className="w-10 h-10 rounded-[var(--radius-lg)] flex items-center justify-center shrink-0 bg-indigo-100">
-        <Icon size={18} className="text-indigo-600" />
+      <div className="w-10 h-10 rounded-[var(--radius-lg)] flex items-center justify-center shrink-0" style={{ background: "var(--color-surface-hover)" }}>
+        <Icon size={18} style={{ color: "var(--color-text-muted)" }} />
       </div>
       <div className="flex-1 min-w-0">
         <p className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wider mb-0.5">
@@ -60,9 +72,34 @@ export default function StudentHomePage() {
   const [profile, setProfile] = useState<StudentProfile | null>(null);
   const [companiesCount, setCompaniesCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
-  const [navigatingTo, setNavigatingTo] = useState<"companies" | "practice" | null>(null);
+  const [navigatingTo, setNavigatingTo] = useState<"companies" | "practice" | "assessments" | null>(null);
 
-  const goTo = (path: string, dest: "companies" | "practice") => {
+  // Exam notification — fetched independently of the profile/companies
+  // Promise.all below (best-effort, never toasts) so a failure here can
+  // never block the rest of the home page from rendering.
+  const [assignments, setAssignments] = useState<StudentAssignmentListItem[]>([]);
+  const fetchAssignments = useCallback(() => {
+    api.get<ApiSuccess<StudentAssignmentListItem[]>>("/assessments/student/assignments/")
+      .then(res => setAssignments(res.data.data))
+      .catch(() => { /* best-effort — see comment above */ });
+  }, []);
+  useEffect(() => {
+    fetchAssignments();
+    const interval = setInterval(fetchAssignments, ASSIGNMENT_POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [fetchAssignments]);
+
+  // LIVE takes priority over SCHEDULED when both exist — an exam the
+  // student can act on right now is more urgent than one still to come,
+  // and showing both at once would clutter a landing page meant to be a
+  // quick glance, not another list to scan.
+  const liveExams = assignments.filter(
+    a => a.status === "LIVE" && a.session_status !== "SUBMITTED" && a.session_status !== "AUTO_SUBMITTED"
+  );
+  const scheduledExams = assignments.filter(a => a.status === "SCHEDULED");
+  const notifyExams = liveExams.length > 0 ? liveExams : scheduledExams;
+
+  const goTo = (path: string, dest: "companies" | "practice" | "assessments") => {
     setNavigatingTo(dest);
     router.push(path);
   };
@@ -90,7 +127,7 @@ export default function StudentHomePage() {
 
   return (
     <StudentLayout>
-      <PageWrapper className="max-w-4xl pt-8 sm:pt-12 pb-4">
+      <PageWrapper className="pt-4 sm:pt-6 pb-4">
 
         {/* ── Hero ──────────────────────────────────────────────────────────── */}
         <div className="mb-8">
@@ -112,12 +149,57 @@ Prepare smart. Show up confident. Get placed.
           )}
         </div>
 
+        {/* ── Exam notification — the moment a student lands here, they see
+            any exam that's live now or coming up. LIVE wins over SCHEDULED
+            when both exist (see notifyExams above). ─────────────────────── */}
+        {notifyExams.length > 0 && (
+          <div className="space-y-3 mb-8">
+            {notifyExams.map(item => {
+              const isLive = item.status === "LIVE";
+              const accent = isLive ? "#DC2626" : "#2563EB";
+              return (
+                <button
+                  key={item.assignment_id}
+                  onClick={() => router.push("/students/assessments")}
+                  className="group cursor-pointer w-full flex items-center gap-4 p-4 rounded-[var(--radius-xl)] text-left transition-all hover:shadow-[var(--shadow-sm)]"
+                  style={{
+                    background: isLive ? "#FEF2F2" : "#EFF6FF",
+                    border: `1.5px solid ${isLive ? "#FECACA" : "#BFDBFE"}`,
+                  }}
+                >
+                  <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0" style={{ background: accent }}>
+                    {isLive
+                      ? <PlayCircle size={18} color="#fff" />
+                      : <Hourglass size={18} color="#fff" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-bold uppercase tracking-wider mb-0.5" style={{ color: accent }}>
+                      {isLive
+                        ? (item.session_status === "IN_PROGRESS" ? "Exam in progress" : "Exam live now")
+                        : "Upcoming exam"}
+                    </p>
+                    <p className="text-sm font-semibold truncate" style={{ color: "var(--color-text)" }}>{item.paper_title}</p>
+                    <p className="text-xs mt-0.5" style={{ color: "var(--color-text-muted)" }}>
+                      {isLive
+                        ? `Closes ${formatDateTime(item.global_expire_time)}`
+                        : item.global_start_time
+                          ? `Starts ${formatDateTime(item.global_start_time)}`
+                          : "Starts when your admin begins the timer"}
+                    </p>
+                  </div>
+                  <ArrowRight size={16} className="shrink-0" style={{ color: accent }} />
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {/* ── Stats row ─────────────────────────────────────────────────────── */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
           <StatCard
             icon={User}
             label="Name"
-            value={profile?.fullname}
+            value={profile?.fullname ? toTitleCase(profile.fullname) : undefined}
             loading={loading}
           />
           <StatCard
@@ -310,11 +392,9 @@ Prepare smart. Show up confident. Get placed.
                 <div className="relative w-full flex justify-center" style={{ height: 52 }}>
                   {/* Left connector — solid orange */}
                   <div className="absolute left-0 right-1/2" style={{ top: 25, height: 1, background: "var(--color-accent)" }} />
-                  {/* Right connector — orange fading to glass (active → locked boundary) */}
-                  <div className="absolute left-1/2 right-0" style={{
-                    top: 25, height: 1,
-                    background: "linear-gradient(90deg, #FF8C00 0%, rgba(255,255,255,0.10) 100%)",
-                  }} />
+                  {/* Right connector — solid orange (Assessments is a real,
+                      active step now, not the locked boundary it used to be) */}
+                  <div className="absolute left-1/2 right-0" style={{ top: 25, height: 1, background: "var(--color-accent)" }} />
 
                   <div
                     className="relative z-10 w-[52px] h-[52px] rounded-full flex items-center justify-center transition-transform duration-300 group-hover:scale-110"
@@ -339,46 +419,46 @@ Prepare smart. Show up confident. Get placed.
                 </div>
               </button>
 
-              {/* ③ Assessments — locked, v2 */}
-              <div className="relative flex flex-col items-center cursor-default" aria-disabled="true">
-                <p className="text-[12px] font-black tracking-[0.18em] mb-3 select-none" style={{ color: "rgba(255,255,255,0.2)" }}>03</p>
+              {/* ③ Assessments */}
+              <button
+                onClick={() => goTo("/students/assessments", "assessments")}
+                disabled={!!navigatingTo}
+                className="group cursor-pointer relative flex flex-col items-center focus-visible:outline-none disabled:cursor-wait transition-opacity duration-200"
+                style={{ opacity: navigatingTo && navigatingTo !== "assessments" ? 0.4 : 1 }}
+              >
+                <p className="text-[12px] font-black tracking-[0.18em] mb-3 select-none" style={{ color: "rgba(255,140,0,0.6)" }}>03</p>
 
                 <div className="relative w-full flex justify-center" style={{ height: 52 }}>
-                  {/* Left connector — glass */}
-                  <div className="absolute left-0 right-1/2" style={{ top: 25, height: 1, background: "rgba(255,255,255,0.10)" }} />
-                  {/* Right connector — dashed glass */}
+                  {/* Left connector — solid orange */}
+                  <div className="absolute left-0 right-1/2" style={{ top: 25, height: 1, background: "var(--color-accent)" }} />
+                  {/* Right connector — orange fading to glass (Compete & rank is still locked, v2) */}
                   <div className="absolute left-1/2 right-0" style={{
                     top: 25, height: 1,
-                    backgroundImage: "repeating-linear-gradient(90deg, rgba(255,255,255,0.16) 0, rgba(255,255,255,0.16) 5px, transparent 5px, transparent 11px)",
-                    backgroundSize: "11px 1px",
+                    background: "linear-gradient(90deg, #FF8C00 0%, rgba(255,255,255,0.10) 100%)",
                   }} />
 
                   <div
-                    className="relative z-10 w-[52px] h-[52px] rounded-full flex items-center justify-center"
+                    className="relative z-10 w-[52px] h-[52px] rounded-full flex items-center justify-center transition-transform duration-300 group-hover:scale-110"
                     style={{
-                      border: "1.5px dashed rgba(255,255,255,0.2)",
-                      background: "rgba(255,255,255,0.05)",
+                      background: "linear-gradient(135deg, #FFAA2C 0%, #FF8C00 100%)",
+                      boxShadow: "0 0 0 3px rgba(255,140,0,0.2), 0 0 30px rgba(255,140,0,0.52)",
                     }}
                   >
-                    <ClipboardList size={20} color="rgba(255,255,255,0.25)" strokeWidth={1.75} />
+                    {navigatingTo === "assessments"
+                      ? <LoadingSpinner size={20} color="#fff" />
+                      : <ClipboardList size={20} color="white" strokeWidth={2} />}
                   </div>
                 </div>
 
                 <div className="text-center px-2 mt-3.5">
-                  <div className="flex items-center justify-center gap-1.5 mb-1.5">
-                    <p className="text-[13px] font-semibold select-none leading-tight" style={{ color: "rgba(255,255,255,0.28)" }}>
-                      Assessments
-                    </p>
-                    <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full" style={{ background: "rgba(255,255,255,0.07)" }}>
-                      <Lock size={7} color="rgba(255,255,255,0.3)" />
-                      <span className="text-[8px] font-bold uppercase tracking-wide select-none" style={{ color: "rgba(255,255,255,0.3)" }}>v2</span>
-                    </span>
-                  </div>
-                  <p className="text-[12px] leading-relaxed select-none" style={{ color: "rgba(255,255,255,0.26)" }}>
+                  <p className="text-[13px] font-semibold leading-tight mb-1.5 select-none group-hover:text-[var(--color-accent)] transition-colors duration-200" style={{ color: "rgba(255,255,255,0.92)" }}>
+                    Assessments
+                  </p>
+                  <p className="text-[12px] leading-relaxed select-none" style={{ color: "rgba(255,255,255,0.38)" }}>
                     Timed mock tests &amp; performance analytics
                   </p>
                 </div>
-              </div>
+              </button>
 
               {/* ④ Compete & rank — locked, v2 */}
               <div className="relative flex flex-col items-center cursor-default" aria-disabled="true">
@@ -490,28 +570,36 @@ Prepare smart. Show up confident. Get placed.
                 : <ArrowRight size={14} className="shrink-0 transition-colors duration-200 group-hover:text-[var(--color-accent)]" style={{ color: "rgba(255,255,255,0.28)" }} />}
             </button>
 
-            {/* Step 03 — locked */}
-            <div
-              className="px-5 py-4 flex items-center gap-4 border-b cursor-default"
-              style={{ borderColor: "rgba(255,255,255,0.07)" }}
-              aria-disabled="true"
+            {/* Step 03 */}
+            <button
+              onClick={() => goTo("/students/assessments", "assessments")}
+              disabled={!!navigatingTo}
+              className="group cursor-pointer w-full px-5 py-4 flex items-center gap-4 text-left border-b transition-all active:brightness-110 disabled:cursor-wait"
+              style={{
+                borderColor: "rgba(255,255,255,0.07)",
+                opacity: navigatingTo && navigatingTo !== "assessments" ? 0.4 : 1,
+              }}
             >
               <div
                 className="w-10 h-10 rounded-full shrink-0 flex items-center justify-center"
-                style={{ border: "1.5px dashed rgba(255,255,255,0.2)", background: "rgba(255,255,255,0.05)" }}
+                style={{
+                  background: "linear-gradient(135deg, #FFAA2C, #FF8C00)",
+                  boxShadow: "0 0 0 3px rgba(255,140,0,0.15), 0 3px 14px rgba(255,140,0,0.35)",
+                }}
               >
-                <ClipboardList size={16} color="rgba(255,255,255,0.25)" strokeWidth={1.75} />
+                {navigatingTo === "assessments"
+                  ? <LoadingSpinner size={16} color="#fff" />
+                  : <ClipboardList size={16} color="white" strokeWidth={2} />}
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-[11px] font-black uppercase tracking-[0.14em] select-none mb-0.5" style={{ color: "rgba(255,255,255,0.2)" }}>Step 03</p>
-                <p className="text-[13px] font-semibold select-none" style={{ color: "rgba(255,255,255,0.28)" }}>Assessments</p>
-                <p className="text-[12px] mt-0.5 select-none line-clamp-2" style={{ color: "rgba(255,255,255,0.26)" }}>Timed mock tests &amp; performance analytics</p>
+                <p className="text-[11px] font-black uppercase tracking-[0.14em] select-none mb-0.5" style={{ color: "rgba(255,140,0,0.7)" }}>Step 03</p>
+                <p className="text-[13px] font-semibold select-none group-hover:text-[var(--color-accent)] transition-colors duration-200" style={{ color: "rgba(255,255,255,0.88)" }}>Assessments</p>
+                <p className="text-[12px] mt-0.5 select-none line-clamp-2" style={{ color: "rgba(255,255,255,0.38)" }}>Timed mock tests &amp; performance analytics</p>
               </div>
-              <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full shrink-0" style={{ background: "rgba(255,255,255,0.07)" }}>
-                <Lock size={7} color="rgba(255,255,255,0.3)" />
-                <span className="text-[8px] font-bold uppercase tracking-wide select-none" style={{ color: "rgba(255,255,255,0.3)" }}>v2</span>
-              </span>
-            </div>
+              {navigatingTo === "assessments"
+                ? <LoadingSpinner size={14} color="rgba(255,255,255,0.7)" />
+                : <ArrowRight size={14} className="shrink-0 transition-colors duration-200 group-hover:text-[var(--color-accent)]" style={{ color: "rgba(255,255,255,0.28)" }} />}
+            </button>
 
             {/* Step 04 — locked */}
             <div className="px-5 py-4 flex items-center gap-4 cursor-default" aria-disabled="true">

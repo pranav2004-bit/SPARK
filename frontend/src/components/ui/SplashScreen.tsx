@@ -125,7 +125,7 @@ export function SplashScreen() {
             }}
           >
             <Image
-              src="/institution-logo.svg"
+              src="/institution-logo.png"
               alt="ANITS"
               width={140}
               height={140}

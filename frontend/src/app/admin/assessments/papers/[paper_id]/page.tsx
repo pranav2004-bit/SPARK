@@ -137,7 +137,7 @@ export default function AdminAssessmentPaperPage() {
 
   return (
     <AdminLayout>
-      <PageWrapper className="max-w-5xl">
+      <PageWrapper>
 
         <PageHeader
           title={paper?.title ?? ""}

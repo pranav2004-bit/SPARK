@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
-  Download, FileText, ShieldAlert, CheckCircle2, XCircle, Clock, ChevronRight, Hourglass, PenLine, Target, RefreshCw, AlertTriangle,
+  Download, FileText, ShieldAlert, CheckCircle2, XCircle, Clock, Hourglass, PenLine, Target, RefreshCw, AlertTriangle, Eye, Info, Loader2, FlaskConical,
 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -18,9 +18,10 @@ import { Skeleton, TableRowSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
-import { DEPARTMENTS } from "@/lib/constants";
+import { useDepartments } from "@/lib/departmentsContext";
 import type {
-  ApiSuccess, PaginatedResponse, AdminResultRow, AdminResultResponsesData, AdminResultLogsData, BatchAssignment,
+  ApiSuccess, AdminResultsPage, AdminResultRow, AdminResultResponsesData, AdminSessionTimelineData, BatchAssignment,
+  AdminTrialResultRow,
 } from "@/types";
 
 function formatDateTime(iso: string | null): string {
@@ -75,7 +76,9 @@ function ExamStatusBadge({ status }: { status: AdminResultRow["exam_status"] }) 
 export default function AdminAssessmentResultsPage() {
   const { assignment_id } = useParams<{ assignment_id: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const toast = useToast();
+  const { departments } = useDepartments();
 
   const [rows, setRows] = useState<AdminResultRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -87,7 +90,16 @@ export default function AdminAssessmentResultsPage() {
   const [rollSearch, setRollSearch] = useState("");
   const [department, setDepartment] = useState("");
   const [examStatus, setExamStatus] = useState("");
-  const [flagged, setFlagged] = useState("");
+  // Deep-linkable from the Analytics page's "View flagged students" link
+  // (?flagged=true) — read once at mount via the lazy useState initializer,
+  // same one-way "seed initial state from the URL" pattern as any other
+  // link-driven filter; the URL itself is never kept in sync afterward
+  // (this page has never round-tripped filters through the URL for any of
+  // its other filters either).
+  const [flagged, setFlagged] = useState(() => (searchParams.get("flagged") === "true" ? "true" : ""));
+  // Same pattern, for the Analytics page's Set Fairness bars (?set=<label>).
+  const [set, setSet] = useState(() => searchParams.get("set") ?? "");
+  const [availableSets, setAvailableSets] = useState<string[]>([]);
   const [passed, setPassed] = useState("");
   // "above"/"between" use pctX as the (exclusive) lower bound,
   // "below"/"between" use pctY as the (inclusive) upper bound.
@@ -100,8 +112,11 @@ export default function AdminAssessmentResultsPage() {
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
 
   const [responsesModal, setResponsesModal] = useState<AdminResultResponsesData | null>(null);
-  const [logsModal, setLogsModal] = useState<AdminResultLogsData | null>(null);
+  const [timelineModal, setTimelineModal] = useState<AdminSessionTimelineData | null>(null);
   const [detailLoading, setDetailLoading] = useState<string | null>(null);
+  const [extendTarget, setExtendTarget] = useState<{ sessionId: string; studentName: string } | null>(null);
+  const [extendMinutes, setExtendMinutes] = useState("15");
+  const [extending, setExtending] = useState(false);
   const [exporting, setExporting] = useState(false);
 
   const buildParams = useCallback(() => {
@@ -111,11 +126,12 @@ export default function AdminAssessmentResultsPage() {
     if (department) params.set("department", department);
     if (examStatus) params.set("exam_status", examStatus);
     if (flagged) params.set("flagged", flagged);
+    if (set) params.set("set", set);
     if (passed) params.set("passed", passed);
     if ((pctMode === "above" || pctMode === "between") && pctX !== "") params.set("min_percentage", pctX);
     if ((pctMode === "below" || pctMode === "between") && pctY !== "") params.set("max_percentage", pctY);
     return params;
-  }, [page, sort, rollSearch, department, examStatus, flagged, passed, pctMode, pctX, pctY]);
+  }, [page, sort, rollSearch, department, examStatus, flagged, set, passed, pctMode, pctX, pctY]);
 
   // silent=true (background poll) skips the full-table skeleton and stays
   // quiet on failure — a transient blip shouldn't flash the table or spam
@@ -124,13 +140,14 @@ export default function AdminAssessmentResultsPage() {
   // behaves exactly as before: skeleton while loading, toast on failure.
   const load = useCallback((silent = false) => {
     if (!silent) setLoading(true);
-    api.get<PaginatedResponse<AdminResultRow>>(
+    api.get<AdminResultsPage>(
       `/assessments/admin/assignments/${assignment_id}/results/?${buildParams()}`
     )
       .then(res => {
         setRows(res.data.results);
         setTotalPages(res.data.total_pages);
         setTotalCount(res.data.count);
+        setAvailableSets(res.data.available_sets ?? []);
         setLastRefreshedAt(new Date());
         setLoadError(false);
       })
@@ -146,7 +163,7 @@ export default function AdminAssessmentResultsPage() {
 
   useEffect(() => load(), [load]);
 
-  useEffect(() => { setPage(1); }, [rollSearch, department, examStatus, flagged, passed, pctMode, pctX, pctY, sort]);
+  useEffect(() => { setPage(1); }, [rollSearch, department, examStatus, flagged, set, passed, pctMode, pctX, pctY, sort]);
 
   // Independent of the (filterable/paginated) results table — this is just
   // the assignment's own stored pass_cutoff_percentage and paper_title,
@@ -159,6 +176,34 @@ export default function AdminAssessmentResultsPage() {
   }, [assignment_id]);
 
   useEffect(() => { loadAssignment(); }, [loadAssignment]);
+
+  // Mock tests tab (added 2026-08-27) — deliberately paper-scoped, not
+  // assignment-scoped: an admin's mock attempts on this paper can predate
+  // this specific assignment (taken from the assign form's Final Review
+  // step) or come from a completely different assignment of the same
+  // paper, so "this assignment's results" isn't the right frame for them.
+  // Loaded lazily (only once the tab is actually opened, and only once the
+  // assignment's own paper id is known) rather than alongside the real
+  // results on every page load.
+  const [resultsMode, setResultsMode] = useState<"real" | "mock">("real");
+  const [mockRows, setMockRows] = useState<AdminTrialResultRow[]>([]);
+  const [loadingMock, setLoadingMock] = useState(false);
+  const [mockLoadError, setMockLoadError] = useState(false);
+
+  const loadMockResults = useCallback(() => {
+    if (!assignment) return;
+    setLoadingMock(true);
+    setMockLoadError(false);
+    api.get<ApiSuccess<AdminTrialResultRow[]>>(`/assessments/admin/papers/${assignment.paper}/trial-results/`)
+      .then(res => setMockRows(res.data.data))
+      .catch(err => { toast.error(getErrorMessage(err)); setMockLoadError(true); })
+      .finally(() => setLoadingMock(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assignment]);
+
+  useEffect(() => {
+    if (resultsMode === "mock" && assignment) loadMockResults();
+  }, [resultsMode, assignment, loadMockResults]);
 
   // Live auto-refresh — only while the assignment is actually LIVE
   // (students still submitting, so the table can genuinely change).
@@ -190,20 +235,41 @@ export default function AdminAssessmentResultsPage() {
     }
   }
 
-  async function openLogs(resultId: string) {
-    setDetailLoading(resultId + ":logs");
+  async function openTimeline(sessionId: string) {
+    setDetailLoading(sessionId + ":timeline");
     try {
-      // page_size=200 (Task 11.1's pagination audit added real pagination
-      // to this endpoint, which was previously unbounded): generous enough
-      // that realistic malpractice-review sessions still see everything in
-      // one page — the modal below notes if a session's log count exceeds
-      // even that.
-      const res = await api.get<ApiSuccess<AdminResultLogsData>>(`/assessments/admin/results/${resultId}/logs/?page_size=200`);
-      setLogsModal(res.data.data);
+      const res = await api.get<ApiSuccess<AdminSessionTimelineData>>(`/assessments/admin/sessions/${sessionId}/timeline/`);
+      setTimelineModal(res.data.data);
     } catch (err) {
       toast.error(getErrorMessage(err));
     } finally {
       setDetailLoading(null);
+    }
+  }
+
+  // The student's client picks this up on its next server-time poll
+  // (every ~20s, ADR 001 — no push channel exists) and both updates its
+  // countdown and shows its own notification then, not instantly.
+  async function handleExtend() {
+    if (!extendTarget) return;
+    const minutes = Number(extendMinutes);
+    if (!Number.isInteger(minutes) || minutes <= 0) {
+      toast.error("Enter a positive whole number of minutes.");
+      return;
+    }
+    setExtending(true);
+    try {
+      await api.patch(
+        `/assessments/admin/assignments/${assignment_id}/sessions/${extendTarget.sessionId}/extend/`,
+        { extend_minutes: minutes },
+      );
+      toast.success(`Extended ${extendTarget.studentName}'s time by ${minutes} minute${minutes === 1 ? "" : "s"}.`);
+      setExtendTarget(null);
+      load(true);
+    } catch (err) {
+      toast.error(getErrorMessage(err));
+    } finally {
+      setExtending(false);
     }
   }
 
@@ -231,12 +297,12 @@ export default function AdminAssessmentResultsPage() {
 
   const isEmpty = !loading && rows.length === 0;
   const hasActiveFilters = !!(
-    rollSearch.trim() || department || examStatus || flagged || passed || pctMode
+    rollSearch.trim() || department || examStatus || flagged || set || passed || pctMode
   );
 
   return (
     <AdminLayout>
-      <PageWrapper className="max-w-6xl">
+      <PageWrapper>
         <PageHeader
           title={assignment ? `${assignment.paper_title} - Results` : "Results"}
           titleSkeleton={!assignment ? <Skeleton className="h-8 w-64" /> : undefined}
@@ -277,6 +343,79 @@ export default function AdminAssessmentResultsPage() {
           }
         />
 
+        {/* Real / Mock toggle (added 2026-08-27) — mock attempts are the
+            admin's own dry runs on this paper, kept entirely separate from
+            real student data everywhere else in this platform; this tab is
+            the one place they're ever surfaced. */}
+        <div className="flex gap-2 mb-5">
+          {(["real", "mock"] as const).map(mode => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setResultsMode(mode)}
+              className="px-3.5 py-1.5 rounded-full text-xs font-semibold cursor-pointer transition-colors"
+              style={resultsMode === mode
+                ? { background: "var(--color-accent)", color: "#fff" }
+                : { background: "var(--color-surface)", color: "var(--color-text-muted)", border: "1px solid var(--color-border)" }
+              }
+            >
+              {mode === "real" ? "Real tests" : "Mock tests"}
+            </button>
+          ))}
+        </div>
+
+        {resultsMode === "mock" ? (
+          <div className="rounded-[var(--radius-xl)] overflow-hidden" style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)" }}>
+            {mockLoadError ? (
+              <EmptyState
+                icon={AlertTriangle}
+                title="Couldn't load mock test attempts"
+                subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
+                action={{ label: "Retry", onClick: loadMockResults }}
+              />
+            ) : loadingMock ? (
+              <table className="w-full text-sm"><tbody>
+                {Array.from({ length: 3 }).map((_, i) => <TableRowSkeleton key={i} cols={6} />)}
+              </tbody></table>
+            ) : mockRows.length === 0 ? (
+              <EmptyState
+                icon={FlaskConical}
+                title="No mock test attempts yet"
+                subtitle="Attempts taken via the assign form's Final Review step or this assignment's Mock Test button will show up here."
+              />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--color-border)" }}>
+                      {["Attempted by", "Set", "Score", "%", "Duration", "When"].map(h => (
+                        <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider whitespace-nowrap"
+                          style={{ color: "var(--color-text-subtle)" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mockRows.map(row => (
+                      <tr key={row.id} style={{ borderBottom: "1px solid var(--color-border)" }}>
+                        <td className="px-4 py-3 whitespace-nowrap" style={{ color: "var(--color-text)" }}>
+                          {row.attempted_by_name || row.attempted_by_email || "—"}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">{row.set_label}</td>
+                        <td className="px-4 py-3 whitespace-nowrap">{row.score}/{row.total_marks}</td>
+                        <td className="px-4 py-3 whitespace-nowrap font-semibold">{row.percentage}%</td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <span className="inline-flex items-center gap-1"><Clock size={11} />{formatDuration(row.duration_seconds)}</span>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">{formatDateTime(row.ended_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        ) : (
+        <>
         {/* Filters — bordered toolbar (same treatment as admin/students) so
             wrapping onto a second line on narrower screens reads as a
             contained, designed group instead of stray floating controls. */}
@@ -298,7 +437,7 @@ export default function AdminAssessmentResultsPage() {
               label="Department"
               value={department}
               onChange={e => setDepartment(e.target.value)}
-              options={[{ value: "", label: "All departments" }, ...DEPARTMENTS.map(d => ({ value: d, label: d }))]}
+              options={[{ value: "", label: "All departments" }, ...departments.map(d => ({ value: d.code, label: d.name || d.code }))]}
             />
           </div>
           <div className="w-full sm:w-48">
@@ -352,6 +491,19 @@ export default function AdminAssessmentResultsPage() {
               ]}
             />
           </div>
+          {availableSets.length > 1 && (
+            <div className="w-full sm:w-44">
+              <Select
+                label="Set"
+                value={set}
+                onChange={e => setSet(e.target.value)}
+                options={[
+                  { value: "", label: "All sets" },
+                  ...availableSets.map(s => ({ value: s, label: s })),
+                ]}
+              />
+            </div>
+          )}
           <div className="w-full sm:w-44">
             <Select
               label="Percentage"
@@ -404,7 +556,7 @@ export default function AdminAssessmentResultsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--color-border)" }}>
-                  {["Student", "Dept", "Set", "Status", "Duration", "Score", "%", "Flagged", ""].map(h => (
+                  {["Student", "Dept", "Set", "Status", "Duration", "Score", "%", "Flagged", "Logs/Tracking", ""].map(h => (
                     <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider whitespace-nowrap"
                       style={{ color: "var(--color-text-subtle)" }}>{h}</th>
                   ))}
@@ -412,7 +564,7 @@ export default function AdminAssessmentResultsPage() {
               </thead>
               <tbody>
                 {loading ? (
-                  Array.from({ length: 5 }).map((_, i) => <TableRowSkeleton key={i} cols={9} />)
+                  Array.from({ length: 5 }).map((_, i) => <TableRowSkeleton key={i} cols={10} />)
                 ) : rows.map(r => (
                   <tr key={r.student_user_id} style={{ borderBottom: "1px solid var(--color-border)" }}>
                     <td className="px-4 py-3 whitespace-nowrap">
@@ -443,17 +595,40 @@ export default function AdminAssessmentResultsPage() {
                       )}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
+                      {r.session_id ? (
+                        <button
+                          onClick={() => openTimeline(r.session_id!)}
+                          disabled={detailLoading === r.session_id + ":timeline"}
+                          className="p-1.5 rounded-[var(--radius-md)] transition-colors disabled:opacity-60 disabled:cursor-wait cursor-pointer"
+                          style={{ color: "var(--color-text-subtle)" }}
+                          onMouseEnter={e => { if (detailLoading !== r.session_id + ":timeline") { e.currentTarget.style.background = "var(--color-surface-hover)"; e.currentTarget.style.color = "var(--color-text)"; } }}
+                          onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--color-text-subtle)"; }}
+                          aria-label={`View ${r.student_name}'s exam activity timeline`}
+                          title="View exam activity timeline"
+                        >
+                          {detailLoading === r.session_id + ":timeline" ? (
+                            <Loader2 size={16} className="animate-spin" />
+                          ) : (
+                            <Eye size={16} />
+                          )}
+                        </button>
+                      ) : (
+                        <span className="text-xs" style={{ color: "var(--color-text-subtle)" }}>—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
                       {r.result_id ? (
-                        <div className="flex items-center gap-1.5">
-                          <Button variant="ghost" size="sm" loading={detailLoading === r.result_id + ":responses"}
-                            onClick={() => openResponses(r.result_id!)}>
-                            Responses
-                          </Button>
-                          <Button variant="ghost" size="sm" loading={detailLoading === r.result_id + ":logs"}
-                            onClick={() => openLogs(r.result_id!)}>
-                            Logs
-                          </Button>
-                        </div>
+                        <Button variant="ghost" size="sm" loading={detailLoading === r.result_id + ":responses"}
+                          onClick={() => openResponses(r.result_id!)}>
+                          Responses
+                        </Button>
+                      ) : r.exam_status === "writing" && r.session_id ? (
+                        <Button
+                          variant="ghost" size="sm" leftIcon={<Clock size={13} />}
+                          onClick={() => { setExtendTarget({ sessionId: r.session_id!, studentName: r.student_name }); setExtendMinutes("15"); }}
+                        >
+                          Extend Time
+                        </Button>
                       ) : (
                         <span className="text-xs" style={{ color: "var(--color-text-subtle)" }}>Not submitted</span>
                       )}
@@ -473,7 +648,7 @@ export default function AdminAssessmentResultsPage() {
                 label: "Clear filters",
                 onClick: () => {
                   setRollSearch(""); setDepartment(""); setExamStatus("");
-                  setFlagged(""); setPassed(""); setPctMode(""); setPctX(""); setPctY("");
+                  setFlagged(""); setSet(""); setPassed(""); setPctMode(""); setPctX(""); setPctY("");
                 },
               }}
             />
@@ -488,6 +663,8 @@ export default function AdminAssessmentResultsPage() {
           </>
           )}
         </div>
+        </>
+        )}
       </PageWrapper>
 
       {/* Responses modal */}
@@ -524,38 +701,66 @@ export default function AdminAssessmentResultsPage() {
         </div>
       </Modal>
 
-      {/* Logs modal */}
-      <Modal isOpen={!!logsModal} onClose={() => setLogsModal(null)} title="Activity Log" maxWidth="md">
+      {/* Activity timeline modal — plain-English, non-technical event log
+          for the "eye icon" Logs/Tracking column. Deliberately not the
+          raw event_type/metadata dump the old Logs button showed: every
+          event here reads as a short sentence anyone can understand. */}
+      <Modal isOpen={!!timelineModal} onClose={() => setTimelineModal(null)} title="Student Activity Timeline" maxWidth="md">
         <div>
-          {logsModal?.malpractice_flag && (
+          <div className="flex items-start gap-2 px-4 py-3 rounded-[var(--radius-lg)] mb-4"
+            style={{ background: "#FFF4E6", border: "1px solid #FDE0B0" }}>
+            <Info size={16} style={{ color: "#B45309", flexShrink: 0, marginTop: 1 }} />
+            <p className="text-xs leading-relaxed" style={{ color: "#92400E" }}>
+              This activity data is automatically and permanently erased {timelineModal?.retention_days ?? 15} days
+              after the exam to save storage — it does not affect the student&apos;s score or result, which are kept permanently.
+            </p>
+          </div>
+
+          {timelineModal?.malpractice_flag && (
             <div className="flex items-start gap-2 px-4 py-3 rounded-[var(--radius-lg)] mb-4"
               style={{ background: "#FEF2F2", border: "1px solid #FECACA" }}>
               <ShieldAlert size={16} style={{ color: "#DC2626", flexShrink: 0, marginTop: 1 }} />
-              <div>
-                <p className="text-sm font-semibold" style={{ color: "#991B1B" }}>Flagged for review</p>
-                <p className="text-xs mt-1" style={{ color: "#991B1B" }}>
-                  Threshold(s) tripped: {logsModal.malpractice_reasons.join(", ")}
-                </p>
-              </div>
+              <p className="text-sm font-semibold" style={{ color: "#991B1B" }}>Flagged for review</p>
             </div>
           )}
+
           <div className="space-y-2 max-h-[50vh] overflow-y-auto">
-            {logsModal?.logs.length === 0 && (
-              <p className="text-sm italic" style={{ color: "var(--color-text-subtle)" }}>No activity events recorded.</p>
-            )}
-            {logsModal?.logs.map((log, i) => (
+            {timelineModal?.events.map((event, i) => (
               <div key={i} className="flex items-center gap-3 px-3 py-2 rounded-[var(--radius-md)]" style={{ background: "var(--color-surface-secondary)" }}>
-                <ChevronRight size={12} style={{ color: "var(--color-text-subtle)" }} />
-                <span className="text-sm font-medium" style={{ color: "var(--color-text)" }}>{log.event_type}</span>
-                <span className="text-xs ml-auto" style={{ color: "var(--color-text-subtle)" }}>{formatDateTime(log.occurred_at)}</span>
+                <span className="flex items-center justify-center rounded-full text-xs font-semibold flex-shrink-0"
+                  style={{ width: 20, height: 20, background: "var(--color-accent-light)", color: "var(--color-accent)" }}>
+                  {i + 1}
+                </span>
+                <span className="text-sm" style={{ color: "var(--color-text)" }}>{event.description}</span>
+                <span className="text-xs ml-auto whitespace-nowrap" style={{ color: "var(--color-text-subtle)" }}>{formatDateTime(event.occurred_at)}</span>
               </div>
             ))}
           </div>
-          {logsModal && logsModal.count > logsModal.logs.length && (
+          {timelineModal?.truncated && (
             <p className="text-xs mt-3 italic" style={{ color: "var(--color-text-subtle)" }}>
-              Showing the first {logsModal.logs.length} of {logsModal.count} events.
+              Showing the first {timelineModal.events.length - (timelineModal.exam_status === "writing" ? 1 : 2)} of {timelineModal.total_event_count} recorded events.
             </p>
           )}
+        </div>
+      </Modal>
+
+      {/* Extend-time modal — the student's own client picks this up on its
+          next server-time poll (every ~20s), not instantly; see the
+          hint text below. */}
+      <Modal isOpen={!!extendTarget} onClose={() => setExtendTarget(null)} title="Extend exam time" maxWidth="sm">
+        <p className="text-sm mb-4 leading-relaxed" style={{ color: "var(--color-text-muted)" }}>
+          Give <strong>{extendTarget?.studentName}</strong> more time on this exam. Their countdown
+          updates and they get a notification within about 20 seconds — not instantly.
+        </p>
+        <Input
+          label="Extend by (minutes)"
+          type="number" min={1} max={1440}
+          value={extendMinutes}
+          onChange={e => setExtendMinutes(e.target.value)}
+        />
+        <div className="flex justify-end gap-3 mt-5">
+          <Button variant="secondary" onClick={() => setExtendTarget(null)}>Cancel</Button>
+          <Button variant="primary" loading={extending} onClick={handleExtend}>Extend</Button>
         </div>
       </Modal>
     </AdminLayout>

@@ -1,18 +1,6 @@
-import type { Department } from "@/types";
-
-export const DEPARTMENTS: Department[] = [
-  "CSD",
-  "CSM",
-  "CSE",
-  "CSC",
-  "ECE",
-  "IT",
-  "EEE",
-  "MECH",
-  "CIVIL",
-  "CHEM",
-  "BIOTECHNOLOGY",
-];
+// DEPARTMENTS used to live here as a hardcoded list. It's backend-managed
+// now (2026-08-20, IT's Departments module) — use useDepartments() from
+// @/lib/departmentsContext instead.
 
 export const UPLOAD_TYPE_LABELS: Record<string, string> = {
   pdf: "PDF",
@@ -99,4 +87,11 @@ export const SUPER_ADMIN_LOGIN_CONFIG = {
   cookieRole: "super_admin" as const,
   redirectTo: "/super-admin/overview",
   extraBody: { role: "super_admin" },
+} as const;
+
+export const IT_LOGIN_CONFIG = {
+  apiEndpoint: "/auth/login/",
+  cookieRole: "it" as const,
+  redirectTo: "/it/welcome",
+  extraBody: { role: "it" },
 } as const;

@@ -26,7 +26,6 @@ def dashboard_setup(db):
     a session at all.
 
     completion_rate = 3/5 * 100 = 60.0
-    average_score_percentage = (100 + 0 + 50) / 3 = 50.0
     malpractice_incidents = 1
     on_time (SUBMITTED) = 2, auto_submitted = 1, on_time_percentage = 2/3*100 = 66.67
     student_count_in_progress = 1
@@ -98,8 +97,15 @@ class TestDashboard:
         assert data["student_count_completed"] == 3
         assert data["student_count_in_progress"] == 1
         assert data["completion_rate_percentage"] == 60.0
-        assert data["average_score_percentage"] == 50.0
+        assert "average_score_percentage" not in data  # removed 2026-08-18 — Analytics' job, not Dashboard's
         assert data["malpractice_incidents"] == 1
+
+        # LIVE with global_expire_time 3 hours out — real elapsed time
+        # during the test run means this won't be exactly 10800s, but
+        # it must be a real, positive, roughly-3-hours number.
+        assert data["time_remaining_seconds"] is not None
+        assert 10700 <= data["time_remaining_seconds"] <= 10800
+        assert data["exam_duration_minutes"] == 60
 
         sb = data["submission_breakdown"]
         assert sb["on_time"] == 2
@@ -107,6 +113,25 @@ class TestDashboard:
         assert sb["on_time_percentage"] == 66.67
 
         assert "metric_definitions" in data
+
+    def test_time_remaining_is_null_once_closed(self, admin_client, dashboard_setup):
+        from assessments.models import ASSIGNMENT_STATUS_CLOSED
+        assignment = dashboard_setup["assignment"]
+        BatchAssignment.objects.filter(pk=assignment.pk).update(status=ASSIGNMENT_STATUS_CLOSED)
+
+        resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/dashboard/")
+        assert resp.json()["data"]["time_remaining_seconds"] is None
+
+    def test_time_remaining_never_negative_past_the_deadline(self, admin_client, dashboard_setup):
+        # A LIVE assignment whose global_expire_time has already passed
+        # (the sweep hasn't closed it yet — a real, if narrow, window) must
+        # clamp to 0, not go negative.
+        assignment = dashboard_setup["assignment"]
+        BatchAssignment.objects.filter(pk=assignment.pk).update(
+            global_expire_time=timezone.now() - timedelta(minutes=5),
+        )
+        resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/dashboard/")
+        assert resp.json()["data"]["time_remaining_seconds"] == 0
 
     def test_cache_hit_avoids_recomputation(self, admin_client, dashboard_setup):
         assignment = dashboard_setup["assignment"]
@@ -156,8 +181,10 @@ class TestDashboard:
         data = resp.json()["data"]
         assert data["student_count_total"] == 0
         assert data["completion_rate_percentage"] == 0.0
-        assert data["average_score_percentage"] == 0.0
         assert data["submission_breakdown"]["on_time_percentage"] == 0.0
+        # Still LIVE with a real global_expire_time — time_remaining must
+        # be populated even with zero students allocated so far.
+        assert data["time_remaining_seconds"] is not None
 
 
 class TestDashboardExport:
@@ -167,9 +194,10 @@ class TestDashboardExport:
         assert resp.status_code == 200
         content = resp.content.decode("utf-8")
         assert content.startswith("﻿")
-        for section in ["Assessment Dashboard", "Submission Breakdown"]:
+        for section in ["Assessment Dashboard", "Submission Breakdown", "Time Remaining"]:
             assert section in content
         assert "60.0" in content  # completion rate, sanity check real numbers made it in
+        assert "Average Score" not in content  # removed 2026-08-18 — Analytics' job, not Dashboard's
 
     def test_cross_institution_404(self, admin_b_client, dashboard_setup):
         resp = admin_b_client.get(f"/api/assessments/admin/assignments/{dashboard_setup['assignment'].id}/dashboard/export/")

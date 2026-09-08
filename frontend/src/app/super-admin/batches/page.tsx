@@ -1,52 +1,42 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Layers, ChevronDown } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { LayoutDashboard, Users, ChevronRight } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { CardSkeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
 import api, { getErrorMessage } from "@/lib/api";
-import { DEPARTMENTS } from "@/lib/constants";
 import type { ApiSuccess } from "@/types";
 
-// ── Types ──────────────────────────────────────────────────────────────────────
+// Card-grid layout (2026-08-19) — matches the Batches interface Admin and IT
+// already use (admin/batch/page.tsx, it/batch/page.tsx), for a consistent
+// look across every read-only or full-CRUD Batches view in the app. This
+// replaced an older table layout whose Department/Assigned Admin columns
+// never had real data behind them (Batch has no such fields — department
+// lives on Student) and whose department filter was consequently dead code.
+// "View students" routes into super-admin/batches/[batch_id] — a batch's
+// roster stays part of the read-only Batches module now that the standalone
+// Students module was removed from Super Admin (2026-08-19), same reasoning
+// as Admin.
 
 interface BatchRecord {
   id: string;
   batch_name: string;
-  department: string;
   student_count: number;
-  assigned_admin_name?: string;
   created_at: string;
 }
 
 const PAGE_SIZE = 50;
 
-// ── Skeleton ───────────────────────────────────────────────────────────────────
-
-function TableSkeleton() {
-  return (
-    <div className="animate-pulse space-y-3">
-      {Array.from({ length: 6 }).map((_, i) => (
-        <div
-          key={i}
-          className="h-14 rounded-xl"
-          style={{ background: "var(--color-surface-secondary)" }}
-        />
-      ))}
-    </div>
-  );
-}
-
-// ── Page ───────────────────────────────────────────────────────────────────────
-
 export default function SuperAdminBatchesPage() {
+  const router = useRouter();
   const [allBatches, setAllBatches] = useState<BatchRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [page, setPage] = useState(1);
-  const [department, setDepartment] = useState("");
 
   const fetchBatches = useCallback(async () => {
     setLoading(true);
@@ -63,22 +53,9 @@ export default function SuperAdminBatchesPage() {
 
   useEffect(() => { fetchBatches(); }, [fetchBatches]);
 
-  const filtered = department
-    ? allBatches.filter((b) => b.department === department)
-    : allBatches;
-
-  const totalCount = filtered.length;
+  const totalCount = allBatches.length;
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
-  const batches = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-
-  function handleDeptChange(e: React.ChangeEvent<HTMLSelectElement>) {
-    setDepartment(e.target.value);
-    setPage(1);
-  }
-
-  function handlePageChange(p: number) {
-    setPage(p);
-  }
+  const batches = allBatches.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   return (
     <PageWrapper>
@@ -87,124 +64,88 @@ export default function SuperAdminBatchesPage() {
         subtitle={`${totalCount.toLocaleString()} ${totalCount === 1 ? "batch" : "batches"} · Read only`}
       />
 
-      {/* Filter toolbar */}
-      <div
-        className="flex flex-wrap items-center gap-3 rounded-xl px-4 py-3 mb-5"
-        style={{ background: "#fff", border: "1px solid var(--color-border)", boxShadow: "var(--shadow-sm)" }}
-      >
-        <div className="relative">
-          <select
-            value={department}
-            onChange={handleDeptChange}
-            className="h-9 pl-3 pr-8 text-sm rounded-[var(--radius-md)] border bg-white appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
-            style={{ borderColor: "var(--color-border)", color: "var(--color-text)", minWidth: 180 }}
-          >
-            <option value="">All departments</option>
-            {DEPARTMENTS.map((d) => (
-              <option key={d} value={d}>{d}</option>
-            ))}
-          </select>
-          <ChevronDown size={14} className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--color-text-muted)" }} />
-        </div>
-
-        {department && (
-          <button
-            onClick={() => { setDepartment(""); setPage(1); }}
-            className="text-xs font-medium px-3 py-1.5 rounded-lg transition-colors"
-            style={{ color: "var(--color-text-muted)", background: "var(--color-surface-secondary)", border: "1px solid var(--color-border)" }}
-          >
-            Clear filter
-          </button>
-        )}
-      </div>
-
-      {/* Error */}
-      {error && !loading && (
-        <div
-          className="rounded-2xl p-5 flex items-center justify-between mb-5"
-          style={{ background: "var(--color-danger-bg)", border: "1px solid var(--color-danger)20" }}
-        >
-          <p className="text-sm" style={{ color: "var(--color-danger)" }}>{error}</p>
-          <button
-            onClick={fetchBatches}
-            className="text-sm font-semibold px-4 py-2 rounded-lg"
-            style={{ background: "var(--color-danger)", color: "#fff" }}
-          >
-            Retry
-          </button>
-        </div>
-      )}
-
-      {/* Table */}
-      {loading ? (
-        <TableSkeleton />
-      ) : batches.length === 0 && !error ? (
+      {error && !loading ? (
         <EmptyState
-          icon={Layers}
-          title="No Batches Found"
-          subtitle={department ? `No batches in the ${department} department.` : "No batches have been created yet."}
+          icon={LayoutDashboard}
+          title="Couldn't load batches"
+          subtitle={error}
+          action={{ label: "Retry", onClick: fetchBatches }}
+        />
+      ) : loading ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <CardSkeleton key={i} />
+          ))}
+        </div>
+      ) : batches.length === 0 ? (
+        <EmptyState
+          icon={LayoutDashboard}
+          title="No Batches Yet"
+          subtitle="No batches have been created yet."
         />
       ) : (
-        <div
-          className="rounded-2xl overflow-hidden"
-          style={{ background: "#fff", border: "1px solid var(--color-border)", boxShadow: "var(--shadow-sm)" }}
-        >
-          <table className="w-full">
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--color-border)", background: "var(--color-surface-secondary)" }}>
-                {["Batch Name", "Department", "Students", "Assigned Admin"].map((h) => (
-                  <th
-                    key={h}
-                    className="px-5 py-3 text-left text-xs font-semibold tracking-wide"
-                    style={{ color: "var(--color-text-muted)" }}
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {batches.map((batch, idx) => (
-                <tr
-                  key={batch.id}
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+            {batches.map((batch) => (
+              <div
+                key={batch.id}
+                onClick={() => router.push(`/super-admin/batches/${batch.id}`)}
+                className="bg-white border border-[var(--color-border)] rounded-xl cursor-pointer hover:shadow-[var(--shadow-md)] hover:border-[var(--color-border-strong)] transition-all duration-200 overflow-hidden"
+              >
+                {/* Card body */}
+                <div className="p-5">
+                  <div className="flex items-start gap-3 min-w-0">
+                    <div
+                      className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0"
+                      style={{ background: "var(--color-accent-light)" }}
+                    >
+                      <LayoutDashboard size={18} style={{ color: "var(--color-accent)" }} />
+                    </div>
+                    <div className="min-w-0 pt-0.5">
+                      <h3 className="font-semibold text-[var(--color-text)] truncate leading-snug">
+                        {batch.batch_name}
+                      </h3>
+                      <p className="text-sm text-[var(--color-text-muted)] mt-1 flex items-center gap-1.5">
+                        <Users size={12} style={{ color: "var(--color-text-subtle)" }} />
+                        {batch.student_count ?? 0}{" "}
+                        {(batch.student_count ?? 0) === 1 ? "student" : "students"}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Card footer — navigation affordance */}
+                <div
+                  className="px-5 py-2.5 flex items-center justify-between"
                   style={{
-                    borderBottom: idx < batches.length - 1 ? "1px solid var(--color-border)" : "none",
+                    borderTop: "1px solid var(--color-border)",
+                    background: "var(--color-primary-light)",
                   }}
                 >
-                  <td className="px-5 py-4">
-                    <span className="text-sm font-semibold" style={{ color: "var(--color-text)" }}>
-                      {batch.batch_name}
-                    </span>
-                  </td>
-                  <td className="px-5 py-4">
-                    <span
-                      className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
-                      style={{
-                        background: "var(--color-primary-light)",
-                        color: "var(--color-primary)",
-                      }}
-                    >
-                      {batch.department || "—"}
-                    </span>
-                  </td>
-                  <td className="px-5 py-4 text-sm" style={{ color: "var(--color-text-muted)" }}>
-                    {(batch.student_count ?? 0).toLocaleString()}
-                  </td>
-                  <td className="px-5 py-4 text-sm" style={{ color: "var(--color-text-muted)" }}>
-                    {batch.assigned_admin_name ?? "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  <span
+                    className="text-xs font-medium"
+                    style={{ color: "var(--color-text-muted)" }}
+                  >
+                    View students
+                  </span>
+                  <ChevronRight size={13} style={{ color: "var(--color-text-muted)" }} />
+                </div>
+              </div>
+            ))}
+          </div>
 
-          <Pagination
-            page={page}
-            totalPages={totalPages}
-            onPageChange={handlePageChange}
-            totalCount={totalCount}
-          />
-        </div>
+          {totalPages > 1 && (
+            <div className="mt-5">
+              <Pagination
+                page={page}
+                totalPages={totalPages}
+                onPageChange={setPage}
+                totalCount={totalCount}
+                pageSize={PAGE_SIZE}
+              />
+            </div>
+          )}
+        </>
       )}
     </PageWrapper>
   );

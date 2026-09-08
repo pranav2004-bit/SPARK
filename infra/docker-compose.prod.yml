@@ -186,6 +186,33 @@ services:
     networks:
       - spark-internal
 
+  # cleanup_outbox's own docstring says "Safe to schedule as a nightly cron
+  # job" — it was fully built and tested but nothing actually scheduled it
+  # (found during a production-readiness audit, 2026-09-08), so DONE outbox
+  # events would accumulate in the table forever. Same image as
+  # outbox-worker (matches infra/docker-compose.dev.yml's outbox-cleanup) —
+  # deliberately its own container, not folded into run_outbox_worker's
+  # loop, since that loop's whole design is fast 30s event-delivery polling,
+  # a different concern from once-a-day housekeeping. Runs once immediately
+  # on start (catches a bad deploy right away) then once every 24h. Only
+  # depends on pgbouncer + user-service — unlike outbox-worker it never
+  # calls auth-service, so it has no dependency on it.
+  outbox-cleanup:
+    build:
+      context: ../services/user-service
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/user-service:${GIT_SHA:-latest}
+    restart: always
+    env_file: ../services/user-service/.env
+    entrypoint: ["sh", "-c", "while true; do python manage.py cleanup_outbox; sleep 86400; done"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
   resource-service:
     build:
       context: ../services/resource-service

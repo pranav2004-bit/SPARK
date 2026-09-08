@@ -1,12 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { Eye, EyeOff, BookOpen, Building2, Zap, UserCircle, ArrowLeft } from "lucide-react";
 import Image from "next/image";
 import { useAuthStore } from "@/lib/auth-store";
 import { setAuthCookies } from "@/lib/cookies";
+import { useAuth } from "@/hooks/useAuth";
+import { PORTAL_HOME } from "@/lib/portalRouting";
 import api, { getErrorMessage } from "@/lib/api";
 import { consumeScrollRedirect } from "@/lib/scrollRedirect";
 import { ScrollingUpdates } from "@/components/ui/ScrollingUpdates";
@@ -58,6 +60,16 @@ export default function StudentLoginPage() {
   const [serverError, setServerError] = useState("");
   const [loading, setLoading] = useState(false);
   const [backLoading, setBackLoading] = useState(false);
+
+  // Already authenticated in THIS tab (added 2026-08-27) — see
+  // PortalLoginForm.tsx's identical check for the full rationale (this
+  // page doesn't use that shared component, so it needs its own copy).
+  const { user, isAuthenticated, hasHydrated } = useAuth();
+  useEffect(() => {
+    if (hasHydrated && isAuthenticated && user) {
+      router.replace(PORTAL_HOME[user.role] ?? "/");
+    }
+  }, [hasHydrated, isAuthenticated, user, router]);
 
   const {
     register,
@@ -129,7 +141,7 @@ export default function StudentLoginPage() {
           {/* Logos — just above heading */}
           <div className="inline-flex items-center gap-3 mb-8 self-start">
             <Image
-              src="/institution-logo.svg"
+              src="/institution-logo.png"
               alt="Institution"
               width={44}
               height={44}
@@ -195,7 +207,7 @@ export default function StudentLoginPage() {
         {/* Mobile logos — above card, desktop hidden */}
         <div className="lg:hidden flex items-center gap-3 mb-7">
           <Image
-            src="/institution-logo.svg"
+            src="/institution-logo.png"
             alt="Institution"
             width={44}
             height={44}

@@ -7,6 +7,7 @@ class UserRole(models.TextChoices):
     ADMIN = "admin", "Admin"
     STUDENT = "student", "Student"
     SUPER_ADMIN = "super_admin", "Super Admin"
+    IT = "it", "IT"
 
 
 class UserManager(BaseUserManager):
@@ -32,7 +33,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     # student_id is used for student login; null for admin/super_admin
     student_id = models.CharField(max_length=100, unique=True, null=True, blank=True, db_index=True)
     role = models.CharField(max_length=15, choices=UserRole.choices, default=UserRole.STUDENT)
-    # institution_id ties every account (super_admin, admin, student) to their college
+    # institution_id ties every account (it, super_admin, admin, student) to their
+    # college. Not self-assigned — always stamped server-side from the creating
+    # user's own institution_id (never accepted from a request body), tracing
+    # back to whichever single account was bootstrapped from INSTITUTION_ID in
+    # .env (the IT account, as of 2026-08-20; previously super_admin).
     institution_id = models.UUIDField(db_index=True)
     # Display name — used for admin accounts; empty for students/super_admin
     name = models.CharField(max_length=150, blank=True, default="")
@@ -64,3 +69,29 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return f"{self.email} ({self.role})"
+
+
+class Department(models.Model):
+    """Institution-scoped department master data, managed by IT (2026-08-20).
+    Other services (Student.department, BatchAssignment.departments) keep
+    storing/matching this as free text — there is no cross-service FK, same
+    isolation convention already used for Batch. `code` is immutable after
+    creation (enforced at the serializer layer, not here) since it's the
+    string those other services match against."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code = models.CharField(max_length=20)
+    name = models.CharField(max_length=150, blank=True, default="")
+    institution_id = models.UUIDField(db_index=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "departments"
+        ordering = ["code"]
+        indexes = [
+            models.Index(fields=["institution_id"], name="idx_departments_institution_id"),
+        ]
+
+    def __str__(self):
+        return self.code

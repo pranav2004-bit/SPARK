@@ -15,7 +15,7 @@ import {
   Users,
 } from "lucide-react";
 import api, { getErrorMessage } from "@/lib/api";
-import { DEPARTMENTS } from "@/lib/constants";
+import { useDepartments } from "@/lib/departmentsContext";
 import type { Batch } from "@/types";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -209,6 +209,8 @@ export function BulkImportModal({
   onImportComplete,
   batches,
 }: BulkImportModalProps) {
+  const { activeDepartments } = useDepartments();
+
   // Step state
   const [step, setStep] = useState<ModalStep>("configure");
 
@@ -629,8 +631,8 @@ export function BulkImportModal({
                       }}
                     >
                       <option value="" disabled>Select department</option>
-                      {DEPARTMENTS.map((d) => (
-                        <option key={d} value={d}>{d}</option>
+                      {activeDepartments.map((d) => (
+                        <option key={d.id} value={d.code}>{d.name || d.code}</option>
                       ))}
                     </select>
                     <ChevronDown

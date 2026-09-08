@@ -151,7 +151,7 @@ export default function StudentPracticeModulePage() {
 
   return (
     <StudentLayout>
-      <PageWrapper className="max-w-5xl py-6 sm:py-8">
+      <PageWrapper className="py-6 sm:py-8">
 
         {/* ── Breadcrumb ──────────────────────────────────────────────────────── */}
         {/* Full ancestor chain built from API — no "Practice" tab label,         */}

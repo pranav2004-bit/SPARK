@@ -14,7 +14,8 @@ import api from "./api";
  */
 
 export type ActivityEventType =
-  | "tab_switch" | "window_blur" | "fullscreen_exit" | "copy" | "paste" | "contextmenu";
+  | "tab_switch" | "window_blur" | "fullscreen_exit" | "copy" | "paste" | "contextmenu"
+  | "screenshot_attempt" | "connection_lost" | "question_time_spent";
 
 interface BufferedEvent {
   event_type: ActivityEventType;
@@ -31,8 +32,15 @@ export class ActivityLogBatcher {
 
   constructor(private sessionId: string) {}
 
-  record(eventType: ActivityEventType, metadata?: Record<string, unknown>): void {
-    this.buffer.push({ event_type: eventType, occurred_at: new Date().toISOString(), metadata });
+  /**
+   * occurredAt: defaults to "now" (every existing caller). connection_lost
+   * is the one exception — it can only ever be reported once connectivity
+   * returns (there's no network to send it over at the actual moment of
+   * loss), so that caller passes the real detected loss time here instead
+   * of letting it default to "whenever we finally got back online."
+   */
+  record(eventType: ActivityEventType, metadata?: Record<string, unknown>, occurredAt?: Date): void {
+    this.buffer.push({ event_type: eventType, occurred_at: (occurredAt ?? new Date()).toISOString(), metadata });
     if (this.buffer.length >= FORCE_FLUSH_AT) {
       void this.flush();
     }

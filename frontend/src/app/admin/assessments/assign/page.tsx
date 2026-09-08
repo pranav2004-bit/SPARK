@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { PlayCircle, StopCircle, RefreshCcw, Users, Clock, CheckCircle2, FileText, TrendingUp, LayoutDashboard, ChevronDown } from "lucide-react";
+import { PlayCircle, StopCircle, RefreshCcw, Users, Clock, CheckCircle2, FileText, TrendingUp, LayoutDashboard, ChevronDown, AlertTriangle, FlaskConical } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -14,10 +14,20 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toast";
 import { useAuth } from "@/hooks/useAuth";
 import api, { getErrorMessage } from "@/lib/api";
-import { DEPARTMENTS } from "@/lib/constants";
+import { useDepartments } from "@/lib/departmentsContext";
 import type {
-  QuestionPaper, Batch, BatchAssignment, BatchAssignmentStatusPoll, ApiSuccess, PaginatedResponse,
+  QuestionPaper, QuestionSet, Batch, BatchAssignment, BatchAssignmentStatusPoll, ApiSuccess, PaginatedResponse,
 } from "@/types";
+
+interface PaperReviewDetail {
+  paper: QuestionPaper;
+  sets: QuestionSet[];
+}
+
+function formatReviewDateTime(value: string): string {
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? value : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
 
 const STATUS_STYLES: Record<string, { bg: string; color: string; label: string }> = {
   SCHEDULED: { bg: "#FFF4E6", color: "#E8820C", label: "Scheduled" },
@@ -43,6 +53,7 @@ export default function AdminAssessmentAssignPage() {
   const searchParams = useSearchParams();
   const toast = useToast();
   const { user, isSuperAdmin } = useAuth();
+  const { activeDepartments } = useDepartments();
   // This page is admin-only (route-guarded elsewhere), so `user` is always
   // AdminUser here in practice — StudentUser (the only AuthUser variant
   // without `.id`) narrowed out via the "id" in user check for TypeScript.
@@ -75,6 +86,99 @@ export default function AdminAssessmentAssignPage() {
   const [showResult, setShowResult] = useState(true);
   const [creating, setCreating] = useState(false);
   const [formError, setFormError] = useState("");
+
+  // Final Review — the selected paper's structure (sets/sections/questions/
+  // marks) fetched fresh whenever paperId changes, so the checklist below
+  // never shows stale data from a previously-selected paper.
+  const [paperDetail, setPaperDetail] = useState<PaperReviewDetail | null>(null);
+  const [loadingPaperDetail, setLoadingPaperDetail] = useState(false);
+  const [paperDetailError, setPaperDetailError] = useState(false);
+  // Which of the 10 review items the admin has manually ticked. Reset to {}
+  // by the effect below whenever ANY reviewed field changes, so a stale
+  // confirmation can never survive a post-review edit.
+  const [reviewed, setReviewed] = useState<Record<string, boolean>>({});
+  // Mock-test gate (added 2026-08-27) — once every review item is ticked,
+  // the admin must explicitly say Yes/No to a mock test before "Create
+  // assignment" itself appears. "Yes" opens the real exam-taking interface
+  // in a new tab (session started via AdminTrialStartView) without
+  // blocking creation — the admin can take as many mock attempts as they
+  // want, before or after actually creating the assignment.
+  const [mockChoice, setMockChoice] = useState<"yes" | "no" | null>(null);
+  const [startingMockTrial, setStartingMockTrial] = useState(false);
+  const [startingMockFor, setStartingMockFor] = useState<string | null>(null);
+
+  const loadPaperDetail = useCallback(() => {
+    if (!paperId) { setPaperDetail(null); setPaperDetailError(false); return; }
+    setLoadingPaperDetail(true);
+    setPaperDetailError(false);
+    api.get<ApiSuccess<PaperReviewDetail>>(`/assessments/admin/papers/${paperId}/`)
+      .then(res => setPaperDetail(res.data.data))
+      .catch(() => { setPaperDetail(null); setPaperDetailError(true); })
+      .finally(() => setLoadingPaperDetail(false));
+  }, [paperId]);
+
+  useEffect(loadPaperDetail, [loadPaperDetail]);
+
+  useEffect(() => {
+    setReviewed({});
+    setMockChoice(null);
+  }, [paperId, batchId, selectedDepartments, duration, startTime, expireTime, passCutoff, showResult, paperDetail]);
+
+  // Shared by the Final Review "Yes" prompt and each assignment card's
+  // "Mock Test" toolbar button — starts (or resumes) a trial session on
+  // the given paper and opens the real exam-taking UI in a new tab, so the
+  // admin's in-progress form/page state here is never disturbed.
+  async function startMockTrial(targetPaperId: string, durationMinutes: number) {
+    try {
+      const res = await api.post<ApiSuccess<{ session_id: string }>>(
+        `/assessments/admin/papers/${targetPaperId}/trial/start/`,
+        { duration_minutes: durationMinutes },
+      );
+      window.open(`/admin/assessments/trial/${res.data.data.session_id}`, "_blank");
+    } catch (err) {
+      toast.error(getErrorMessage(err));
+    }
+  }
+
+  function handleTakeMockFromReview() {
+    setMockChoice("yes");
+    setStartingMockTrial(true);
+    startMockTrial(paperId, Number(duration) || 30).finally(() => setStartingMockTrial(false));
+  }
+
+  function handleMockTestForAssignment(a: BatchAssignment) {
+    setStartingMockFor(a.id);
+    startMockTrial(a.paper, a.exam_duration_minutes).finally(() => setStartingMockFor(null));
+  }
+
+  // "Students attending this assessment" — deliberately requires BOTH a
+  // batch AND at least one department selected before showing a number
+  // (leaving departments empty means "every department," but the admin
+  // asked for this preview to only populate once both choices are
+  // explicit, not fall back to the batch's whole headcount). page_size=1
+  // keeps the request cheap — only `count` is used, never `results`.
+  const [eligibleCount, setEligibleCount] = useState<number | null>(null);
+  const [loadingEligibleCount, setLoadingEligibleCount] = useState(false);
+  const [eligibleCountError, setEligibleCountError] = useState(false);
+
+  useEffect(() => {
+    if (!batchId || selectedDepartments.length === 0) {
+      setEligibleCount(null);
+      setLoadingEligibleCount(false);
+      setEligibleCountError(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadingEligibleCount(true);
+    setEligibleCountError(false);
+    api.get<PaginatedResponse<unknown>>(
+      `/users/batches/${batchId}/students/?departments=${encodeURIComponent(selectedDepartments.join(","))}&page_size=1`
+    )
+      .then(res => { if (!cancelled) setEligibleCount(res.data.count); })
+      .catch(() => { if (!cancelled) { setEligibleCount(null); setEligibleCountError(true); } })
+      .finally(() => { if (!cancelled) setLoadingEligibleCount(false); });
+    return () => { cancelled = true; };
+  }, [batchId, selectedDepartments]);
 
   const [confirmStart, setConfirmStart] = useState<BatchAssignment | null>(null);
   const [confirmClose, setConfirmClose] = useState<BatchAssignment | null>(null);
@@ -248,9 +352,74 @@ export default function AdminAssessmentAssignPage() {
     );
   }
 
+  // The 10-item Final Review checklist — order follows the data's own
+  // hierarchy (sets → sections → questions → marks), then who it's for
+  // (batch → department), then timing (duration → global timer), then
+  // outcome (cutoff → results visibility). Only populated once the
+  // selected paper's structure has actually loaded.
+  const reviewSets = paperDetail?.sets ?? [];
+  const hasSets = reviewSets.length > 0;
+  const hasEmptySections = reviewSets.some(s => s.section_count === 0);
+  const hasEmptyQuestions = reviewSets.some(s => s.question_count === 0);
+  // Surfaced instead of a silent "0"/"—" — a structurally incomplete paper
+  // would still fail the backend's own readiness check at submit time, but
+  // this catches it during review instead of after a failed submit.
+  const structureIncomplete = !!paperDetail && (!hasSets || hasEmptySections || hasEmptyQuestions);
+
+  const reviewItems: { id: string; label: string; value: string; warn?: boolean }[] = paperDetail ? [
+    {
+      id: "sets", label: "Total number of sets",
+      value: hasSets ? `${reviewSets.length} set${reviewSets.length === 1 ? "" : "s"}` : "No sets found on this paper.",
+      warn: !hasSets,
+    },
+    {
+      id: "sections", label: "Sections per set",
+      value: hasSets ? reviewSets.map(s => `${s.label}: ${s.section_count} section${s.section_count === 1 ? "" : "s"}`).join("  ·  ") : "—",
+      warn: hasSets && hasEmptySections,
+    },
+    {
+      id: "questions", label: "Questions per set",
+      value: hasSets ? reviewSets.map(s => `${s.label}: ${s.question_count} question${s.question_count === 1 ? "" : "s"}`).join("  ·  ") : "—",
+      warn: hasSets && hasEmptyQuestions,
+    },
+    {
+      id: "marks", label: "Marks per set",
+      value: hasSets ? reviewSets.map(s => `${s.label}: ${s.total_marks} marks`).join("  ·  ") : "—",
+      warn: hasSets && hasEmptyQuestions,
+    },
+    {
+      id: "batch", label: "Assigned batch",
+      value: batchId ? batchName(batchId) : "Not selected",
+    },
+    {
+      id: "departments", label: "Assigned department(s)",
+      value: selectedDepartments.length > 0 ? selectedDepartments.join(", ") : "All departments in the batch",
+    },
+    {
+      id: "duration", label: "Exam duration",
+      value: Number(duration) > 0 ? `${duration} minutes` : "Not set",
+    },
+    {
+      id: "timer", label: "Global timer",
+      // Same "  ·  " separator as the per-set rows above — was "|" here,
+      // which read as an inconsistent second style in the same checklist.
+      value: `Start: ${startTime ? formatReviewDateTime(startTime) : "not set — begins immediately once you start the exam"}  ·  Expire: ${expireTime ? formatReviewDateTime(expireTime) : "not set"}`,
+    },
+    {
+      id: "cutoff", label: "Pass cutoff",
+      value: passCutoff ? `${passCutoff}%` : "Not set",
+    },
+    {
+      id: "results", label: "Results visibility",
+      value: showResult ? "Visible to students after submission" : "Hidden from students",
+    },
+  ] : [];
+  const allReviewed = reviewItems.length > 0 && reviewItems.every(item => reviewed[item.id]);
+  const canSubmit = !!paperId && !!batchId && !!expireTime && Number(duration) > 0 && allReviewed;
+
   return (
     <AdminLayout>
-      <PageWrapper className="max-w-4xl">
+      <PageWrapper>
         <PageHeader
           title={selectedPaper ? `Assign — ${selectedPaper.title}` : "Assign"}
           titleSkeleton={loadingOptions ? <Skeleton className="h-8 w-64" /> : undefined}
@@ -307,10 +476,7 @@ export default function AdminAssessmentAssignPage() {
                 onChange={e => setBatchId(e.target.value)}
                 options={[
                   { value: "", label: "Select a batch…" },
-                  ...batches.map(b => ({
-                    value: b.id,
-                    label: `${b.batch_name}${typeof b.student_count === "number" ? ` (${b.student_count} students)` : ""}`,
-                  })),
+                  ...batches.map(b => ({ value: b.id, label: b.batch_name })),
                 ]}
               />
             </div>
@@ -331,21 +497,21 @@ export default function AdminAssessmentAssignPage() {
                 Departments (optional — leave all unchecked to include every department in the batch)
               </label>
               <div className="flex flex-wrap gap-2">
-                {DEPARTMENTS.map(dept => {
-                  const active = selectedDepartments.includes(dept);
+                {activeDepartments.map(d => {
+                  const active = selectedDepartments.includes(d.code);
                   return (
                     <button
-                      key={dept}
+                      key={d.id}
                       type="button"
                       aria-pressed={active}
-                      onClick={() => toggleDepartment(dept)}
+                      onClick={() => toggleDepartment(d.code)}
                       className="px-3 py-1.5 rounded-full text-xs font-semibold transition-colors cursor-pointer"
                       style={active
                         ? { background: "var(--color-accent)", color: "#fff", border: "1px solid var(--color-accent)" }
                         : { background: "var(--color-surface)", color: "var(--color-text-muted)", border: "1px solid var(--color-border)" }
                       }
                     >
-                      {dept}
+                      {d.name || d.code}
                     </button>
                   );
                 })}
@@ -355,6 +521,39 @@ export default function AdminAssessmentAssignPage() {
                   Only {selectedDepartments.join(", ")} student{selectedDepartments.length === 1 ? "" : "s"} in the selected batch will be assigned this exam.
                 </p>
               )}
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--color-text-muted)" }}>
+                Students attending this assessment
+              </label>
+              <div
+                className="h-9 flex items-center px-3.5 rounded-[var(--radius-md)] text-sm max-w-[240px]"
+                style={{ background: "var(--color-surface-hover)", border: "1px solid var(--color-border)" }}
+              >
+                {!batchId || selectedDepartments.length === 0 ? (
+                  <span style={{ color: "var(--color-text-subtle)" }}>
+                    Select a batch and department(s) to see this
+                  </span>
+                ) : loadingEligibleCount ? (
+                  <span style={{ color: "var(--color-text-subtle)" }}>Calculating…</span>
+                ) : eligibleCountError ? (
+                  <span style={{ color: "var(--color-danger)" }}>
+                    Couldn't calculate —{" "}
+                    <button
+                      type="button"
+                      onClick={() => setSelectedDepartments(prev => [...prev])}
+                      className="underline cursor-pointer"
+                    >
+                      retry
+                    </button>
+                  </span>
+                ) : (
+                  <span style={{ color: "var(--color-text)" }}>
+                    {eligibleCount} student{eligibleCount === 1 ? "" : "s"}
+                  </span>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -417,11 +616,89 @@ export default function AdminAssessmentAssignPage() {
               </div>
             </div>
 
+            {paperId && (
+              <div
+                className="rounded-[var(--radius-lg)] p-4"
+                style={{ background: "var(--color-surface-hover)", border: "1px solid var(--color-border)" }}
+              >
+                <h4 className="text-sm font-semibold mb-1" style={{ color: "var(--color-text)" }}>Final Review</h4>
+                <p className="text-xs mb-3" style={{ color: "var(--color-text-subtle)" }}>
+                  Tick every item after checking it against the values shown — this locks the paper and creates real student sessions once the exam starts.
+                </p>
+                {loadingPaperDetail ? (
+                  <Skeleton className="h-32 w-full" />
+                ) : paperDetailError ? (
+                  <p className="text-xs" style={{ color: "var(--color-danger)" }}>
+                    Couldn't load this paper's structure for review — this may be temporary.{" "}
+                    <button type="button" onClick={loadPaperDetail} className="underline cursor-pointer">Retry</button>
+                  </p>
+                ) : (
+                  <>
+                    {structureIncomplete && (
+                      <p className="text-xs mb-2.5 flex items-center gap-1.5" style={{ color: "var(--color-danger)" }}>
+                        <AlertTriangle size={12} className="shrink-0" />
+                        This paper's structure looks incomplete — check the highlighted item(s) below before proceeding.
+                      </p>
+                    )}
+                    <div className="space-y-1.5">
+                      {reviewItems.map(item => (
+                        <label key={item.id} className="flex items-start gap-2.5 py-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={!!reviewed[item.id]}
+                            onChange={e => setReviewed(prev => ({ ...prev, [item.id]: e.target.checked }))}
+                            className="mt-0.5 w-4 h-4 shrink-0 cursor-pointer accent-[var(--color-accent)]"
+                          />
+                          <span className="text-xs leading-relaxed min-w-0 flex-1">
+                            <span className="font-semibold" style={{ color: "var(--color-text)" }}>{item.label}:</span>{" "}
+                            <span style={{ color: item.warn ? "var(--color-danger)" : "var(--color-text-subtle)" }}>
+                              {item.value}
+                            </span>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
             {formError && <p className="text-xs" style={{ color: "var(--color-danger)" }}>{formError}</p>}
 
-            <div className="flex justify-end">
-              <Button type="submit" loading={creating}>Create assignment</Button>
-            </div>
+            {allReviewed && mockChoice === null ? (
+              <div
+                className="rounded-[var(--radius-lg)] p-4 flex items-center justify-between gap-3 flex-wrap"
+                style={{ background: "#EFF6FF", border: "1px solid #BFDBFE" }}
+              >
+                <p className="text-sm font-medium" style={{ color: "var(--color-text)" }}>
+                  Are you willing to take the mock test before creating this assessment?
+                </p>
+                <div className="flex gap-2">
+                  <Button type="button" variant="secondary" size="sm" onClick={() => setMockChoice("no")}>No</Button>
+                  <Button
+                    type="button" variant="primary" size="sm"
+                    leftIcon={<FlaskConical size={13} />}
+                    loading={startingMockTrial}
+                    onClick={handleTakeMockFromReview}
+                  >
+                    Yes
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                {mockChoice === "yes" ? (
+                  <button
+                    type="button" onClick={handleTakeMockFromReview} disabled={startingMockTrial}
+                    className="text-xs underline cursor-pointer disabled:opacity-50"
+                    style={{ color: "var(--color-accent)" }}
+                  >
+                    {startingMockTrial ? "Opening mock test…" : "Take the mock test again"}
+                  </button>
+                ) : <span />}
+                <Button type="submit" loading={creating} disabled={!canSubmit}>Create assignment</Button>
+              </div>
+            )}
           </form>
           </div>
           </div>
@@ -506,6 +783,14 @@ export default function AdminAssessmentAssignPage() {
                         onClick={() => handleResync(a)}
                       >
                         Resync roster
+                      </Button>
+                      <Button
+                        variant="secondary" size="sm"
+                        leftIcon={<FlaskConical size={13} />}
+                        loading={startingMockFor === a.id}
+                        onClick={() => handleMockTestForAssignment(a)}
+                      >
+                        Mock Test
                       </Button>
                       {a.status === "SCHEDULED" && (
                         <Button

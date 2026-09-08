@@ -10,17 +10,17 @@ import { SearchInput } from "@/components/ui/SearchInput";
 import { StudentTable } from "@/components/admin/StudentTable";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
-import { DEPARTMENTS } from "@/lib/constants";
+import { useDepartments } from "@/lib/departmentsContext";
 import type { Batch, Student, PaginatedResponse, ApiSuccess } from "@/types";
-
-const DEPT_OPTIONS = [
-  { value: "", label: "All departments" },
-  ...DEPARTMENTS.map((d) => ({ value: d, label: d })),
-];
 
 export default function BatchDetailPage() {
   const { batch_id } = useParams<{ batch_id: string }>();
   const { error: toastError } = useToast();
+  const { departments } = useDepartments();
+  const DEPT_OPTIONS = [
+    { value: "", label: "All departments" },
+    ...departments.map((d) => ({ value: d.code, label: d.name || d.code })),
+  ];
 
   const [batch, setBatch] = useState<Batch | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
@@ -177,6 +177,7 @@ export default function BatchDetailPage() {
           onStudentUpdated={handleStudentUpdated}
           onStudentDeleted={handleStudentDeleted}
           showBatchColumn={false}
+          readOnly
         />
       </PageWrapper>
     </AdminLayout>

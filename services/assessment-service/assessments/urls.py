@@ -7,6 +7,9 @@ from .views import (
     AdminPaperSetsView,
     AdminSetDetailView,
     AdminSetQuestionsView,
+    AdminSetSectionsView,
+    AdminSectionDetailView,
+    AdminSectionQuestionsView,
     AdminQuestionDetailView,
     AdminQuestionOptionsView,
     AdminQuestionOptionDetailView,
@@ -30,12 +33,19 @@ from .views import (
     StudentResultsView,
     AdminAssignmentResultsView,
     AdminResultResponsesView,
-    AdminResultLogsView,
+    AdminQuestionResponsesView,
+    AdminSessionTimelineView,
     AdminAssignmentResultsExportView,
     AdminAssignmentAnalyticsView,
     AdminAssignmentAnalyticsExportView,
     AdminAssignmentDashboardView,
     AdminAssignmentDashboardExportView,
+    AdminTrialStartView,
+    AdminTrialSessionQuestionsView,
+    AdminTrialAnswerView,
+    AdminTrialSubmitView,
+    AdminTrialServerTimeView,
+    AdminPaperTrialResultsView,
 )
 
 urlpatterns = [
@@ -51,7 +61,12 @@ urlpatterns = [
     # Admin — sets
     path("admin/sets/<uuid:pk>/",                           AdminSetDetailView.as_view(),         name="admin_set_detail"),
     path("admin/sets/<uuid:pk>/questions/",                 AdminSetQuestionsView.as_view(),      name="admin_set_questions"),
+    path("admin/sets/<uuid:pk>/sections/",                  AdminSetSectionsView.as_view(),       name="admin_set_sections"),
     path("admin/sets/<uuid:pk>/image-presign/",              AdminSetImagePresignView.as_view(),   name="admin_set_image_presign"),
+
+    # Admin — question sections
+    path("admin/sections/<uuid:pk>/",                       AdminSectionDetailView.as_view(),     name="admin_section_detail"),
+    path("admin/sections/<uuid:pk>/questions/",              AdminSectionQuestionsView.as_view(),  name="admin_section_questions"),
 
     # Admin — questions
     path("admin/questions/<uuid:pk>/",                      AdminQuestionDetailView.as_view(),    name="admin_question_detail"),
@@ -83,13 +98,22 @@ urlpatterns = [
     path("admin/assignments/<uuid:pk>/results/", AdminAssignmentResultsView.as_view(), name="admin_assignment_results"),
     path("admin/assignments/<uuid:pk>/results/export/", AdminAssignmentResultsExportView.as_view(), name="admin_assignment_results_export"),
     path("admin/results/<uuid:result_id>/responses/", AdminResultResponsesView.as_view(), name="admin_result_responses"),
-    path("admin/results/<uuid:result_id>/logs/", AdminResultLogsView.as_view(), name="admin_result_logs"),
+    path("admin/assignments/<uuid:pk>/questions/<uuid:question_id>/responses/", AdminQuestionResponsesView.as_view(), name="admin_question_responses"),
+    path("admin/sessions/<uuid:session_id>/timeline/", AdminSessionTimelineView.as_view(), name="admin_session_timeline"),
     path("admin/assignments/<uuid:pk>/analytics/", AdminAssignmentAnalyticsView.as_view(), name="admin_assignment_analytics"),
     path("admin/assignments/<uuid:pk>/analytics/export/", AdminAssignmentAnalyticsExportView.as_view(), name="admin_assignment_analytics_export"),
 
     # Admin — dashboard (Task 9.1)
     path("admin/assignments/<uuid:pk>/dashboard/", AdminAssignmentDashboardView.as_view(), name="admin_assignment_dashboard"),
     path("admin/assignments/<uuid:pk>/dashboard/export/", AdminAssignmentDashboardExportView.as_view(), name="admin_assignment_dashboard_export"),
+
+    # Admin — mock/trial exam sessions (added 2026-08-27)
+    path("admin/papers/<uuid:pk>/trial/start/", AdminTrialStartView.as_view(), name="admin_trial_start"),
+    path("admin/papers/<uuid:pk>/trial-results/", AdminPaperTrialResultsView.as_view(), name="admin_paper_trial_results"),
+    path("admin/trial/server-time/", AdminTrialServerTimeView.as_view(), name="admin_trial_server_time"),
+    path("admin/trial/sessions/<uuid:pk>/questions/", AdminTrialSessionQuestionsView.as_view(), name="admin_trial_session_questions"),
+    path("admin/trial/sessions/<uuid:pk>/questions/<uuid:qid>/answer/", AdminTrialAnswerView.as_view(), name="admin_trial_answer"),
+    path("admin/trial/sessions/<uuid:pk>/submit/", AdminTrialSubmitView.as_view(), name="admin_trial_submit"),
 
     # Remaining admin endpoints land here starting Phase 10+ — see
     # docs/assessment-service-api.md for the full frozen contract.

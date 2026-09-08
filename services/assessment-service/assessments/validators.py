@@ -56,20 +56,25 @@ def get_assignment_readiness_blockers(paper) -> list[str]:
     never enforced (previously only a non-blocking warning)."""
     blockers: list[str] = []
 
-    sets = list(paper.sets.prefetch_related("questions__options").all())
+    sets = list(paper.sets.prefetch_related("questions__options", "sections__questions").all())
     if not sets:
         return ["This paper has no question sets — add at least one set before assigning it."]
 
     question_counts = {}
     mark_totals = {}
+    section_counts = {}
     for qset in sets:
         questions = list(qset.questions.all())
         question_counts[qset.label] = len(questions)
         mark_totals[qset.label] = sum(q.marks for q in questions)
+        section_counts[qset.label] = len(qset.sections.all())
         if not questions:
             blockers.append(f"Set '{qset.label}' has no questions.")
         for question in questions:
             blockers.extend(get_question_publish_blockers(question))
+        for section in qset.sections.all():
+            if len(section.questions.all()) == 0:
+                blockers.append(f"Section '{section.title}' in Set '{qset.label}' has no questions.")
 
     # Sets are meant to be equivalent alternates for anti-cheating
     # distribution (AT7), not different-length/different-weight variants —
@@ -79,6 +84,11 @@ def get_assignment_readiness_blockers(paper) -> list[str]:
         blockers.append(f"Sets have unequal question counts: {question_counts}. They must match.")
     if len(set(mark_totals.values())) > 1:
         blockers.append(f"Sets have unequal total marks: {mark_totals}. They must match.")
+    # Same anti-cheating rationale extended to sections (added alongside the
+    # Sections feature) — only meaningful once a paper has more than one
+    # set; a single-set paper has nothing to compare sections against.
+    if len(sets) > 1 and len(set(section_counts.values())) > 1:
+        blockers.append(f"Sets have unequal section counts: {section_counts}. They must match.")
 
     return blockers
 

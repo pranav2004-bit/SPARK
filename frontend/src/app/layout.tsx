@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { ToastProvider } from "@/components/ui/Toast";
+import { DepartmentsProvider } from "@/lib/departmentsContext";
 import { GlobalFooter } from "@/components/layout/GlobalFooter";
 import { ServiceWorkerRegistrar } from "@/components/ServiceWorkerRegistrar";
 import { InstallPrompt } from "@/components/ui/InstallPrompt";
@@ -45,11 +46,13 @@ export default function RootLayout({
       </head>
       <body className="h-full antialiased">
         <ToastProvider>
-          <SplashScreen />
-          {children}
-          {/* <GlobalFooter /> */}{/* hidden for client presentation — restore after */}
-          <ServiceWorkerRegistrar />
-          <InstallPrompt />
+          <DepartmentsProvider>
+            <SplashScreen />
+            {children}
+            {/* <GlobalFooter /> */}{/* hidden for client presentation — restore after */}
+            <ServiceWorkerRegistrar />
+            <InstallPrompt />
+          </DepartmentsProvider>
         </ToastProvider>
       </body>
     </html>

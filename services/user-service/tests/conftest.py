@@ -11,6 +11,8 @@ ADMIN_USER_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 STUDENT_USER_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
 SUPER_ADMIN_USER_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 ADMIN_B_USER_ID = uuid.UUID("44444444-4444-4444-4444-444444444444")
+IT_USER_ID = uuid.UUID("55555555-5555-5555-5555-555555555555")
+IT_B_USER_ID = uuid.UUID("66666666-6666-6666-6666-666666666666")
 
 
 def _make_token(user_id, role, institution_id=None):
@@ -51,6 +53,16 @@ def admin_b_token():
 
 
 @pytest.fixture
+def it_token():
+    return _make_token(IT_USER_ID, "it", INSTITUTION_A)
+
+
+@pytest.fixture
+def it_b_token():
+    return _make_token(IT_B_USER_ID, "it", INSTITUTION_B)
+
+
+@pytest.fixture
 def admin_client(admin_token):
     client = APIClient()
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {admin_token}")
@@ -75,6 +87,20 @@ def super_admin_client(super_admin_token):
 def admin_b_client(admin_b_token):
     client = APIClient()
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {admin_b_token}")
+    return client
+
+
+@pytest.fixture
+def it_client(it_token):
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {it_token}")
+    return client
+
+
+@pytest.fixture
+def it_b_client(it_b_token):
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {it_b_token}")
     return client
 
 

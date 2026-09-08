@@ -10,7 +10,7 @@ from assessments.models import (
     ASSIGNMENT_STATUS_SCHEDULED, SESSION_STATUS_IN_PROGRESS,
     SESSION_STATUS_AUTO_SUBMITTED, SESSION_STATUS_SUBMITTED,
 )
-from assessments.tasks import sweep_expired_assignments, sweep_expired_sessions
+from assessments.tasks import sweep_expired_assignments, sweep_expired_sessions, purge_old_activity_logs
 
 from .conftest import INSTITUTION_A, ADMIN_USER_ID
 
@@ -255,3 +255,135 @@ class TestDeadLetteringTaskOnFailure:
         sweep_expired_assignments()
 
         assert FailedJob.objects.count() == 0
+
+
+# ── Activity-log retention purge (2026-08-17) ────────────────────────────────
+
+class TestPurgeOldActivityLogs:
+    def _session(self, paper, qset, **overrides):
+        assignment = _assignment(paper)
+        defaults = dict(
+            assignment=assignment, student_id=uuid.uuid4(), set=qset,
+            ends_at=timezone.now() + timedelta(hours=1), status=SESSION_STATUS_IN_PROGRESS,
+        )
+        defaults.update(overrides)
+        return AssessmentSession.objects.create(**defaults)
+
+    def test_deletes_logs_older_than_retention_window(self, paper_with_set):
+        from assessments.models import ActivityLog, ACTIVITY_EVENT_TAB_SWITCH, ACTIVITY_LOG_RETENTION_DAYS
+        from assessments.tasks import purge_old_activity_logs
+
+        paper, qset = paper_with_set
+        session = self._session(paper, qset, status=SESSION_STATUS_SUBMITTED)
+        stale = ActivityLog.objects.create(
+            session=session, event_type=ACTIVITY_EVENT_TAB_SWITCH,
+            occurred_at=timezone.now() - timedelta(days=ACTIVITY_LOG_RETENTION_DAYS, hours=1),
+        )
+
+        result = purge_old_activity_logs()
+
+        assert result["deleted"] == 1
+        assert not ActivityLog.objects.filter(pk=stale.pk).exists()
+
+    def test_does_not_touch_logs_inside_retention_window(self, paper_with_set):
+        from assessments.models import ActivityLog, ACTIVITY_EVENT_TAB_SWITCH, ACTIVITY_LOG_RETENTION_DAYS
+        from assessments.tasks import purge_old_activity_logs
+
+        paper, qset = paper_with_set
+        session = self._session(paper, qset, status=SESSION_STATUS_SUBMITTED)
+        fresh = ActivityLog.objects.create(
+            session=session, event_type=ACTIVITY_EVENT_TAB_SWITCH,
+            occurred_at=timezone.now() - timedelta(days=ACTIVITY_LOG_RETENTION_DAYS - 1),
+        )
+
+        result = purge_old_activity_logs()
+
+        assert result["deleted"] == 0
+        assert ActivityLog.objects.filter(pk=fresh.pk).exists()
+
+    def test_never_deletes_logs_for_a_still_in_progress_session_even_if_stale(self, paper_with_set):
+        # Belt-and-suspenders: 15 days is far beyond any real exam's
+        # duration, but a still-active session's own audit trail must never
+        # be eligible no matter what.
+        from assessments.models import ActivityLog, ACTIVITY_EVENT_TAB_SWITCH, ACTIVITY_LOG_RETENTION_DAYS
+        from assessments.tasks import purge_old_activity_logs
+
+        paper, qset = paper_with_set
+        session = self._session(paper, qset, status=SESSION_STATUS_IN_PROGRESS)
+        old_log = ActivityLog.objects.create(
+            session=session, event_type=ACTIVITY_EVENT_TAB_SWITCH,
+            occurred_at=timezone.now() - timedelta(days=ACTIVITY_LOG_RETENTION_DAYS + 5),
+        )
+
+        result = purge_old_activity_logs()
+
+        assert result["deleted"] == 0
+        assert ActivityLog.objects.filter(pk=old_log.pk).exists()
+
+    def test_never_touches_result_summary_or_responses(self, paper_with_set):
+        # The retention policy is scoped to the raw ActivityLog audit trail
+        # only — scores and academic records are permanent (models.py).
+        from assessments.models import (
+            ActivityLog, ACTIVITY_EVENT_TAB_SWITCH, ACTIVITY_LOG_RETENTION_DAYS,
+            AssessmentResponse, Question,
+        )
+        from assessments.tasks import purge_old_activity_logs
+
+        paper, qset = paper_with_set
+        q1 = Question.objects.get(set=qset)
+        session = self._session(paper, qset, status=SESSION_STATUS_SUBMITTED)
+        AssessmentResponse.objects.create(session=session, question=q1, selected_option_ids=[], is_correct=False, marks_awarded=0)
+        old_time = timezone.now() - timedelta(days=ACTIVITY_LOG_RETENTION_DAYS + 1)
+        ActivityLog.objects.create(session=session, event_type=ACTIVITY_EVENT_TAB_SWITCH, occurred_at=old_time)
+        ResultSummary.objects.create(
+            session=session, assignment=session.assignment, student_id=session.student_id,
+            institution_id=INSTITUTION_A, started_at=old_time, ended_at=old_time,
+            duration_seconds=600, score=0, total_marks=1, status=SESSION_STATUS_SUBMITTED,
+        )
+
+        purge_old_activity_logs()
+
+        assert ActivityLog.objects.filter(session=session).count() == 0
+        assert AssessmentResponse.objects.filter(session=session).exists()
+        assert ResultSummary.objects.filter(session=session).exists()
+
+    def test_batches_deletion_across_multiple_pages(self, paper_with_set):
+        # _PURGE_BATCH_SIZE is 1000 — confirms the batching loop actually
+        # iterates rather than only ever handling a single page.
+        from assessments.models import ActivityLog, ACTIVITY_EVENT_TAB_SWITCH, ACTIVITY_LOG_RETENTION_DAYS
+        from assessments.tasks import purge_old_activity_logs
+
+        paper, qset = paper_with_set
+        session = self._session(paper, qset, status=SESSION_STATUS_SUBMITTED)
+        old_time = timezone.now() - timedelta(days=ACTIVITY_LOG_RETENTION_DAYS + 1)
+        ActivityLog.objects.bulk_create([
+            ActivityLog(session=session, event_type=ACTIVITY_EVENT_TAB_SWITCH, occurred_at=old_time)
+            for _ in range(2500)
+        ])
+
+        result = purge_old_activity_logs()
+
+        assert result["deleted"] == 2500
+        assert ActivityLog.objects.filter(session=session).count() == 0
+
+    def test_idempotent_second_run_is_noop(self, paper_with_set):
+        from assessments.models import ActivityLog, ACTIVITY_EVENT_TAB_SWITCH, ACTIVITY_LOG_RETENTION_DAYS
+        from assessments.tasks import purge_old_activity_logs
+
+        paper, qset = paper_with_set
+        session = self._session(paper, qset, status=SESSION_STATUS_SUBMITTED)
+        ActivityLog.objects.create(
+            session=session, event_type=ACTIVITY_EVENT_TAB_SWITCH,
+            occurred_at=timezone.now() - timedelta(days=ACTIVITY_LOG_RETENTION_DAYS + 1),
+        )
+
+        first = purge_old_activity_logs()
+        second = purge_old_activity_logs()
+
+        assert first["deleted"] == 1
+        assert second["deleted"] == 0
+
+    def test_uses_dead_lettering_base_with_matching_max_retries(self, db):
+        from assessments.tasks import DeadLetteringTask, _MAX_RETRIES
+        assert isinstance(purge_old_activity_logs, DeadLetteringTask)
+        assert purge_old_activity_logs.max_retries == _MAX_RETRIES

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
-import { Download, Printer, Users, CheckCircle2, ShieldAlert, Percent, Radio, AlertTriangle } from "lucide-react";
+import { Download, Printer, Users, ShieldAlert, Percent, Radio, AlertTriangle, Clock } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -20,7 +20,12 @@ interface DashboardData {
   student_count_completed: number;
   student_count_in_progress: number;
   completion_rate_percentage: number;
-  average_score_percentage: number;
+  // average_score_percentage deliberately removed (2026-08-18) — a live
+  // partial average (whoever's finished first) isn't an operational
+  // signal, and duplicated the Analytics page exactly. See that page for
+  // the definitive, final score once the exam is done.
+  time_remaining_seconds: number | null;
+  exam_duration_minutes: number;
   malpractice_incidents: number;
   submission_breakdown: {
     on_time: number;
@@ -34,6 +39,40 @@ interface DashboardData {
 // assignment is actually LIVE, same 8s cadence the assign-page's status
 // poll uses, and stop once it's CLOSED (nothing left to change).
 const LIVE_POLL_INTERVAL_MS = 8000;
+
+function formatTimeRemaining(seconds: number | null | undefined): string {
+  // == null (loose) catches both null and undefined — a defensive
+  // backstop, not just a type-level assumption, against any value that
+  // isn't a real finite number ever reaching the arithmetic below and
+  // producing "NaNm left" instead of the intended "—" (found live,
+  // 2026-08-18).
+  if (seconds == null || !Number.isFinite(seconds)) return "—";
+  if (seconds <= 0) return "Ending now";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m left` : `${m}m left`;
+}
+
+// Relative to the exam's own allotted duration, not a fixed number of
+// minutes — 10 minutes left means something very different on a 15-minute
+// quiz than on a 3-hour exam.
+function timeRemainingColor(seconds: number | null | undefined, examDurationMinutes: number): string {
+  if (seconds == null || !Number.isFinite(seconds)) return "#94A3B8"; // not LIVE — neutral, not applicable
+  const totalSeconds = examDurationMinutes * 60;
+  const fraction = totalSeconds > 0 ? seconds / totalSeconds : 0;
+  if (fraction < 0.1) return "#DC2626";
+  if (fraction < 0.25) return "#E8820C";
+  return "#16A34A";
+}
+
+// A low on-time rate (lots of auto-submits) is a real signal the exam's
+// duration may be miscalibrated — worth flagging, unlike Total
+// Students/Completion Rate, which have no "good or bad" direction at all.
+function onTimeRateColor(pct: number): string {
+  if (pct < 60) return "#DC2626";
+  if (pct < 85) return "#E8820C";
+  return "#16A34A";
+}
 
 function StatTile({ icon: Icon, label, value, hint, color }: {
   icon: React.ElementType; label: string; value: string; hint?: string; color: string;
@@ -59,7 +98,7 @@ function SplitBar({ leftLabel, leftValue, rightLabel, rightValue, leftColor, rig
   const leftPct = total > 0 ? (leftValue / total) * 100 : 50;
   return (
     <div>
-      <div className="h-6 rounded-md overflow-hidden flex" style={{ background: "var(--color-surface-secondary)" }}>
+      <div className="h-6 rounded-full overflow-hidden flex" style={{ background: "var(--color-surface-secondary)" }}>
         {total > 0 ? (
           <>
             <div style={{ width: `${leftPct}%`, background: leftColor }} />
@@ -149,10 +188,10 @@ export default function AdminAssessmentDashboardPage() {
   if (loading) {
     return (
       <AdminLayout>
-        <PageWrapper className="max-w-5xl">
+        <PageWrapper>
           <Skeleton className="h-8 w-64 mb-6" />
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
-            {[1, 2, 3, 4, 5, 6].map(i => <Skeleton key={i} className="h-24 rounded-[var(--radius-xl)]" />)}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+            {[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-24 rounded-[var(--radius-xl)]" />)}
           </div>
           <Skeleton className="h-40 rounded-[var(--radius-xl)]" />
         </PageWrapper>
@@ -163,7 +202,7 @@ export default function AdminAssessmentDashboardPage() {
   if (!data) {
     return (
       <AdminLayout>
-        <PageWrapper className="max-w-5xl">
+        <PageWrapper>
           <PageHeader title="Dashboard" backHref="/admin/assessments/dashboard" />
           {loadError && (
             <EmptyState
@@ -196,11 +235,11 @@ export default function AdminAssessmentDashboardPage() {
         }
       `}</style>
 
-      <PageWrapper className="max-w-5xl">
+      <PageWrapper>
         <div id="dashboard-printable">
           <PageHeader
             title="Dashboard"
-            subtitle="At-a-glance KPI rollup for this assignment."
+            subtitle="Live operational status for this assignment — for grading outcomes and diagnostics, see Analytics instead."
             backHref="/admin/assessments/dashboard"
             rightSlot={
               <div className="flex items-center gap-2 no-print">
@@ -221,17 +260,24 @@ export default function AdminAssessmentDashboardPage() {
             </div>
           )}
 
-          {/* KPI tiles — mobile-first: 2 cols at the smallest breakpoint, 3 from sm up */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
-            <StatTile icon={Users} label="Total Students" value={String(data.student_count_total)} color="#2563EB" />
-            <StatTile icon={CheckCircle2} label="Completed" value={String(data.student_count_completed)}
-              hint={`${data.student_count_in_progress} in progress`} color="#16A34A" />
-            <StatTile icon={Percent} label="Completion Rate" value={`${data.completion_rate_percentage}%`} color="#9333EA" />
-            <StatTile icon={CheckCircle2} label="Average Score" value={`${data.average_score_percentage}%`} color="#E8820C" />
-            <StatTile icon={ShieldAlert} label="Malpractice" value={String(data.malpractice_incidents)}
-              hint="flagged sessions" color="#DC2626" />
+          {/* KPI tiles — every color that has a real "good or bad" direction
+              reacts to its own value (Time Remaining, On-Time Rate); ones
+              that don't (Progress, Malpractice's own category) stay
+              neutral/static rather than faking a signal that isn't there.
+              Nothing here is also shown on the Analytics page — Average
+              Score was removed from here for exactly that reason
+              (2026-08-18 KPI-overlap audit): this page answers "is
+              everything going OK right now," not "how did it go." */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <StatTile icon={Users} label="Progress" value={`${data.student_count_completed} / ${data.student_count_total}`}
+              hint={`${data.student_count_in_progress} in progress`} color="#2563EB" />
+            <StatTile icon={Clock} label="Time Remaining" value={formatTimeRemaining(data.time_remaining_seconds)}
+              hint={isLive ? undefined : `Exam ${data.status.toLowerCase()}`}
+              color={timeRemainingColor(data.time_remaining_seconds, data.exam_duration_minutes)} />
             <StatTile icon={Percent} label="On-Time Rate" value={`${sb.on_time_percentage}%`}
-              hint="of completed sessions" color="#0891B2" />
+              hint="of completed sessions" color={onTimeRateColor(sb.on_time_percentage)} />
+            <StatTile icon={ShieldAlert} label="Malpractice" value={String(data.malpractice_incidents)}
+              hint="flagged sessions — see Analytics for the breakdown" color="#DC2626" />
           </div>
 
           {/* Submission breakdown */}

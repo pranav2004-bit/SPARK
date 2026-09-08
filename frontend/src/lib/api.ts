@@ -15,6 +15,7 @@ export const LOGIN_REDIRECT_PATHS: Record<string, string> = {
   student: "/students/login",
   admin: "/admin/login",
   super_admin: "/super-admin/login",
+  it: "/it/login",
 };
 
 // ── Axios instance ──────────────────────────────────────────────────────────────

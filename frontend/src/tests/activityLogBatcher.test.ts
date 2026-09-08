@@ -128,4 +128,33 @@ describe("ActivityLogBatcher", () => {
     expect(mockPost.mock.calls[1][1].events[0].event_type).toBe("copy");
     batcher.stop();
   });
+
+  // 2026-08-18: connection_lost can only ever be reported once back
+  // online, well after the actual disconnect — the optional occurredAt
+  // param lets that caller preserve the true original timestamp instead
+  // of defaulting to "whenever we noticed we were back."
+  it("uses the provided occurredAt instead of the current time when given", async () => {
+    const batcher = new ActivityLogBatcher("session-1");
+    batcher.start();
+    const pastMoment = new Date("2026-08-17T19:00:00.000Z");
+    batcher.record("connection_lost", { duration_seconds: 47 }, pastMoment);
+    jest.advanceTimersByTime(10000);
+    await Promise.resolve();
+
+    expect(mockPost.mock.calls[0][1].events[0].occurred_at).toBe("2026-08-17T19:00:00.000Z");
+    batcher.stop();
+  });
+
+  it("defaults occurred_at to now when no override is given", async () => {
+    const batcher = new ActivityLogBatcher("session-1");
+    batcher.start();
+    const recordedAt = Date.now(); // captured before fake time advances below
+    batcher.record("screenshot_attempt");
+    jest.advanceTimersByTime(10000);
+    await Promise.resolve();
+
+    const occurredAt = new Date(mockPost.mock.calls[0][1].events[0].occurred_at);
+    expect(Math.abs(recordedAt - occurredAt.getTime())).toBeLessThan(1000);
+    batcher.stop();
+  });
 });

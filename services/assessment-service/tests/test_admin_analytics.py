@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from assessments.models import (
     QuestionPaper, QuestionSet, Question, QuestionOption, BatchAssignment,
-    AssessmentSession, AssessmentResponse, ResultSummary,
+    AssessmentSession, AssessmentResponse, ResultSummary, StudentSetAllocation,
     ASSIGNMENT_STATUS_LIVE, SESSION_STATUS_SUBMITTED,
 )
 
@@ -87,6 +87,18 @@ def analytics_setup(db):
     _make("student_3", set_b, [(b_q1, b_q1_correct, True, 7), (b_q2, b_q2_correct, True, 3)], 10, 10)
     _make("student_4", set_b, [(b_q1, b_q1_wrong, False, 0), (b_q2, b_q2_correct, True, 3)], 3, 10)
 
+    # Every completed student's own StudentSetAllocation row (the roster
+    # snapshot any real assignment creates for everyone it's assigned to,
+    # Task 3.1) — plus two more allocated students who never started, so
+    # total_allocated (6) is genuinely greater than total_completed (4),
+    # not just equal to it by fixture accident.
+    for key in students:
+        StudentSetAllocation.objects.create(assignment=assignment, student_id=students[key], set=set_a)
+    students["student_5_pending"] = uuid.uuid4()
+    students["student_6_pending"] = uuid.uuid4()
+    StudentSetAllocation.objects.create(assignment=assignment, student_id=students["student_5_pending"], set=set_a)
+    StudentSetAllocation.objects.create(assignment=assignment, student_id=students["student_6_pending"], set=set_b)
+
     roster = [
         _roster_entry(students["student_1"], "CSE"),
         _roster_entry(students["student_2"], "CSE"),
@@ -108,6 +120,15 @@ class TestAnalytics:
         data = resp.json()["data"]
 
         assert data["total_completed"] == 4
+        assert data["total_allocated"] == 6  # 4 completed + 2 who never started
+        assert "generated_at" in data and data["generated_at"]
+
+        # Average score: mean of 100, 0, 100, 30 = 57.5
+        assert data["average_score_percentage"] == 57.5
+
+        # Average completion time: all 4 fixture sessions use duration_seconds=600
+        assert data["average_completion_time_seconds"] == 600
+        assert data["exam_duration_minutes"] == 60
 
         # Pass/fail: cutoff 40%, pass = student_1(100%), student_3(100%) = 2
         pf = data["pass_fail"]
@@ -136,10 +157,21 @@ class TestAnalytics:
         assert mp["total_count"] == 4
         assert mp["rate_percentage"] == 25.0
 
+        # Malpractice breakdown: student_2 alone, flagged for tab_switch only
+        assert data["malpractice_breakdown"] == [{"reason": "tab_switch", "count": 1}]
+
+        # Set comparison: Set A avg(100,0)=50.0, Set B avg(100,30)=65.0
+        sets = {s["set_label"]: s for s in data["set_comparison"]}
+        assert sets["Set A"]["average_percentage"] == 50.0
+        assert sets["Set A"]["student_count"] == 2
+        assert sets["Set B"]["average_percentage"] == 65.0
+        assert sets["Set B"]["student_count"] == 2
+
         # Question difficulty
         diff_by_number_and_set = {(q["set_label"], q["question_number"]): q for q in data["question_difficulty"]}
         a1 = diff_by_number_and_set[("Set A", 1)]
         assert a1["total_answered"] == 2 and a1["correct_count"] == 1 and a1["percentage_correct"] == 50.0
+        assert a1["average_seconds_spent"] is None  # no question_time_spent events in this fixture
         a2 = diff_by_number_and_set[("Set A", 2)]
         assert a2["total_answered"] == 1 and a2["correct_count"] == 1 and a2["percentage_correct"] == 100.0
         b1 = diff_by_number_and_set[("Set B", 1)]
@@ -189,9 +221,15 @@ class TestAnalytics:
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["total_completed"] == 0
+        assert data["total_allocated"] == 0
+        assert data["average_score_percentage"] is None  # never a misleading 0.0 — genuinely no data yet
+        assert data["average_completion_time_seconds"] is None
         assert data["pass_fail"]["pass_rate_percentage"] == 0.0
         assert data["malpractice_rate"]["rate_percentage"] == 0.0
+        assert data["set_comparison"] == []
+        assert data["malpractice_breakdown"] == []
         assert all(q["percentage_correct"] is None for q in data["question_difficulty"])
+        assert all(q["average_seconds_spent"] is None for q in data["question_difficulty"])
 
     @patch("assessments.views.fetch_batch_roster")
     def test_one_student_no_crash(self, mock_roster, admin_client, analytics_setup):
@@ -218,11 +256,100 @@ class TestAnalyticsExport:
 
         assert resp.status_code == 200
         assert content.startswith("﻿")
-        for section in ["Score Distribution", "Pass / Fail Summary", "Per-Question Difficulty",
-                         "Department Comparison", "Malpractice Rate"]:
+        for section in ["Assessment Analytics", "Score Distribution", "Pass / Fail Summary",
+                         "Per-Question Difficulty", "Department Comparison", "Set Comparison",
+                         "Malpractice Rate", "Malpractice Breakdown by Reason"]:
             assert section in content
         assert "50.0" in content  # CSE department average, sanity check real numbers made it in
+        assert "57.5" in content  # average score
+        assert "4 / 6" in content  # completed / allocated
+        assert "Average Completion Time" in content
+        assert "Exam Duration Allowed" in content
 
     def test_cross_institution_403(self, admin_b_client, analytics_setup):
         resp = admin_b_client.get(f"/api/assessments/admin/assignments/{analytics_setup['assignment'].id}/analytics/export/")
         assert resp.status_code == 404
+
+
+# ── Average time per question (2026-08-18) ───────────────────────────────────
+
+class TestQuestionTimeSpent:
+    def _session_for(self, assignment, students, key):
+        return AssessmentSession.objects.get(assignment=assignment, student_id=students[key])
+
+    @patch("assessments.views.fetch_batch_roster")
+    def test_averages_across_sessions_on_the_same_set(self, mock_roster, admin_client, analytics_setup):
+        from assessments.models import ActivityLog, ACTIVITY_EVENT_QUESTION_TIME_SPENT
+        mock_roster.return_value = analytics_setup["roster"]
+        assignment, students = analytics_setup["assignment"], analytics_setup["students"]
+
+        # student_1 and student_2 are both on Set A — two data points for
+        # Set A's Question 1, must average, not just take one.
+        for key, seconds in [("student_1", 40), ("student_2", 60)]:
+            ActivityLog.objects.create(
+                session=self._session_for(assignment, students, key),
+                event_type=ACTIVITY_EVENT_QUESTION_TIME_SPENT,
+                occurred_at=timezone.now(), metadata={"question_number": 1, "seconds": seconds},
+            )
+
+        resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/analytics/")
+        diff_by = {(q["set_label"], q["question_number"]): q for q in resp.json()["data"]["question_difficulty"]}
+        assert diff_by[("Set A", 1)]["average_seconds_spent"] == 50.0  # (40+60)/2
+
+    @patch("assessments.views.fetch_batch_roster")
+    def test_disambiguates_the_same_question_number_across_different_sets(self, mock_roster, admin_client, analytics_setup):
+        # Set A's "Question 1" and Set B's "Question 1" are different actual
+        # Questions — a naive question_number-only aggregation would wrongly
+        # merge these two students' times together. Deliberately different
+        # values so a merge bug would be caught immediately.
+        from assessments.models import ActivityLog, ACTIVITY_EVENT_QUESTION_TIME_SPENT
+        mock_roster.return_value = analytics_setup["roster"]
+        assignment, students = analytics_setup["assignment"], analytics_setup["students"]
+
+        ActivityLog.objects.create(
+            session=self._session_for(assignment, students, "student_1"),  # Set A
+            event_type=ACTIVITY_EVENT_QUESTION_TIME_SPENT,
+            occurred_at=timezone.now(), metadata={"question_number": 1, "seconds": 20},
+        )
+        ActivityLog.objects.create(
+            session=self._session_for(assignment, students, "student_3"),  # Set B
+            event_type=ACTIVITY_EVENT_QUESTION_TIME_SPENT,
+            occurred_at=timezone.now(), metadata={"question_number": 1, "seconds": 200},
+        )
+
+        resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/analytics/")
+        diff_by = {(q["set_label"], q["question_number"]): q for q in resp.json()["data"]["question_difficulty"]}
+        assert diff_by[("Set A", 1)]["average_seconds_spent"] == 20.0
+        assert diff_by[("Set B", 1)]["average_seconds_spent"] == 200.0
+
+    @patch("assessments.views.fetch_batch_roster")
+    def test_malformed_or_zero_metadata_excluded_not_treated_as_zero(self, mock_roster, admin_client, analytics_setup):
+        from assessments.models import ActivityLog, ACTIVITY_EVENT_QUESTION_TIME_SPENT
+        mock_roster.return_value = analytics_setup["roster"]
+        assignment, students = analytics_setup["assignment"], analytics_setup["students"]
+        session = self._session_for(assignment, students, "student_1")
+
+        for metadata in [
+            {"question_number": 1},              # missing seconds
+            {"seconds": 30},                      # missing question_number
+            {"question_number": 1, "seconds": 0}, # zero — excluded, not counted as a real 0s data point
+            {"question_number": 1, "seconds": -5},
+        ]:
+            ActivityLog.objects.create(
+                session=session, event_type=ACTIVITY_EVENT_QUESTION_TIME_SPENT,
+                occurred_at=timezone.now(), metadata=metadata,
+            )
+
+        resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/analytics/")
+        diff_by = {(q["set_label"], q["question_number"]): q for q in resp.json()["data"]["question_difficulty"]}
+        assert diff_by[("Set A", 1)]["average_seconds_spent"] is None  # nothing valid contributed
+
+    @patch("assessments.views.fetch_batch_roster")
+    def test_a_question_with_no_time_data_stays_null_not_zero(self, mock_roster, admin_client, analytics_setup):
+        # No question_time_spent events at all anywhere in this fixture —
+        # every question's average must be null (unknown), never a
+        # misleading 0 that looks like "everyone answered instantly."
+        mock_roster.return_value = analytics_setup["roster"]
+        assignment = analytics_setup["assignment"]
+        resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/analytics/")
+        assert all(q["average_seconds_spent"] is None for q in resp.json()["data"]["question_difficulty"])

@@ -287,7 +287,7 @@ export default function AdminPracticePage() {
 
   return (
     <AdminLayout>
-      <PageWrapper className="max-w-5xl">
+      <PageWrapper>
 
         <PageHeader
           title="Practice"

@@ -264,7 +264,7 @@ export default function PracticeModulePage() {
 
   return (
     <AdminLayout>
-      <PageWrapper className="max-w-5xl">
+      <PageWrapper>
 
         <PageHeader
           title={module?.name ?? ""}

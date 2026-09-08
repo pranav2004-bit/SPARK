@@ -2,15 +2,18 @@ import logging
 import uuid
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
+from django.core.validators import EmailValidator
 from django.db import connection
 from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated, SAFE_METHODS
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from django.core.cache import cache
 
 from core.responses import success_response, error_response
-from core.permissions import IsAdminUser, IsStudentUser, IsSuperAdminUser, IsInternalService, IsAdminOrSuperAdmin
+from core.permissions import IsAdminUser, IsStudentUser, IsSuperAdminUser, IsInternalService, IsAdminOrSuperAdmin, IsITUser, IsSuperAdminOrIT, IsAdminOrSuperAdminOrIT
+from .models import Department
 from .serializers import (
     LoginSerializer, LogoutSerializer,
     StudentPasswordResetSerializer, AdminPasswordResetSerializer,
@@ -19,6 +22,7 @@ from .serializers import (
     AdminPasswordResetByIdSerializer,
     AdminSelfUpdateSerializer, AdminChangePasswordSerializer,
     StudentChangePasswordSerializer,
+    DepartmentSerializer, DepartmentCreateSerializer, DepartmentUpdateSerializer,
 )
 from .tokens import get_tokens_for_user
 from .throttling import LoginAttemptThrottle
@@ -116,7 +120,7 @@ class LoginView(APIView):
             user_data["student_id"] = user.student_id
             user_data["fullname"] = user.name or ""
             user_data["is_profile_completed"] = user.is_profile_completed
-        if role in ("admin", "super_admin"):
+        if role in ("admin", "super_admin", "it"):
             user_data["id"] = str(user.id)
             user_data["name"] = user.name
         if user.institution_id:
@@ -147,8 +151,12 @@ class LogoutView(APIView):
 # ── Password Reset ─────────────────────────────────────────────────────────────
 
 class StudentPasswordResetView(APIView):
-    """Admin resets a student's password to default (no email required)."""
-    permission_classes = [IsAdminUser]
+    """IT resets a student's password to default (no email required).
+
+    Exclusive to IT (2026-08-19) — student account management, like all
+    Batches/Students CRUD, is IT's responsibility; Admin is read/query-only.
+    """
+    permission_classes = [IsITUser]
 
     def post(self, request, student_id):
         try:
@@ -159,8 +167,8 @@ class StudentPasswordResetView(APIView):
             logger.critical("Data integrity error: multiple auth records for student_id=%s", student_id)
             return error_response("System error", status_code=500)
 
-        # IDOR check: admin can only reset students within their own institution.
-        # The leading `and` is intentionally removed — if the admin has no institution_id
+        # IDOR check: IT can only reset students within their own institution.
+        # The leading `and` is intentionally removed — if the IT user has no institution_id
         # (misconfigured account), the check must still fire, not be skipped.
         if user.institution_id != request.user.institution_id:
             return error_response("Access denied", status_code=403)
@@ -170,7 +178,7 @@ class StudentPasswordResetView(APIView):
         user.token_version += 1  # invalidate existing tokens immediately
         user.save(update_fields=["password", "force_password_change", "token_version"])
         logger.info(
-            "Student %s password reset to default by admin=%s from IP=%s",
+            "Student %s password reset to default by it_user=%s from IP=%s",
             user.student_id, request.user.email, _get_client_ip(request),
         )
         return success_response(message="Password reset to default successfully")
@@ -270,8 +278,10 @@ def _admin_profile_data(user) -> dict:
 
 
 class AdminSelfProfileView(APIView):
-    """Admin views or updates their own profile (name only; email is immutable)."""
-    permission_classes = [IsAdminUser]
+    """Admin or Super Admin views or updates their own profile (name only;
+    email is immutable). Opened to Super Admin 2026-08-20, mirroring the
+    self-service profile Admin already had."""
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def get(self, request):
         user = request.user
@@ -290,7 +300,7 @@ class AdminSelfProfileView(APIView):
 
         user.name = serializer.validated_data.get("name", user.name)
         user.save(update_fields=["name", "updated_at"])
-        logger.info("Admin %s updated their profile name", user.email)
+        logger.info("%s %s updated their profile name", user.role, user.email)
         return success_response(
             data=_admin_profile_data(user),
             message="Profile updated successfully.",
@@ -298,8 +308,9 @@ class AdminSelfProfileView(APIView):
 
 
 class AdminChangePasswordView(APIView):
-    """Admin changes their own password."""
-    permission_classes = [IsAdminUser]
+    """Admin or Super Admin changes their own password. Opened to Super
+    Admin 2026-08-20, mirroring the self-service change Admin already had."""
+    permission_classes = [IsAdminOrSuperAdmin]
 
     def post(self, request):
         serializer = AdminChangePasswordSerializer(data=request.data)
@@ -324,8 +335,8 @@ class AdminChangePasswordView(APIView):
         user.token_version += 1  # invalidate all old tokens — new login required
         user.save(update_fields=["password", "force_password_change", "token_version", "updated_at"])
         logger.info(
-            "Admin %s changed their password from IP=%s",
-            user.email, _get_client_ip(request),
+            "%s %s changed their password from IP=%s",
+            user.role, user.email, _get_client_ip(request),
         )
         tokens = get_tokens_for_user(user)
         return success_response(data=tokens, message="Password changed successfully.")
@@ -379,8 +390,16 @@ class AdminUserLookupView(APIView):
 # ── Admin Management (Super Admin only) ────────────────────────────────────────
 
 class AdminListCreateView(APIView):
-    """List all admin accounts or create a new one. Super Admin only."""
-    permission_classes = [IsSuperAdminUser]
+    """List all admin accounts (Super Admin, IT) or create a new one (IT only).
+
+    Admin account management moved to IT (2026-08-19): phase 1 gave IT the
+    same full access Super Admin had (validated live); phase 2, same day,
+    restricts Super Admin to read-only here, matching the Batches treatment.
+    """
+    def get_permissions(self):
+        if self.request.method in SAFE_METHODS:
+            return [IsSuperAdminOrIT()]
+        return [IsITUser()]
 
     def get(self, request):
         admins = User.objects.filter(role="admin").order_by("-created_at")
@@ -393,17 +412,18 @@ class AdminListCreateView(APIView):
 
         data = serializer.validated_data
 
-        # institution_id flows from the super admin's own account — they belong
-        # to one college and every faculty they create is scoped to that same college.
+        # institution_id flows from the creator's own account (super_admin or,
+        # since 2026-08-19, it) — they belong to one college and every faculty
+        # account they create is scoped to that same college.
         institution_id = request.user.institution_id
         if not institution_id:
             logger.error(
-                "Super admin %s has no institution_id — cannot create faculty account.",
-                request.user.email,
+                "%s %s has no institution_id — cannot create faculty account.",
+                request.user.role, request.user.email,
             )
             return error_response(
-                "Super admin account is not linked to an institution. "
-                "Contact the platform IT team to assign an institution.",
+                "Your account is not linked to an institution. "
+                "Contact the platform team to assign an institution.",
                 status_code=500,
             )
 
@@ -416,14 +436,15 @@ class AdminListCreateView(APIView):
             email=data["email"],
             role="admin",
             name=data.get("name", ""),
+            department=data.get("department", ""),
             institution_id=institution_id,
             force_password_change=True,  # must change password on first login
         )
         admin.set_password(settings.ADMIN_DEFAULT_PASSWORD)
         admin.save()
         logger.info(
-            "Admin account created: %s by super_admin=%s institution_id=%s IP=%s",
-            admin.email, request.user.email, institution_id, _get_client_ip(request),
+            "Admin account created: %s by %s=%s institution_id=%s IP=%s",
+            admin.email, request.user.role, request.user.email, institution_id, _get_client_ip(request),
         )
         return success_response(
             data=AdminSerializer(admin).data,
@@ -433,8 +454,13 @@ class AdminListCreateView(APIView):
 
 
 class AdminDetailView(APIView):
-    """Retrieve, update (name / is_active), or delete an admin account. Super Admin only."""
-    permission_classes = [IsSuperAdminUser]
+    """Retrieve an admin account (Super Admin, IT); update (name / is_active)
+    or delete (IT only) — see AdminListCreateView above for the 2026-08-19
+    phase 1/phase 2 history."""
+    def get_permissions(self):
+        if self.request.method in SAFE_METHODS:
+            return [IsSuperAdminOrIT()]
+        return [IsITUser()]
 
     def _get_admin(self, pk):
         try:
@@ -466,11 +492,14 @@ class AdminDetailView(APIView):
         if "is_active" in data:
             admin.is_active = data["is_active"]
             update_fields.append("is_active")
+        if "department" in data:
+            admin.department = data["department"]
+            update_fields.append("department")
 
         admin.save(update_fields=update_fields)
         logger.info(
-            "Admin %s updated by super_admin=%s — fields: %s",
-            admin.email, request.user.email, update_fields,
+            "Admin %s updated by %s=%s — fields: %s",
+            admin.email, request.user.role, request.user.email, update_fields,
         )
         return success_response(
             data=AdminSerializer(admin).data,
@@ -484,13 +513,15 @@ class AdminDetailView(APIView):
 
         email = admin.email
         admin.delete()
-        logger.info("Admin %s permanently deleted by super_admin=%s", email, request.user.email)
+        logger.info("Admin %s permanently deleted by %s=%s", email, request.user.role, request.user.email)
         return success_response(message="Admin account deleted permanently.")
 
 
 class AdminResetDefaultPasswordView(APIView):
-    """Super Admin resets an admin's password back to the default (spark@123)."""
-    permission_classes = [IsSuperAdminUser]
+    """Reset an admin's password back to the default (spark@123). IT-exclusive
+    (2026-08-19, phase 2) — a write-only action with no read equivalent, so
+    Super Admin loses it outright rather than keeping a read-only remnant."""
+    permission_classes = [IsITUser]
 
     def post(self, request, pk):
         try:
@@ -503,10 +534,127 @@ class AdminResetDefaultPasswordView(APIView):
         admin.token_version += 1  # invalidate existing tokens immediately
         admin.save(update_fields=["password", "force_password_change", "token_version", "updated_at"])
         logger.info(
-            "Admin %s password reset to default by super_admin=%s IP=%s",
-            admin.email, request.user.email, _get_client_ip(request),
+            "Admin %s password reset to default by %s=%s IP=%s",
+            admin.email, request.user.role, request.user.email, _get_client_ip(request),
         )
         return success_response(message="Password reset to default successfully.")
+
+
+MAX_BULK_IMPORT = 1000
+
+
+def _bulk_create_accounts(request, role, default_password):
+    """Shared by AdminBulkCreateView and SuperAdminBulkCreateView (2026-08-20,
+    revised same day) — bulk CSV import for IT, mirroring
+    AdminStudentBulkCreateView in user-service exactly: the CSV is a single
+    column of emails (source of mail IDs only), with one Department picked
+    in the UI and applied to every row — same shape as the student bulk
+    import's shared Department+Batch, not a per-row column. `name` is not
+    collected here; bulk-created accounts start blank and can be renamed via
+    the ordinary edit flow, same as bulk-created students. One POST with the
+    whole email list, existing emails pre-fetched once (not per-email),
+    every email appended to `results` whether it succeeds or fails, response
+    {total, created, rejected, results}."""
+    emails_raw = request.data.get("emails")
+    department = str(request.data.get("department", "")).strip()
+
+    if not isinstance(emails_raw, list):
+        return error_response("emails must be a list of strings.", status_code=400)
+    if not emails_raw:
+        return error_response("No emails provided.", status_code=400)
+    if len(emails_raw) > MAX_BULK_IMPORT:
+        return error_response(
+            f"Maximum {MAX_BULK_IMPORT} accounts per import. Received {len(emails_raw)}.",
+            status_code=400,
+        )
+    if not department:
+        return error_response("department is required.", status_code=400)
+
+    institution_id = request.user.institution_id
+    if not institution_id:
+        logger.error(
+            "IT %s has no institution_id — cannot bulk-create %s accounts.",
+            request.user.email, role,
+        )
+        return error_response(
+            "Your account is not linked to an institution. "
+            "Contact the platform team to assign an institution.",
+            status_code=500,
+        )
+
+    email_validator = EmailValidator()
+
+    normalized = [str(e if e is not None else "").strip().lower() for e in emails_raw]
+
+    non_empty_emails = [e for e in normalized if e]
+    existing_emails = set(
+        User.objects.filter(email__in=non_empty_emails).values_list("email", flat=True)
+    )
+
+    results = []
+    seen = set()
+    created_count = 0
+    rejected_count = 0
+
+    for email in normalized:
+        if not email:
+            results.append({"email": "(empty)", "status": "rejected", "reason": "Email is required."})
+            rejected_count += 1
+            continue
+
+        try:
+            email_validator(email)
+        except ValidationError:
+            results.append({"email": email, "status": "rejected", "reason": "Invalid email format."})
+            rejected_count += 1
+            continue
+
+        if email in seen:
+            results.append({"email": email, "status": "rejected", "reason": "Duplicate in import file."})
+            rejected_count += 1
+            continue
+        seen.add(email)
+
+        if email in existing_emails:
+            results.append({"email": email, "status": "rejected", "reason": "An account with this email already exists."})
+            rejected_count += 1
+            continue
+
+        account = User(
+            email=email,
+            role=role,
+            name="",
+            department=department,
+            institution_id=institution_id,
+            force_password_change=True,
+        )
+        account.set_password(default_password)
+        account.save()
+        existing_emails.add(email)
+        results.append({"email": email, "status": "created"})
+        created_count += 1
+
+    logger.info(
+        "Bulk %s import: %s created, %s rejected, by it=%s institution_id=%s IP=%s",
+        role, created_count, rejected_count, request.user.email, institution_id, _get_client_ip(request),
+    )
+    return success_response(
+        data={
+            "total": len(normalized),
+            "created": created_count,
+            "rejected": rejected_count,
+            "results": results,
+        },
+        message=f"Import complete: {created_count} created, {rejected_count} rejected.",
+    )
+
+
+class AdminBulkCreateView(APIView):
+    """Bulk-create admin accounts from a CSV-derived row list. IT only."""
+    permission_classes = [IsITUser]
+
+    def post(self, request):
+        return _bulk_create_accounts(request, "admin", settings.ADMIN_DEFAULT_PASSWORD)
 
 
 class AdminPasswordResetByIdView(APIView):
@@ -534,6 +682,276 @@ class AdminPasswordResetByIdView(APIView):
             admin.email, request.user.email, _get_client_ip(request),
         )
         return success_response(message="Admin password reset successfully.")
+
+
+# ── Super Admin account management (IT-exclusive) ────────────────────────────
+# Added 2026-08-20: IT is now the platform's bootstrapped root (see
+# create_default_it), and provisions Super Admin accounts the same way it
+# already provisions Admin accounts — byte-for-byte the same mechanism as
+# AdminListCreateView / AdminDetailView / AdminResetDefaultPasswordView
+# above. Unlike Admin management, there is no read-only remnant for the
+# managed role: a Super Admin has zero access here, not even GET — matching
+# how an Admin has zero visibility into other Admin accounts today. This
+# replaces the old IT-account-management block (ITListCreateView /
+# ITDetailView / ITResetDefaultPasswordView, Super-Admin-only) — IT is now
+# single-account and bootstrapped, so nothing creates additional IT accounts.
+
+class SuperAdminListCreateView(APIView):
+    """List all super_admin accounts or create a new one. IT only."""
+    permission_classes = [IsITUser]
+
+    def get(self, request):
+        super_admins = User.objects.filter(role="super_admin").order_by("-created_at")
+        return success_response(data=AdminSerializer(super_admins, many=True).data)
+
+    def post(self, request):
+        serializer = AdminCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation failed", errors=serializer.errors, status_code=400)
+
+        data = serializer.validated_data
+
+        # Same institution-scoping rule as admin creation — a super_admin
+        # account belongs to the same college as the IT account that created it.
+        institution_id = request.user.institution_id
+        if not institution_id:
+            logger.error(
+                "IT %s has no institution_id — cannot create super_admin account.",
+                request.user.email,
+            )
+            return error_response(
+                "Your account is not linked to an institution. "
+                "Contact the platform team to assign an institution.",
+                status_code=500,
+            )
+
+        if User.objects.filter(email=data["email"]).exists():
+            return error_response(
+                "An account with this email already exists.", status_code=409
+            )
+
+        super_admin = User(
+            email=data["email"],
+            role="super_admin",
+            name=data.get("name", ""),
+            department=data.get("department", ""),
+            institution_id=institution_id,
+            force_password_change=True,  # must change password on first login
+        )
+        super_admin.set_password(settings.SUPERADMIN_DEFAULT_PASSWORD)
+        super_admin.save()
+        logger.info(
+            "Super admin account created: %s by it=%s institution_id=%s IP=%s",
+            super_admin.email, request.user.email, institution_id, _get_client_ip(request),
+        )
+        return success_response(
+            data=AdminSerializer(super_admin).data,
+            message="Super admin account created successfully.",
+            status_code=201,
+        )
+
+
+class SuperAdminDetailView(APIView):
+    """Retrieve, update (name / is_active), or delete a super_admin account. IT only."""
+    permission_classes = [IsITUser]
+
+    def _get_super_admin(self, pk):
+        try:
+            return User.objects.get(pk=pk, role="super_admin")
+        except User.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        super_admin = self._get_super_admin(pk)
+        if not super_admin:
+            return error_response("Super admin not found.", status_code=404)
+        return success_response(data=AdminSerializer(super_admin).data)
+
+    def patch(self, request, pk):
+        super_admin = self._get_super_admin(pk)
+        if not super_admin:
+            return error_response("Super admin not found.", status_code=404)
+
+        serializer = AdminUpdateExtendedSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation failed", errors=serializer.errors, status_code=400)
+
+        data = serializer.validated_data
+        update_fields = ["updated_at"]
+
+        if "name" in data:
+            super_admin.name = data["name"]
+            update_fields.append("name")
+        if "is_active" in data:
+            super_admin.is_active = data["is_active"]
+            update_fields.append("is_active")
+        if "department" in data:
+            super_admin.department = data["department"]
+            update_fields.append("department")
+
+        super_admin.save(update_fields=update_fields)
+        logger.info(
+            "Super admin %s updated by it=%s — fields: %s",
+            super_admin.email, request.user.email, update_fields,
+        )
+        return success_response(
+            data=AdminSerializer(super_admin).data,
+            message="Super admin updated successfully.",
+        )
+
+    def delete(self, request, pk):
+        super_admin = self._get_super_admin(pk)
+        if not super_admin:
+            return error_response("Super admin not found.", status_code=404)
+
+        email = super_admin.email
+        super_admin.delete()
+        logger.info("Super admin %s permanently deleted by it=%s", email, request.user.email)
+        return success_response(message="Super admin account deleted permanently.")
+
+
+class SuperAdminResetDefaultPasswordView(APIView):
+    """IT resets a super_admin's password back to the default."""
+    permission_classes = [IsITUser]
+
+    def post(self, request, pk):
+        try:
+            super_admin = User.objects.get(pk=pk, role="super_admin")
+        except User.DoesNotExist:
+            return error_response("Super admin not found.", status_code=404)
+
+        super_admin.set_password(settings.SUPERADMIN_DEFAULT_PASSWORD)
+        super_admin.force_password_change = True
+        super_admin.token_version += 1  # invalidate existing tokens immediately
+        super_admin.save(update_fields=["password", "force_password_change", "token_version", "updated_at"])
+        logger.info(
+            "Super admin %s password reset to default by it=%s IP=%s",
+            super_admin.email, request.user.email, _get_client_ip(request),
+        )
+        return success_response(message="Password reset to default successfully.")
+
+
+class SuperAdminBulkCreateView(APIView):
+    """Bulk-create super_admin accounts from a CSV-derived row list. IT only."""
+    permission_classes = [IsITUser]
+
+    def post(self, request):
+        return _bulk_create_accounts(request, "super_admin", settings.SUPERADMIN_DEFAULT_PASSWORD)
+
+
+# ── Department management (2026-08-20) ────────────────────────────────────────
+# Read: Admin + Super Admin + IT (they all consume this as dropdown/filter
+# options across the app). Write: IT only. Mirrors Batch's read/write split
+# in user-service (IsAdminOrSuperAdminOrIT / IsITUser), the closest existing
+# precedent for "IT-managed reference data other roles only read."
+
+class DepartmentListCreateView(APIView):
+    """List all departments for the caller's institution, or create one. IT-only create."""
+    def get_permissions(self):
+        if self.request.method in SAFE_METHODS:
+            return [IsAdminOrSuperAdminOrIT()]
+        return [IsITUser()]
+
+    def get(self, request):
+        institution_id = None if request.user.role == "super_admin" else getattr(request.user, "institution_id", None)
+        departments = Department.objects.all()
+        if institution_id:
+            departments = departments.filter(institution_id=institution_id)
+        return success_response(data=DepartmentSerializer(departments, many=True).data)
+
+    def post(self, request):
+        institution_id = request.user.institution_id
+        if not institution_id:
+            logger.error("IT %s has no institution_id — cannot create department.", request.user.email)
+            return error_response(
+                "Your account is not linked to an institution. "
+                "Contact the platform team to assign an institution.",
+                status_code=500,
+            )
+
+        serializer = DepartmentCreateSerializer(data=request.data, context={"institution_id": institution_id})
+        if not serializer.is_valid():
+            return error_response("Validation failed", errors=serializer.errors, status_code=400)
+
+        data = serializer.validated_data
+        department = Department.objects.create(
+            code=data["code"],
+            name=data.get("name", ""),
+            institution_id=institution_id,
+            is_active=data.get("is_active", True),
+        )
+        logger.info(
+            "Department created: %s by it=%s institution_id=%s IP=%s",
+            department.code, request.user.email, institution_id, _get_client_ip(request),
+        )
+        return success_response(
+            data=DepartmentSerializer(department).data,
+            message="Department created successfully.",
+            status_code=201,
+        )
+
+
+class DepartmentDetailView(APIView):
+    """Retrieve, update (name / is_active), or delete a department. IT-only write."""
+    def get_permissions(self):
+        if self.request.method in SAFE_METHODS:
+            return [IsAdminOrSuperAdminOrIT()]
+        return [IsITUser()]
+
+    def _get_department(self, request, pk):
+        institution_id = None if request.user.role == "super_admin" else getattr(request.user, "institution_id", None)
+        qs = Department.objects.all()
+        if institution_id:
+            qs = qs.filter(institution_id=institution_id)
+        try:
+            return qs.get(pk=pk)
+        except Department.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        department = self._get_department(request, pk)
+        if not department:
+            return error_response("Department not found.", status_code=404)
+        return success_response(data=DepartmentSerializer(department).data)
+
+    def patch(self, request, pk):
+        department = self._get_department(request, pk)
+        if not department:
+            return error_response("Department not found.", status_code=404)
+
+        serializer = DepartmentUpdateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation failed", errors=serializer.errors, status_code=400)
+
+        data = serializer.validated_data
+        update_fields = ["updated_at"]
+
+        if "name" in data:
+            department.name = data["name"]
+            update_fields.append("name")
+        if "is_active" in data:
+            department.is_active = data["is_active"]
+            update_fields.append("is_active")
+
+        department.save(update_fields=update_fields)
+        logger.info(
+            "Department %s updated by it=%s — fields: %s",
+            department.code, request.user.email, update_fields,
+        )
+        return success_response(
+            data=DepartmentSerializer(department).data,
+            message="Department updated successfully.",
+        )
+
+    def delete(self, request, pk):
+        department = self._get_department(request, pk)
+        if not department:
+            return error_response("Department not found.", status_code=404)
+
+        code = department.code
+        department.delete()
+        logger.info("Department %s permanently deleted by it=%s", code, request.user.email)
+        return success_response(message="Department deleted permanently.")
 
 
 # ── Internal service-to-service endpoints (user-service → auth-service) ────────

@@ -736,7 +736,7 @@ export default function PracticeQuestionEditorPage() {
   if (loading) {
     return (
       <AdminLayout>
-        <PageWrapper className="max-w-5xl">
+        <PageWrapper>
           <div className="h-4 w-48 rounded animate-pulse mb-5"  style={{ background: T.surface }} />
           <div className="h-8 w-56 rounded-lg animate-pulse mb-8" style={{ background: T.surface }} />
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -753,7 +753,7 @@ export default function PracticeQuestionEditorPage() {
 
   return (
     <AdminLayout>
-      <PageWrapper className="max-w-5xl">
+      <PageWrapper>
 
         {/* ── Breadcrumb ──────────────────────────────────────────────────── */}
         <Breadcrumb detail={detail} onNavigate={guardedNavigate} backHref={backHref} />

@@ -26,7 +26,15 @@ export interface SuperAdminUser {
   force_password_change?: boolean;
 }
 
-export type AuthUser = AdminUser | StudentUser | SuperAdminUser;
+export interface ITUser {
+  id: string;
+  email: string;
+  name: string;
+  role: "it";
+  force_password_change?: boolean;
+}
+
+export type AuthUser = AdminUser | StudentUser | SuperAdminUser | ITUser;
 
 export interface TokenPair {
   access_token: string;
@@ -46,6 +54,11 @@ export interface StudentLoginResponse {
 export interface SuperAdminLoginResponse {
   success: true;
   data: TokenPair & { user: SuperAdminUser };
+}
+
+export interface ITLoginResponse {
+  success: true;
+  data: TokenPair & { user: ITUser };
 }
 
 // ── API ────────────────────────────────────────────────────────────────────────
@@ -81,18 +94,19 @@ export interface Batch {
   updated_at: string;
 }
 
-export type Department =
-  | "CSD"
-  | "CSM"
-  | "CSE"
-  | "CSC"
-  | "ECE"
-  | "IT"
-  | "EEE"
-  | "MECH"
-  | "CIVIL"
-  | "CHEM"
-  | "BIOTECHNOLOGY";
+// Backend-managed since 2026-08-20 (IT's Departments module) — no longer a
+// fixed compile-time union. Valid values come from GET /auth/departments/
+// at runtime (see @/lib/departmentsContext), not from this type.
+export type Department = string;
+
+export interface DepartmentRecord {
+  id: string;
+  code: string;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
 
 export interface Student {
   id: string;
@@ -310,6 +324,15 @@ export interface QuestionSet {
   order: number;
   question_count: number;
   total_marks: number;
+  section_count: number;
+}
+
+export interface QuestionSection {
+  id: string;
+  set: string;
+  title: string;
+  order: number;
+  question_count: number;
 }
 
 export type AssessmentQuestionContentType = "text" | "image" | "both";
@@ -333,6 +356,7 @@ export interface AssessmentQuestionOption {
 export interface AssessmentQuestion {
   id: string;
   set: string;
+  section: string;
   question_number: number;
   question_type: "mcq";
   mcq_type: AssessmentMcqType;
@@ -388,6 +412,11 @@ export interface StudentAssignmentListItem {
   global_start_time: string | null;
   global_expire_time: string;
   session_status: AssessmentSessionStatus | null;
+  // Added 2026-08-27 for the pre-exam briefing screen — from this
+  // student's own allocated set specifically (see the backend's own
+  // comment on StudentAssignmentListView for why that's always accurate).
+  total_marks: number;
+  question_count: number;
 }
 
 export interface StudentStartSessionResponse {
@@ -416,6 +445,8 @@ export interface StudentQuestion {
   marks: number;
   options: StudentQuestionOption[];
   selected_option_ids: string[];
+  section_id: string;
+  section_title: string;
 }
 
 export interface StudentSessionQuestionsResponse {
@@ -433,12 +464,53 @@ export interface StudentSubmitResponse {
   total_marks: number | null;
 }
 
+// ── Admin: Mock/Trial Exam Sessions (added 2026-08-27) ───────────────────────
+// An admin dry-run on a paper they own — no assignment, no roster, no
+// malpractice tracking. Reuses StudentSessionQuestionsResponse/
+// StudentQuestion/StudentQuestionOption above (the trial questions endpoint
+// returns the identical shape) — only the start/submit/results-list shapes
+// differ from their student counterparts.
+
+export interface AdminTrialStartResponse {
+  session_id: string;
+  ends_at: string;
+  status: AssessmentSessionStatus;
+  set_label: string;
+}
+
+export interface AdminTrialSubmitResponse {
+  session_id: string;
+  status: AssessmentSessionStatus;
+  score: number | null;
+  total_marks: number | null;
+}
+
+export interface AdminTrialResultRow {
+  id: string;
+  set_label: string;
+  score: number;
+  total_marks: number;
+  percentage: number;
+  duration_seconds: number;
+  ended_at: string;
+  attempted_by_name: string;
+  attempted_by_email: string;
+}
+
 // ── Admin: Results (Phase 7) ─────────────────────────────────────────────────
 
 export type AdminResultExamStatus = "pending" | "writing" | "submitted";
 
+export interface AdminResultsPage extends PaginatedResponse<AdminResultRow> {
+  // The full set-label roster for this assignment, independent of whatever
+  // filters (including ?set= itself) narrowed `results` — lets the Set
+  // filter dropdown stay populated even when a set filter is applied.
+  available_sets: string[];
+}
+
 export interface AdminResultRow {
   result_id: string | null;
+  session_id: string | null;
   student_user_id: string;
   student_roll_id: string;
   student_name: string;
@@ -476,18 +548,45 @@ export interface AdminResultResponsesData {
   questions: AdminResultResponseQuestion[];
 }
 
-export interface AdminActivityLogEntry {
-  event_type: string;
-  occurred_at: string;
-  metadata: Record<string, unknown>;
+export interface AdminQuestionResponseStudent {
+  student_user_id: string;
+  student_roll_id: string;
+  student_name: string;
+  department: string;
+  exam_status: AdminResultExamStatus;
+  selected_option_ids: string[];
+  is_correct: boolean;
+  answered: boolean;
 }
 
-export interface AdminResultLogsData {
-  result_id: string;
-  malpractice_flag: boolean;
-  malpractice_reasons: string[];
+export interface AdminQuestionResponsesData {
+  question_id: string;
+  question_number: number;
+  set_label: string;
+  question_text: string;
+  question_image_url: string | null;
+  marks: number;
+  options: AdminResultResponseQuestion["options"];
   count: number;
   total_pages: number;
   current_page: number;
-  logs: AdminActivityLogEntry[];
+  students: AdminQuestionResponseStudent[];
+}
+
+export interface AdminSessionTimelineEvent {
+  description: string;
+  occurred_at: string;
+}
+
+// The plain-English "logs/tracking" popup's data — keyed by session_id
+// (not result_id), since it also covers a student who's still mid-exam.
+export interface AdminSessionTimelineData {
+  session_id: string;
+  exam_status: string;
+  malpractice_flag: boolean;
+  malpractice_reasons: string[];
+  total_event_count: number;
+  truncated: boolean;
+  retention_days: number;
+  events: AdminSessionTimelineEvent[];
 }

@@ -37,6 +37,8 @@ def session_is_writable(session, assignment=None):
       1. assignment.status != 'CLOSED' — an admin emergency-closed the
          exam; independent of whether the sweep's cascade has caught this
          specific session yet (defense in depth against a cascade bug/lag).
+         Skipped entirely for a trial session (assignment is None,
+         2026-08-27) — an admin mock test has no assignment to be closed.
       2. session.status == 'IN_PROGRESS' — already finalized by a prior
          submit, the sweep, or a close/ cascade.
       3. now() < session.ends_at — the deadline itself.
@@ -44,7 +46,7 @@ def session_is_writable(session, assignment=None):
     if assignment is None:
         assignment = session.assignment
 
-    if assignment.status == ASSIGNMENT_STATUS_CLOSED:
+    if assignment is not None and assignment.status == ASSIGNMENT_STATUS_CLOSED:
         return False, "This assessment has been closed by the administrator."
 
     if session.status != SESSION_STATUS_IN_PROGRESS:

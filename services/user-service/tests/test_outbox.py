@@ -60,23 +60,23 @@ def _make_outbox_event(event_type="delete_student_auth", status="pending",
 @pytest.mark.django_db
 class TestDeleteViewCreatesOutboxEvent:
 
-    def test_delete_creates_outbox_event(self, admin_client, student):
+    def test_delete_creates_outbox_event(self, it_client, student):
         from users.models import OutboxEvent
 
         pk = student.pk
-        resp = admin_client.delete(f"/api/users/students/{pk}/")
+        resp = it_client.delete(f"/api/users/students/{pk}/")
 
         assert resp.status_code == 200
         assert OutboxEvent.objects.count() == 1
 
-    def test_outbox_event_has_correct_payload(self, admin_client, student):
+    def test_outbox_event_has_correct_payload(self, it_client, student):
         from users.models import OutboxEvent, Student
 
         pk = student.pk
         student_id = student.student_id
         user_id = str(student.user_id)
 
-        admin_client.delete(f"/api/users/students/{pk}/")
+        it_client.delete(f"/api/users/students/{pk}/")
 
         event = OutboxEvent.objects.get()
         assert event.event_type == OutboxEvent.EventType.DELETE_STUDENT_AUTH
@@ -86,26 +86,26 @@ class TestDeleteViewCreatesOutboxEvent:
         assert event.payload["student_id"] == student_id
         assert event.payload["user_id"] == user_id
 
-    def test_delete_and_outbox_are_atomic(self, admin_client, student):
+    def test_delete_and_outbox_are_atomic(self, it_client, student):
         """
         If the student row is gone from the DB, the outbox event must also
         exist — they are written in the same transaction.
         """
         from users.models import Student, OutboxEvent
 
-        admin_client.delete(f"/api/users/students/{student.pk}/")
+        it_client.delete(f"/api/users/students/{student.pk}/")
 
         assert not Student.objects.filter(pk=student.pk).exists()
         assert OutboxEvent.objects.count() == 1
 
-    def test_no_direct_auth_call_on_delete(self, admin_client, student):
+    def test_no_direct_auth_call_on_delete(self, it_client, student):
         """
         The delete view must NOT call delete_student_auth() directly.
         Auth cleanup is delegated entirely to the outbox worker.
         """
         with patch("core.auth_client.delete_student_auth") as mock_delete, \
              patch("core.auth_client.delete_student_auth_by_user_id") as mock_by_id:
-            admin_client.delete(f"/api/users/students/{student.pk}/")
+            it_client.delete(f"/api/users/students/{student.pk}/")
             mock_delete.assert_not_called()
             mock_by_id.assert_not_called()
 
@@ -437,7 +437,7 @@ class TestRecoverStuckEvents:
 @pytest.mark.django_db
 class TestDeleteThenReAdd:
 
-    def test_outbox_event_carries_original_user_id(self, admin_client, student):
+    def test_outbox_event_carries_original_user_id(self, it_client, student):
         """
         The payload must contain the user_id of the deleted student, not a
         new one.  auth-service uses this to skip the delete if the student
@@ -446,7 +446,7 @@ class TestDeleteThenReAdd:
         from users.models import OutboxEvent
 
         original_user_id = str(student.user_id)
-        admin_client.delete(f"/api/users/students/{student.pk}/")
+        it_client.delete(f"/api/users/students/{student.pk}/")
 
         event = OutboxEvent.objects.get()
         assert event.payload["user_id"] == original_user_id
@@ -566,3 +566,100 @@ class TestCleanupOutboxCommand:
         # With 7-day retention: deleted.
         call_command("cleanup_outbox", retention_days=7)
         assert not OutboxEvent.objects.filter(pk=event.pk).exists()
+
+
+# ── run_outbox_worker: stale-connection self-healing (2026-08-17) ───────────
+#
+# run_outbox_worker is a hand-rolled infinite loop — unlike every other
+# long-running process on this platform (Celery beat/worker), it never goes
+# through a request/task lifecycle Django hooks into on its own, so nothing
+# ever refreshed a connection this loop broke. Found live: once the DB
+# connection dropped, every subsequent poll failed identically, forever,
+# until the container was manually restarted. The fix calls
+# close_old_connections() at the top of every pass — these tests lock that
+# behavior in without needing a real dropped connection or real elapsed time.
+
+class _StopLoop(Exception):
+    """Raised by the mocked time.sleep() to break out of the command's
+    otherwise-infinite loop once the test has seen enough iterations."""
+
+
+def _run_loop_for_n_iterations(n, recover_side_effect=None):
+    """Runs the real Command.handle() loop for exactly n passes, then raises
+    _StopLoop from inside the (mocked) sleep call — mirroring exactly how a
+    real SIGTERM would land, but deterministic and instant."""
+    from django.core.management import call_command
+
+    sleep_calls = []
+
+    def _fake_sleep(_seconds):
+        sleep_calls.append(1)
+        if len(sleep_calls) >= n:
+            raise _StopLoop()
+
+    with patch("users.management.commands.run_outbox_worker.close_old_connections") as mock_close, \
+         patch("users.management.commands.run_outbox_worker.recover_stuck_events",
+               side_effect=recover_side_effect if recover_side_effect is not None else ([0] * n)) as mock_recover, \
+         patch("users.management.commands.run_outbox_worker.process_batch", return_value=0) as mock_process, \
+         patch("time.sleep", side_effect=_fake_sleep):
+        with pytest.raises(_StopLoop):
+            call_command("run_outbox_worker")
+
+    return mock_close, mock_recover, mock_process
+
+
+@pytest.mark.django_db
+class TestRunOutboxWorkerConnectionRefresh:
+
+    def test_refreshes_the_connection_every_pass_before_touching_the_db(self, db, settings):
+        settings.OUTBOX_POLL_INTERVAL = 1
+
+        mock_close, mock_recover, mock_process = _run_loop_for_n_iterations(3)
+
+        assert mock_close.call_count == 3
+        assert mock_recover.call_count == 3
+        assert mock_process.call_count == 3
+
+    def test_a_failed_pass_does_not_poison_the_next_one(self, db, settings):
+        # The actual bug this closes: previously a broken connection kept
+        # failing forever because nothing ever told Django to discard it.
+        # Now every pass — including the one right after a failure — starts
+        # with its own close_old_connections() call, so recovery doesn't
+        # depend on anything the failed pass did or didn't clean up.
+        settings.OUTBOX_POLL_INTERVAL = 1
+
+        mock_close, mock_recover, mock_process = _run_loop_for_n_iterations(
+            3, recover_side_effect=[Exception("connection already closed"), 0, 0],
+        )
+
+        assert mock_close.call_count == 3
+        assert mock_recover.call_count == 3
+        # process_batch is only reached if recover_stuck_events() didn't
+        # raise — pass 1's exception short-circuits it, passes 2 and 3 don't.
+        assert mock_process.call_count == 2
+
+    def test_signal_handler_still_stops_the_loop_gracefully(self, db, settings):
+        # Sanity check that the fix didn't disturb the existing graceful-
+        # shutdown behavior: _running=False must still stop the loop even
+        # though close_old_connections() now also runs every pass.
+        settings.OUTBOX_POLL_INTERVAL = 1
+        from users.management.commands.run_outbox_worker import Command
+
+        calls = {"n": 0}
+        real_init = Command.handle
+
+        def _stop_after_first_pass(self, *args, **options):
+            # Simulate SIGTERM landing during the very first pass's sleep.
+            def _fake_sleep(_seconds):
+                self._running = False
+
+            with patch("time.sleep", side_effect=_fake_sleep):
+                real_init(self, *args, **options)
+
+        with patch("users.management.commands.run_outbox_worker.close_old_connections") as mock_close, \
+             patch("users.management.commands.run_outbox_worker.recover_stuck_events", return_value=0), \
+             patch("users.management.commands.run_outbox_worker.process_batch", return_value=0), \
+             patch.object(Command, "handle", _stop_after_first_pass):
+            call_command("run_outbox_worker")
+
+        assert mock_close.call_count == 1

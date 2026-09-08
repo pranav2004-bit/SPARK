@@ -26,15 +26,18 @@ from core.auth_service_client import resolve_user_names
 from core.cache_utils import safe_cache_get, safe_cache_set
 
 from .models import (
-    QuestionPaper, QuestionSet, Question, QuestionOption, MCQ_TYPE_SINGLE,
+    QuestionPaper, QuestionSet, QuestionSection, Question, QuestionOption, MCQ_TYPE_SINGLE,
     BatchAssignment, ASSIGNMENT_STATUS_SCHEDULED, ASSIGNMENT_STATUS_LIVE,
     ASSIGNMENT_STATUS_CLOSED,
     AssessmentSession, StudentSetAllocation, AssessmentResponse,
-    ActivityLog, ACTIVITY_EVENT_TYPE_CHOICES, ResultSummary,
+    ActivityLog, ACTIVITY_EVENT_TYPE_CHOICES, ACTIVITY_LOG_RETENTION_DAYS, ResultSummary,
+    ACTIVITY_EVENT_QUESTION_ANSWERED, ACTIVITY_EVENT_QUESTION_ANSWER_CHANGED,
+    ACTIVITY_EVENT_SCREENSHOT_ATTEMPT, ACTIVITY_EVENT_CONNECTION_LOST, ACTIVITY_EVENT_ADMIN_EXTENDED_TIME,
+    ACTIVITY_EVENT_QUESTION_TIME_SPENT,
     SESSION_STATUS_IN_PROGRESS, SESSION_STATUS_SUBMITTED, SESSION_STATUS_AUTO_SUBMITTED,
 )
 from .serializers import (
-    QuestionPaperSerializer, QuestionSetSerializer,
+    QuestionPaperSerializer, QuestionSetSerializer, QuestionSectionSerializer,
     QuestionSerializer, QuestionOptionSerializer, BatchAssignmentSerializer,
     StudentQuestionSerializer,
 )
@@ -269,7 +272,14 @@ class AdminPaperDetailView(APIView):
         denied = _require_paper_owner(paper, request)
         if denied:
             return denied
-        sets = paper.sets.annotate(question_count=Count("questions"))
+        # distinct=True on both — annotating two separate reverse relations
+        # (questions, sections) on the same queryset joins both tables, and
+        # without distinct the row fan-out from that join inflates each
+        # count by the other relation's row count.
+        sets = paper.sets.annotate(
+            question_count=Count("questions", distinct=True),
+            section_count=Count("sections", distinct=True),
+        )
         return success_response(data={
             "paper": QuestionPaperSerializer(paper).data,
             "sets": QuestionSetSerializer(sets, many=True).data,
@@ -399,9 +409,109 @@ class AdminSetDetailView(APIView):
         return success_response(message="Set deleted")
 
 
+# ── Admin: Question Sections ────────────────────────────────────────────────────
+
+class AdminSetSectionsView(APIView):
+    permission_classes = [IsAdminOrSuperAdmin]
+
+    def get(self, request, pk):
+        institution_id = _get_institution_id(request)
+        qset = get_object_or_404(
+            QuestionSet.objects.select_related("paper"),
+            pk=pk, paper__institution_id=institution_id,
+        )
+        denied = _require_paper_owner(qset.paper, request)
+        if denied:
+            return denied
+        sections = qset.sections.all()
+        return success_response(data={
+            "set": QuestionSetSerializer(qset).data,
+            "paper": QuestionPaperSerializer(qset.paper).data,
+            "sections": QuestionSectionSerializer(sections, many=True).data,
+        })
+
+    def post(self, request, pk):
+        institution_id = _get_institution_id(request)
+        qset = get_object_or_404(
+            QuestionSet.objects.select_related("paper"),
+            pk=pk, paper__institution_id=institution_id,
+        )
+        denied = _require_paper_owner(qset.paper, request)
+        if denied:
+            return denied
+        if qset.paper.is_locked():
+            return error_response("This paper is assigned and locked.", status_code=403)
+
+        data = {**request.data, "set": str(qset.id)}
+        if not data.get("order"):
+            max_order = qset.sections.aggregate(m=Max("order"))["m"] or 0
+            data["order"] = max_order + 1
+
+        s = QuestionSectionSerializer(data=data)
+        if not s.is_valid():
+            return error_response("Validation failed", errors=s.errors, status_code=400)
+        s.save()
+        return success_response(data=s.data, status_code=201, message="Section created")
+
+
+class AdminSectionDetailView(APIView):
+    permission_classes = [IsAdminOrSuperAdmin]
+
+    def _get(self, pk, institution_id):
+        return get_object_or_404(
+            QuestionSection.objects.select_related("set__paper"),
+            pk=pk, set__paper__institution_id=institution_id,
+        )
+
+    def get(self, request, pk):
+        institution_id = _get_institution_id(request)
+        section = self._get(pk, institution_id)
+        denied = _require_paper_owner(section.set.paper, request)
+        if denied:
+            return denied
+        questions = section.questions.all()
+        return success_response(data={
+            "section": QuestionSectionSerializer(section).data,
+            "set": QuestionSetSerializer(section.set).data,
+            "paper": QuestionPaperSerializer(section.set.paper).data,
+            "questions": QuestionSerializer(questions, many=True).data,
+        })
+
+    def patch(self, request, pk):
+        institution_id = _get_institution_id(request)
+        section = self._get(pk, institution_id)
+        denied = _require_paper_owner(section.set.paper, request)
+        if denied:
+            return denied
+        if section.set.paper.is_locked():
+            return error_response("This paper is assigned and locked.", status_code=403)
+        s = QuestionSectionSerializer(section, data=request.data, partial=True)
+        if not s.is_valid():
+            return error_response("Validation failed", errors=s.errors, status_code=400)
+        s.save()
+        return success_response(data=s.data, message="Section updated")
+
+    def delete(self, request, pk):
+        institution_id = _get_institution_id(request)
+        section = self._get(pk, institution_id)
+        denied = _require_paper_owner(section.set.paper, request)
+        if denied:
+            return denied
+        if section.set.paper.is_locked():
+            return error_response("This paper is assigned and locked.", status_code=403)
+        section.delete()
+        return success_response(message="Section deleted")
+
+
 # ── Admin: Questions ───────────────────────────────────────────────────────────
 
 class AdminSetQuestionsView(APIView):
+    """Legacy: creates a question directly under a set, bypassing sections.
+    The admin UI no longer calls this (it uses AdminSectionQuestionsView,
+    section-first, below) — kept live for any other integration still
+    pointed at it. A question created here still gets a real section via
+    Question.save()'s auto-default-section-per-set fallback (models.py), it
+    just isn't one the admin explicitly chose."""
     permission_classes = [IsAdminOrSuperAdmin]
 
     def post(self, request, pk):
@@ -459,12 +569,66 @@ class AdminSetQuestionsView(APIView):
         return success_response(data=QuestionSerializer(question).data, status_code=201, message="Question created")
 
 
+class AdminSectionQuestionsView(APIView):
+    """Same shape as AdminSetQuestionsView above, but scoped to a section —
+    the section-first admin UI creates questions here, not via the set-level
+    endpoint (that one still exists, untouched, for backward compatibility)."""
+    permission_classes = [IsAdminOrSuperAdmin]
+
+    def post(self, request, pk):
+        institution_id = _get_institution_id(request)
+        section = get_object_or_404(
+            QuestionSection.objects.select_related("set__paper"),
+            pk=pk, set__paper__institution_id=institution_id,
+        )
+        denied = _require_paper_owner(section.set.paper, request)
+        if denied:
+            return denied
+        if section.set.paper.is_locked():
+            return error_response("This paper is assigned and locked.", status_code=403)
+
+        content_type = request.data.get("question_content_type", "text")
+        image_key = request.data.get("question_image_key", "")
+        blocker = get_content_type_blocker(
+            content_type,
+            request.data.get("question_text", ""),
+            image_key,
+        )
+        if blocker:
+            return error_response(blocker, status_code=400)
+
+        real_size = None
+        if image_key:
+            real_size, err = _verify_and_scan_image(image_key)
+            if err:
+                return err
+            if not _paper_image_quota_ok(section.set.paper_id, exclude_bytes=0, additional_bytes=real_size):
+                try:
+                    delete_file(image_key)
+                except Exception:
+                    logger.warning("Failed to clean up over-quota image key=%s", image_key)
+                return error_response(
+                    "This paper has reached its image storage limit. Remove some images before adding more.",
+                    status_code=400,
+                )
+
+        data = {**request.data, "set": str(section.set_id), "section": str(section.id)}
+        s = QuestionSerializer(data=data)
+        if not s.is_valid():
+            return error_response("Validation failed", errors=s.errors, status_code=400)
+        question = s.save()
+        if real_size is not None:
+            question.question_image_size_bytes = real_size
+            question.save(update_fields=["question_image_size_bytes"])
+        return success_response(data=QuestionSerializer(question).data, status_code=201, message="Question created")
+
+
 class AdminQuestionDetailView(APIView):
     permission_classes = [IsAdminOrSuperAdmin]
 
     def _get(self, pk, institution_id):
         return get_object_or_404(
-            Question.objects.select_related("set__paper"),
+            Question.objects.select_related("set__paper", "section"),
             pk=pk, set__paper__institution_id=institution_id,
         )
 
@@ -478,6 +642,7 @@ class AdminQuestionDetailView(APIView):
         return success_response(data={
             "question": QuestionSerializer(question).data,
             "set": QuestionSetSerializer(question.set).data,
+            "section": QuestionSectionSerializer(question.section).data,
             "options": QuestionOptionSerializer(options, many=True).data,
         })
 
@@ -976,9 +1141,39 @@ class AdminAssignmentExtendSessionView(APIView):
         # global_expire_time on the assignment has no effect on an
         # already-frozen session.ends_at; this direct patch is the only way
         # to actually give one affected student more time.
+        #
+        # The status check above and this write used to be two separate
+        # steps — a real TOCTOU gap (found in a live-scenario audit,
+        # 2026-08-17): the beat sweep could finalize this exact session in
+        # the window between them, and the write would still land
+        # unconditionally, silently pushing a future ends_at onto an
+        # already-terminal, already-scored session. Re-checking status=
+        # IN_PROGRESS in the UPDATE's own WHERE clause closes that gap with
+        # the same conditional-update pattern used everywhere else in this
+        # file — whichever one "wins" the race is exactly what actually
+        # happens, instead of trusting a status read from moments earlier.
         new_ends_at = session.ends_at + timedelta(minutes=extend_minutes)
-        AssessmentSession.objects.filter(pk=session.pk).update(ends_at=new_ends_at)
+        updated = AssessmentSession.objects.filter(
+            pk=session.pk, status=SESSION_STATUS_IN_PROGRESS,
+        ).update(ends_at=new_ends_at)
+        if not updated:
+            session.refresh_from_db()
+            return error_response(
+                f"Cannot extend — this session finished (status={session.status}) "
+                "just as this request was being processed.",
+                status_code=409,
+            )
         session.refresh_from_db()
+
+        # Part of the session's own timeline (AdminSessionTimelineView) —
+        # an administrative action that affects the exam, logged
+        # server-side (never client-reported) since this endpoint itself
+        # is the sole source of truth for it.
+        ActivityLog.objects.create(
+            session=session, event_type=ACTIVITY_EVENT_ADMIN_EXTENDED_TIME,
+            occurred_at=timezone.now(),
+            metadata={"added_minutes": extend_minutes},
+        )
 
         return success_response(
             data={"session_id": str(session.id), "ends_at": session.ends_at},
@@ -1048,7 +1243,7 @@ class StudentAssignmentListView(APIView):
     def get(self, request):
         allocations = (
             StudentSetAllocation.objects.filter(student_id=request.user.id)
-            .select_related("assignment__paper")
+            .select_related("assignment__paper", "set")
         )
         assignment_ids = [a.assignment_id for a in allocations]
 
@@ -1073,6 +1268,15 @@ class StudentAssignmentListView(APIView):
                 "global_start_time": assignment.global_start_time,
                 "global_expire_time": assignment.global_expire_time,
                 "session_status": session_status_by_assignment.get(assignment.id),
+                # Added 2026-08-27 for the pre-exam briefing screen — safe to
+                # read from this student's own allocated set specifically
+                # (rather than "some set of the paper") because the
+                # readiness check enforces equal question counts/marks
+                # across every set of a paper before an assignment can even
+                # be created, so this always matches what the student is
+                # actually about to see regardless of which set they landed on.
+                "total_marks": alloc.set.total_marks(),
+                "question_count": alloc.set.questions.count(),
             })
 
         return success_response(data=results)
@@ -1186,6 +1390,17 @@ class StudentAnswerView(APIView):
                 "One or more selected options do not belong to this question.", status_code=400,
             )
 
+        # Read the prior state before the upsert so we can tell "first
+        # answer" from "changed answer" from "resaved the same thing" (a
+        # debounced autosave retry or a network retry with an identical
+        # payload) — the last of those logs nothing, avoiding pointless
+        # noise in the admin-facing timeline.
+        previous_selection = AssessmentResponse.objects.filter(
+            session=session, question=question,
+        ).values_list("selected_option_ids", flat=True).first()
+        previously_answered = previous_selection is not None
+
+        race_lost = False
         try:
             response_obj, _ = AssessmentResponse.objects.update_or_create(
                 session=session, question=question,
@@ -1195,8 +1410,25 @@ class StudentAnswerView(APIView):
             # Lost an upsert race against a concurrent identical PUT for
             # the same (session, question) — e.g. a genuine network retry
             # racing the original. The winner's row already holds
-            # equivalent data; just report the current state.
+            # equivalent data; just report the current state. Not logged
+            # as a separate activity event below — the winning request's
+            # own call already logged the one real write that happened.
             response_obj = AssessmentResponse.objects.get(session=session, question=question)
+            race_lost = True
+
+        if not race_lost:
+            if not previously_answered:
+                ActivityLog.objects.create(
+                    session=session, event_type=ACTIVITY_EVENT_QUESTION_ANSWERED,
+                    occurred_at=timezone.now(),
+                    metadata={"question_number": question.question_number},
+                )
+            elif set(previous_selection or []) != selected_set:
+                ActivityLog.objects.create(
+                    session=session, event_type=ACTIVITY_EVENT_QUESTION_ANSWER_CHANGED,
+                    occurred_at=timezone.now(),
+                    metadata={"question_number": question.question_number},
+                )
 
         return success_response(
             data={
@@ -1255,8 +1487,14 @@ class StudentSessionQuestionsView(APIView):
         session = get_object_or_404(
             AssessmentSession.objects.select_related("set"), pk=pk, student_id=request.user.id,
         )
+        # Ordered by section first, then question_number within it — the
+        # exam-taking UI groups its navigator by section (2026-08-28), and
+        # question_number is a set-wide sequence that isn't guaranteed to
+        # already fall in section order (e.g. after a section is added or
+        # reordered later), so sorting only by it wouldn't be reliable.
         questions = list(
-            session.set.questions.prefetch_related("options").order_by("question_number")
+            session.set.questions.select_related("section")
+            .prefetch_related("options").order_by("section__order", "question_number")
         )
         saved_answers = {
             str(qid): opts for qid, opts in
@@ -1273,6 +1511,262 @@ class StudentSessionQuestionsView(APIView):
             "ends_at": session.ends_at,
             "questions": data,
         })
+
+
+# ── Admin: Mock/Trial Exam Sessions (added 2026-08-27) ──────────────────────
+#
+# An admin can take the real exam-taking flow themselves on a paper they
+# own — before an assignment even exists (from the assign form's Final
+# Review step) or repeatably afterward (from an existing assignment's own
+# toolbar) — as a dry run. Deliberately reuses the exact same session/
+# response/scoring machinery as the real student flow above
+# (AssessmentSession, AssessmentResponse, finalize_sessions(),
+# session_is_writable()) rather than a parallel implementation, so the
+# taking experience and the scoring are provably identical, not just
+# similar. The one deliberate difference: no ActivityLog rows are ever
+# written here — no tab-switch/fullscreen/malpractice tracking for a solo
+# trial run, by design (there is also no assignment for a malpractice flag
+# to mean anything against).
+#
+# Every trial session has assignment=None (see that field's model
+# comment) and student_id=<the trialing admin's own user_id>. That NULL is
+# what keeps a trial permanently invisible to every real-student-facing
+# query in this file (they all filter by a concrete assignment), and what
+# lets the same admin retake the same paper an unlimited number of times
+# (Postgres never treats two NULLs as equal for the assignment+student_id
+# uniqueness constraint).
+
+def _get_or_start_trial_session(paper, admin_id, duration_minutes):
+    """Shared by AdminTrialStartView's two entry points (pre- and
+    post-assignment-creation) — resumes an already-IN_PROGRESS trial on
+    this paper for this admin if one exists (mirrors the real
+    start-session endpoint's resume behavior), else starts a fresh one on
+    the paper's first set. Returns (session, error_response_or_None)."""
+    qset = paper.sets.order_by("order").first()
+    if qset is None or qset.questions.count() == 0:
+        return None, error_response(
+            "This paper has no questions yet — add some before taking a mock test.", status_code=400,
+        )
+
+    existing = AssessmentSession.objects.filter(
+        assignment__isnull=True, student_id=admin_id, set__paper=paper, status=SESSION_STATUS_IN_PROGRESS,
+    ).order_by("-started_at").first()
+    if existing is not None:
+        return existing, None
+
+    session = AssessmentSession.objects.create(
+        assignment=None, student_id=admin_id, set=qset,
+        ends_at=timezone.now() + timedelta(minutes=duration_minutes),
+    )
+    return session, None
+
+
+class AdminTrialStartView(APIView):
+    """POST /api/assessments/admin/papers/<pk>/trial/start/ — start (or
+    resume) a mock test for this admin on this paper. `duration_minutes`
+    (int, required) comes from whatever the caller currently has in hand:
+    the assign form's own "Exam duration" field pre-creation, or an
+    existing assignment's exam_duration_minutes post-creation — either way
+    it's the admin's own trusted input, not something requiring the
+    student-side integrity guarantees."""
+    permission_classes = [IsAdminOrSuperAdmin]
+
+    def post(self, request, pk):
+        institution_id = _get_institution_id(request)
+        paper = get_object_or_404(QuestionPaper, pk=pk, institution_id=institution_id)
+        denied = _require_paper_owner(paper, request)
+        if denied:
+            return denied
+
+        try:
+            duration_minutes = int(request.data.get("duration_minutes"))
+            if duration_minutes <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return error_response("duration_minutes must be a positive integer.", status_code=400)
+
+        session, denied = _get_or_start_trial_session(paper, request.user.id, duration_minutes)
+        if denied:
+            return denied
+        return success_response(
+            data={"session_id": str(session.id), "ends_at": session.ends_at, "status": session.status,
+                  "set_label": session.set.label},
+            status_code=201, message="Mock test session ready",
+        )
+
+
+class AdminTrialSessionQuestionsView(APIView):
+    """GET /api/assessments/admin/trial/sessions/<pk>/questions/ — same
+    shape as StudentSessionQuestionsView above, scoped to a trial session
+    the requesting admin owns (assignment__isnull=True doubles as a
+    defense-in-depth guard: this can never resolve to a real student's
+    session even under an id-guessing attempt)."""
+    permission_classes = [IsAdminOrSuperAdmin]
+
+    def get(self, request, pk):
+        session = get_object_or_404(
+            AssessmentSession.objects.select_related("set"),
+            pk=pk, assignment__isnull=True, student_id=request.user.id,
+        )
+        questions = list(
+            session.set.questions.select_related("section")
+            .prefetch_related("options").order_by("section__order", "question_number")
+        )
+        saved_answers = {
+            str(qid): opts for qid, opts in
+            AssessmentResponse.objects.filter(session=session).values_list("question_id", "selected_option_ids")
+        }
+
+        data = StudentQuestionSerializer(questions, many=True).data
+        for q in data:
+            q["selected_option_ids"] = saved_answers.get(q["id"], [])
+
+        return success_response(data={
+            "session_id": str(session.id),
+            "session_status": session.status,
+            "ends_at": session.ends_at,
+            "questions": data,
+        })
+
+
+class AdminTrialAnswerView(APIView):
+    """PUT /api/assessments/admin/trial/sessions/<pk>/questions/<qid>/answer/
+    — same upsert semantics as StudentAnswerView above, minus the
+    ActivityLog "answered/changed" transparency events (no audit timeline
+    exists for a trial, and there's nothing to keep transparent to)."""
+    permission_classes = [IsAdminOrSuperAdmin]
+    throttle_classes = [AnswerSubmitRateThrottle]
+
+    def put(self, request, pk, qid):
+        session = get_object_or_404(
+            AssessmentSession, pk=pk, assignment__isnull=True, student_id=request.user.id,
+        )
+        question = get_object_or_404(Question, pk=qid, set_id=session.set_id)
+
+        ok, reason = session_is_writable(session, session.assignment)
+        if not ok:
+            return error_response(reason, status_code=403)
+
+        data = strip_client_timestamps(request.data)
+        selected_option_ids = data.get("selected_option_ids", [])
+        if not isinstance(selected_option_ids, list):
+            return error_response("selected_option_ids must be a list.", status_code=400)
+
+        valid_option_ids = {str(oid) for oid in question.options.values_list("id", flat=True)}
+        selected_set = {str(oid) for oid in selected_option_ids}
+        if not selected_set.issubset(valid_option_ids):
+            return error_response(
+                "One or more selected options do not belong to this question.", status_code=400,
+            )
+
+        response_obj, _ = AssessmentResponse.objects.update_or_create(
+            session=session, question=question,
+            defaults={"selected_option_ids": sorted(selected_set)},
+        )
+
+        return success_response(
+            data={
+                "question_id": str(question.id),
+                "selected_option_ids": response_obj.selected_option_ids,
+                "answered_at": response_obj.answered_at,
+            },
+            message="Answer saved",
+        )
+
+
+class AdminTrialSubmitView(APIView):
+    """POST /api/assessments/admin/trial/sessions/<pk>/submit/ — reuses
+    finalize_sessions(), the exact same race-safe scoring primitive the
+    real student submit/sweep/close-cascade all share. Unlike the student
+    endpoint, always returns the score — there is no
+    assignment.show_result_to_student to gate on, and the whole point of a
+    mock test is the admin seeing their own result immediately."""
+    permission_classes = [IsAdminOrSuperAdmin]
+
+    def post(self, request, pk):
+        session = get_object_or_404(
+            AssessmentSession, pk=pk, assignment__isnull=True, student_id=request.user.id,
+        )
+
+        ok, reason = session_is_writable(session, session.assignment)
+        if not ok:
+            return error_response(reason, status_code=403)
+
+        finalize_sessions(AssessmentSession.objects.filter(pk=session.pk), SESSION_STATUS_SUBMITTED)
+
+        session.refresh_from_db()
+        result = getattr(session, "result", None)
+        return success_response(
+            data={
+                "session_id": str(session.id),
+                "status": session.status,
+                "score": result.score if result else None,
+                "total_marks": result.total_marks if result else None,
+            },
+            message="Mock test submitted",
+        )
+
+
+class AdminTrialServerTimeView(APIView):
+    """GET /api/assessments/admin/trial/server-time/ — same shape as
+    StudentServerTimeView above, scoped to the requesting admin's own
+    IN_PROGRESS trial session(s), so the trial exam page's countdown can
+    reuse the identical polling hook, just pointed at this URL."""
+    permission_classes = [IsAdminOrSuperAdmin]
+
+    def get(self, request):
+        data = {"server_time": timezone.now()}
+        session = (
+            AssessmentSession.objects.filter(
+                assignment__isnull=True, student_id=request.user.id, status=SESSION_STATUS_IN_PROGRESS,
+            )
+            .order_by("-started_at")
+            .first()
+        )
+        if session is not None:
+            data["session_id"] = str(session.id)
+            data["ends_at"] = session.ends_at
+        return success_response(data=data)
+
+
+class AdminPaperTrialResultsView(APIView):
+    """GET /api/assessments/admin/papers/<pk>/trial-results/ — every mock
+    attempt ever taken on this paper, across every assignment (or none) —
+    powers the Results page's "Mock tests" filter, which is deliberately
+    paper-scoped rather than assignment-scoped (a trial can be taken
+    before any assignment exists, and retaken after one is created and
+    closed, so no single assignment ever "owns" the full trial history)."""
+    permission_classes = [IsAdminOrSuperAdmin]
+
+    def get(self, request, pk):
+        institution_id = _get_institution_id(request)
+        paper = get_object_or_404(QuestionPaper, pk=pk, institution_id=institution_id)
+        denied = _require_paper_owner(paper, request)
+        if denied:
+            return denied
+
+        results = list(
+            ResultSummary.objects.filter(assignment__isnull=True, session__set__paper=paper)
+            .select_related("session__set")
+            .order_by("-ended_at")
+        )
+        attempted_by = resolve_user_names(
+            sorted({str(r.student_id) for r in results}), request.META.get("HTTP_AUTHORIZATION", "")
+        ) if results else {}
+
+        data = [{
+            "id": str(r.id),
+            "set_label": r.session.set.label,
+            "score": r.score,
+            "total_marks": r.total_marks,
+            "percentage": round((r.score / r.total_marks) * 100, 2) if r.total_marks else 0,
+            "duration_seconds": r.duration_seconds,
+            "ended_at": r.ended_at,
+            "attempted_by_name": attempted_by.get(str(r.student_id), {}).get("name", ""),
+            "attempted_by_email": attempted_by.get(str(r.student_id), {}).get("email", ""),
+        } for r in results]
+
+        return success_response(data=data)
 
 
 # ── Student: Activity Logs (Task 6.2) ───────────────────────────────────────
@@ -1448,6 +1942,11 @@ def _build_results_queryset(assignment, request, roster_by_user_id):
 
     qs = StudentSetAllocation.objects.filter(assignment=assignment).select_related("set").annotate(
         session_status=Subquery(session_sq.values("status")[:1]),
+        # Needed so the admin UI can call .../sessions/<id>/extend/ for a
+        # student currently mid-exam (exam_status="writing") — result_id
+        # alone isn't enough, since a ResultSummary doesn't exist until the
+        # session actually finishes.
+        session_id=Subquery(session_sq.values("id")[:1]),
         result_id=Subquery(result_sq.values("id")[:1]),
         score=Subquery(result_sq.values("score")[:1]),
         total_marks=Subquery(result_sq.values("total_marks")[:1]),
@@ -1474,6 +1973,13 @@ def _build_results_queryset(assignment, request, roster_by_user_id):
     if department:
         matching_ids = [uid for uid, info in roster_by_user_id.items() if info.get("department") == department]
         qs = qs.filter(student_id__in=matching_ids)
+
+    # Drill-down target from Analytics' Set Fairness panel (each bar links
+    # here with ?set=<label>) — exact match against the same set_label the
+    # row already displays, not a DB id, since that's what the link carries.
+    set_label = request.query_params.get("set")
+    if set_label:
+        qs = qs.filter(set__label=set_label)
 
     # Roll-number search — case-insensitive substring match against the
     # roster (already fetched once above; same no-extra-call pattern as the
@@ -1557,6 +2063,7 @@ def _serialize_result_row(alloc, roster_by_user_id):
     info = roster_by_user_id.get(str(alloc.student_id), {})
     return {
         "result_id": str(alloc.result_id) if alloc.result_id else None,
+        "session_id": str(alloc.session_id) if alloc.session_id else None,
         "student_user_id": str(alloc.student_id),
         "student_roll_id": info.get("student_id", ""),
         "student_name": info.get("fullname") or "Unknown",
@@ -1593,7 +2100,15 @@ class AdminAssignmentResultsView(APIView):
         paginator = StandardResultsPagination()
         page = paginator.paginate_queryset(qs, request)
         rows = [_serialize_result_row(r, roster_by_user_id) for r in page]
-        return paginator.get_paginated_response(rows)
+        resp = paginator.get_paginated_response(rows)
+        # Independent of any currently-applied filters (including ?set=
+        # itself) — always the full roster's set list, so the "Set" dropdown
+        # doesn't shrink to one option once a set filter narrows the table.
+        resp.data["available_sets"] = list(
+            QuestionSet.objects.filter(allocations__assignment=assignment)
+            .order_by("order").values_list("label", flat=True).distinct()
+        )
+        return resp
 
 
 class AdminResultResponsesView(APIView):
@@ -1640,38 +2155,209 @@ class AdminResultResponsesView(APIView):
         return success_response(data={"result_id": str(result.id), "questions": data})
 
 
-class AdminResultLogsView(APIView):
-    """GET /api/assessments/admin/results/<result_id>/logs/ (Task 7.2) —
-    resolves the same ResultSummary.session FK as the responses view.
+class AdminQuestionResponsesView(APIView):
+    """GET /api/assessments/admin/assignments/<pk>/questions/<question_id>/responses/
+    — the cross-student counterpart to AdminResultResponsesView above: one
+    question, every student's answer to it, instead of one student, every
+    question. Analytics' Per-Question Difficulty table links here so an
+    admin can go from "this question is Very Hard" straight to who got it
+    wrong, not just the aggregate percentage.
 
-    Paginated (Task 11.1's index/pagination audit): unlike the per-session
-    responses view, the number of activity-log rows for one session is NOT
-    bounded by anything the admin authored (a paper's question count is;
-    tab-switch/copy/paste events over a multi-hour exam are not) — a single
-    session sitting at the 20/min throttle ceiling for a whole exam window
-    could accumulate thousands of rows, so this was a genuinely unbounded
-    query before this pass."""
+    A Question belongs to exactly one QuestionSet, so only students
+    allocated to that set could ever have seen this question — students on
+    a different set are excluded entirely rather than shown as "not
+    answered" (which would misleadingly suggest they had the question and
+    skipped it).
+
+    Paginated (same StandardResultsPagination as the main results table,
+    Task 11.1's index/pagination audit) — the row count here is the whole
+    set's roster, same order of magnitude as the results table itself, not
+    a small per-student list like AdminResultResponsesView's own question
+    count."""
     permission_classes = [IsAdminUser]
 
-    def get(self, request, result_id):
+    def get(self, request, pk, question_id):
         institution_id = _get_institution_id(request)
-        result = get_object_or_404(ResultSummary, pk=result_id, institution_id=institution_id)
-        logs = ActivityLog.objects.filter(session=result.session).order_by("occurred_at")
+        assignment = get_object_or_404(BatchAssignment, pk=pk, institution_id=institution_id)
+        question = get_object_or_404(
+            Question.objects.select_related("set"),
+            pk=question_id, set__paper_id=assignment.paper_id,
+        )
 
+        try:
+            roster_by_user_id = _fetch_roster_lookup(assignment, request)
+        except RuntimeError as exc:
+            return error_response(f"Could not load student roster: {exc}", status_code=502)
+
+        qs = StudentSetAllocation.objects.filter(assignment=assignment, set=question.set).order_by("student_id")
         paginator = StandardResultsPagination()
-        page = paginator.paginate_queryset(logs, request)
+        page = paginator.paginate_queryset(qs, request)
+
+        student_ids = [alloc.student_id for alloc in page]
+        session_by_student = {
+            s.student_id: s for s in
+            AssessmentSession.objects.filter(assignment=assignment, set=question.set, student_id__in=student_ids)
+        }
+        response_by_session = {
+            r.session_id: r for r in
+            AssessmentResponse.objects.filter(question=question, session__student_id__in=student_ids, session__assignment=assignment)
+        }
+
+        rows = []
+        for alloc in page:
+            info = roster_by_user_id.get(str(alloc.student_id), {})
+            session = session_by_student.get(alloc.student_id)
+            resp = response_by_session.get(session.id) if session else None
+            if session and session.status in (SESSION_STATUS_SUBMITTED, SESSION_STATUS_AUTO_SUBMITTED):
+                exam_status = EXAM_STATUS_SUBMITTED
+            elif session and session.status == SESSION_STATUS_IN_PROGRESS:
+                exam_status = EXAM_STATUS_WRITING
+            else:
+                exam_status = EXAM_STATUS_PENDING
+            rows.append({
+                "student_user_id": str(alloc.student_id),
+                "student_roll_id": info.get("student_id", ""),
+                "student_name": info.get("fullname") or "Unknown",
+                "department": info.get("department") or "",
+                "exam_status": exam_status,
+                "selected_option_ids": resp.selected_option_ids if resp else [],
+                "is_correct": resp.is_correct if resp else False,
+                "answered": resp is not None,
+            })
+
+        resp = paginator.get_paginated_response(rows)
+        resp.data["students"] = resp.data.pop("results")
+        resp.data.update({
+            "question_id": str(question.id),
+            "question_number": question.question_number,
+            "set_label": question.set.label,
+            "question_text": question.question_text,
+            "question_image_url": get_cdn_url(question.question_image_key) if question.question_image_key else None,
+            "marks": question.marks,
+            "options": QuestionOptionSerializer(question.options.all(), many=True).data,
+        })
+        return resp
+
+
+_ACTIVITY_EVENT_PLAIN_ENGLISH = {
+    "tab_switch":        "Switched away to another browser tab",
+    "window_blur":       "Clicked outside the exam window",
+    "fullscreen_exit":   "Exited full-screen mode",
+    "copy":              "Copied text from the exam page",
+    "paste":             "Pasted text into the exam page",
+    "contextmenu":       "Right-clicked on the exam page",
+    "screenshot_attempt": "Attempted to take a screenshot",
+}
+
+
+def _describe_activity_log(log) -> str:
+    """The events above are fixed one-liners; these four carry
+    per-occurrence detail (which question, how many minutes) in metadata,
+    so they're formatted rather than looked up. Falls back to the static
+    dict, then to a generic fallback for a future event type this function
+    hasn't been taught yet — never leaks a raw event_type string either way."""
+    metadata = log.metadata or {}
+    if log.event_type == ACTIVITY_EVENT_QUESTION_ANSWERED:
+        qn = metadata.get("question_number")
+        return f"Answered Question {qn}" if qn else "Answered a question"
+    if log.event_type == ACTIVITY_EVENT_QUESTION_ANSWER_CHANGED:
+        qn = metadata.get("question_number")
+        return f"Changed the answer for Question {qn}" if qn else "Changed an answer"
+    if log.event_type == ACTIVITY_EVENT_ADMIN_EXTENDED_TIME:
+        minutes = metadata.get("added_minutes")
+        return f"Exam time was extended by {minutes} minute(s)" if minutes else "Exam time was extended"
+    if log.event_type == ACTIVITY_EVENT_CONNECTION_LOST:
+        seconds = metadata.get("duration_seconds")
+        if isinstance(seconds, (int, float)) and seconds > 0:
+            minutes = round(seconds / 60, 1)
+            return f"Lost internet connection for about {minutes} minute(s)"
+        return "Lost internet connection"
+    if log.event_type == ACTIVITY_EVENT_QUESTION_TIME_SPENT:
+        qn = metadata.get("question_number")
+        seconds = metadata.get("seconds")
+        if isinstance(seconds, (int, float)) and seconds > 0 and qn:
+            duration = f"{seconds}s" if seconds < 60 else f"{round(seconds / 60, 1)} min"
+            return f"Spent {duration} on Question {qn}"
+        return "Spent time on a question"
+    return _ACTIVITY_EVENT_PLAIN_ENGLISH.get(log.event_type, "Unrecognized activity was recorded")
+
+# A worst-case session (throttle-ceiling activity for a multi-hour exam,
+# Task 11.1's index audit) can accumulate thousands of raw ActivityLog
+# rows — this view is a single non-paginated popup, not a paginated table,
+# so it caps rather than trying to page a modal. Generous enough that no
+# real exam ever hits it (2000 events would mean a violation roughly every
+# 5 seconds for a full 3-hour exam), but still bounded so one adversarial
+# session can't make this endpoint's response unbounded.
+_SESSION_TIMELINE_EVENT_CAP = 2000
+
+
+class AdminSessionTimelineView(APIView):
+    """GET /api/assessments/admin/sessions/<session_id>/timeline/ —
+    the plain-English, non-technical version of the old raw-logs endpoint,
+    for the "logs/tracking" eye icon in the admin results table. Keyed by
+    session_id (not result_id): unlike the raw-logs view, this needs to
+    work for a student who is still mid-exam too (exam_status="writing"),
+    who has a session but no ResultSummary yet — an admin auditing live
+    isn't limited to already-submitted students.
+
+    Every ActivityLog row is translated into a short, ordered, non-technical
+    sentence — this is explicitly NOT a raw event_type/metadata dump; it's
+    meant to be read by a non-technical person auditing a student's
+    behaviour after the fact.
+    """
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, session_id):
+        institution_id = _get_institution_id(request)
+        # IDOR-safe the same way AdminAssignmentExtendSessionView is:
+        # scoped through the owning assignment's institution_id, since
+        # AssessmentSession itself has no institution_id column.
+        session = get_object_or_404(
+            AssessmentSession.objects.select_related("assignment"),
+            pk=session_id, assignment__institution_id=institution_id,
+        )
+        result = getattr(session, "result", None)
+
+        total_event_count = ActivityLog.objects.filter(session=session).count()
+        logs = list(
+            ActivityLog.objects.filter(session=session)
+            .order_by("occurred_at")[:_SESSION_TIMELINE_EVENT_CAP]
+        )
+
+        events = [{"description": "Started the exam", "occurred_at": session.started_at}]
+        for log in logs:
+            events.append({
+                "description": _describe_activity_log(log),
+                "occurred_at": log.occurred_at,
+            })
+
+        if session.status == SESSION_STATUS_SUBMITTED:
+            events.append({
+                "description": "Submitted the exam",
+                "occurred_at": result.ended_at if result else session.ends_at,
+            })
+        elif session.status == SESSION_STATUS_AUTO_SUBMITTED:
+            events.append({
+                "description": "Exam was submitted automatically because time ran out",
+                "occurred_at": result.ended_at if result else session.ends_at,
+            })
+        # else: still IN_PROGRESS — no closing event yet, the timeline
+        # simply ends at the most recent activity (or just "Started the
+        # exam" if nothing has happened yet).
 
         return success_response(data={
-            "result_id": str(result.id),
-            "malpractice_flag": result.malpractice_flag,
-            "malpractice_reasons": result.malpractice_reasons,
-            "count": paginator.page.paginator.count,
-            "total_pages": paginator.page.paginator.num_pages,
-            "current_page": paginator.page.number,
-            "logs": [
-                {"event_type": l.event_type, "occurred_at": l.occurred_at, "metadata": l.metadata}
-                for l in page
-            ],
+            "session_id": str(session.id),
+            "exam_status": (
+                "submitted" if session.status in (SESSION_STATUS_SUBMITTED, SESSION_STATUS_AUTO_SUBMITTED)
+                else "writing" if session.status == SESSION_STATUS_IN_PROGRESS
+                else session.status.lower()
+            ),
+            "malpractice_flag": result.malpractice_flag if result else False,
+            "malpractice_reasons": result.malpractice_reasons if result else [],
+            "total_event_count": total_event_count,
+            "truncated": total_event_count > _SESSION_TIMELINE_EVENT_CAP,
+            "retention_days": ACTIVITY_LOG_RETENTION_DAYS,
+            "events": events,
         })
 
 
@@ -1745,10 +2431,15 @@ ANALYTICS_CACHE_TTL_SECONDS = 60  # short TTL (Task 8.1) — not submission-trig
 
 _METRIC_DEFINITIONS = {
     "score_distribution": "Number of completed sessions falling into each 10-percentage-point bucket of score/total_marks (e.g. \"70-80%\" = sessions scoring at least 70% and under 80%; the final bucket includes exactly 100%).",
+    "average_score_percentage": "Mean of score/total_marks across every completed session — percentage-normalized so students on different sets remain comparable.",
     "pass_rate_percentage": "Percentage of completed sessions scoring >= the assignment's pass_cutoff_percentage, computed on score/total_marks (not raw score) so students on different sets remain comparable.",
     "percentage_correct": "Per question: (students who answered it correctly / students who attempted it) * 100. Not normalized against other questions — stays scoped to that one question's own attempts. Lower = harder.",
+    "average_seconds_spent": "Per question: mean foreground (tab-visible) time between a student landing on that question and navigating away from it, averaged across students who spent at least 1 second on it. Not shown (null) for a question with no such data yet — never assumed to be 0.",
     "average_percentage": "Per department: mean of score/total_marks across that department's completed sessions.",
-    "malpractice_rate_percentage": "Percentage of completed sessions with malpractice_flag=True (Task 6.2's threshold rule: tab-switch/fullscreen-exit/cadence).",
+    "set_comparison": "Per question set (Set A, Set B, ...): mean of score/total_marks across that set's completed sessions — checks whether different sets of the same assignment turned out comparably difficult.",
+    "malpractice_rate_percentage": "Percentage of completed sessions with malpractice_flag=True (Task 6.2's threshold rule: tab-switch/fullscreen-exit/cadence). For a live operational incident count, see this assignment's Dashboard page instead.",
+    "malpractice_breakdown": "Among flagged sessions only: how many were flagged for each specific reason (a session can have more than one, so counts can sum to more than the flagged total).",
+    "average_completion_time_seconds": "Mean of duration_seconds (started_at to ended_at) across every completed session — whether the exam's allotted time was well-calibrated, not any one student's or question's pacing.",
 }
 
 
@@ -1771,7 +2462,42 @@ def _pass_fail(qs, cutoff_percentage):
     }
 
 
-def _question_difficulty(assignment):
+def _question_time_spent(assignment):
+    """{(set_id, question_number): {"average_seconds", "session_count"}} — keyed
+    by (set_id, question_number), not question_id: a question_time_spent
+    event's metadata only carries the student's own set-local question_number
+    (that's all the client-side navigator knows), and the same number means a
+    different actual Question on each set, so set_id disambiguates which.
+    Aggregated in Python, not SQL, matching this file's existing convention
+    for JSONField-metadata aggregation (_malpractice_breakdown below,
+    _department_comparison) — stays portable across the Postgres/SQLite
+    split this project already supports, rather than a Postgres-only JSON
+    aggregate expression.
+    """
+    rows = (
+        ActivityLog.objects
+        .filter(session__assignment=assignment, event_type=ACTIVITY_EVENT_QUESTION_TIME_SPENT)
+        .values_list("session__set_id", "session_id", "metadata")
+    )
+    totals: dict = {}
+    for set_id, session_id, metadata in rows:
+        qn = (metadata or {}).get("question_number")
+        seconds = (metadata or {}).get("seconds")
+        if qn is None or not isinstance(seconds, (int, float)) or seconds <= 0:
+            continue
+        entry = totals.setdefault((set_id, qn), {"seconds": 0.0, "sessions": set()})
+        entry["seconds"] += seconds
+        entry["sessions"].add(session_id)
+    return {
+        key: {
+            "average_seconds": round(entry["seconds"] / len(entry["sessions"]), 1),
+            "session_count": len(entry["sessions"]),
+        }
+        for key, entry in totals.items()
+    }
+
+
+def _question_difficulty(assignment, time_by_key):
     stats = (
         AssessmentResponse.objects.filter(session__assignment=assignment)
         .values("question_id")
@@ -1783,6 +2509,7 @@ def _question_difficulty(assignment):
     result = []
     for q in questions:
         s = stats_by_qid.get(q.id, {"total": 0, "correct": 0})
+        time_entry = time_by_key.get((q.set_id, q.question_number))
         result.append({
             "question_id": str(q.id),
             "question_number": q.question_number,
@@ -1790,6 +2517,7 @@ def _question_difficulty(assignment):
             "total_answered": s["total"],
             "correct_count": s["correct"],
             "percentage_correct": round(s["correct"] / s["total"] * 100, 2) if s["total"] else None,
+            "average_seconds_spent": time_entry["average_seconds"] if time_entry else None,
         })
     return result
 
@@ -1804,6 +2532,28 @@ def _department_comparison(qs, roster_by_user_id):
         {"department": dept, "student_count": len(pcts), "average_percentage": round(sum(pcts) / len(pcts), 2)}
         for dept, pcts in sorted(dept_percentages.items())
     ]
+
+
+def _set_comparison(qs):
+    """Average % by question set — the multi-set anti-cheat design (Set A,
+    Set B, ... carrying different-but-equally-weighted questions) creates a
+    real fairness question this answers directly: did the sets actually turn
+    out comparably difficult, or did one group get an easier/harder paper?"""
+    set_percentages: dict = {}
+    for set_label, pct in qs.values_list("session__set__label", "percentage"):
+        set_percentages.setdefault(set_label, []).append(pct)
+    return [
+        {"set_label": label, "student_count": len(pcts), "average_percentage": round(sum(pcts) / len(pcts), 2)}
+        for label, pcts in sorted(set_percentages.items())
+    ]
+
+
+def _malpractice_breakdown(qs):
+    reason_counts: dict = {}
+    for reasons in qs.filter(malpractice_flag=True).values_list("malpractice_reasons", flat=True):
+        for r in (reasons or []):
+            reason_counts[r] = reason_counts.get(r, 0) + 1
+    return [{"reason": r, "count": c} for r, c in sorted(reason_counts.items(), key=lambda kv: -kv[1])]
 
 
 def _malpractice_rate(qs):
@@ -1824,15 +2574,41 @@ def _compute_analytics(assignment, request):
     ).annotate(percentage=_PERCENTAGE_ANNOTATION)
 
     roster_by_user_id = _fetch_roster_lookup(assignment, request)
+    avg_percentage = qs.aggregate(avg=Avg("percentage"))["avg"]
+    avg_duration = qs.aggregate(avg=Avg("duration_seconds"))["avg"]
 
     return {
         "assignment_id": str(assignment.id),
+        # Computed once, here, and cached alongside the rest of this payload
+        # (not read at serve time) — so it truthfully reflects when these
+        # numbers were computed even when served from the 60s cache, rather
+        # than always claiming "now" regardless of whether this is a fresh
+        # computation or a cache hit from moments ago.
+        "generated_at": timezone.now().isoformat(),
         "total_completed": qs.count(),
+        # Same source as the dashboard's student_count_total
+        # (_compute_dashboard) — every student the paper was allocated to,
+        # not just the ones who've finished. Kept for context (a small
+        # "based on N of M students" note, not its own headline KPI tile —
+        # that framing belongs to the Dashboard, whose whole job is
+        # tracking live progress; see 2026-08-18's KPI-overlap audit).
+        "total_allocated": assignment.allocations.count(),
+        "average_score_percentage": round(avg_percentage, 2) if avg_percentage is not None else None,
+        # Cohort-level time analysis, distinct from Dashboard's on_time/
+        # auto_submitted *counts* (a pacing/timing operational signal) and
+        # from this same page's own per-question average_seconds_spent (a
+        # curriculum-content signal) — this one answers "was the exam
+        # duration itself well-calibrated," a design question, not an
+        # in-the-moment operational one.
+        "average_completion_time_seconds": round(avg_duration) if avg_duration is not None else None,
+        "exam_duration_minutes": assignment.exam_duration_minutes,
         "score_distribution": _score_distribution(qs),
         "pass_fail": _pass_fail(qs, assignment.pass_cutoff_percentage),
-        "question_difficulty": _question_difficulty(assignment),
+        "question_difficulty": _question_difficulty(assignment, _question_time_spent(assignment)),
         "department_comparison": _department_comparison(qs, roster_by_user_id),
+        "set_comparison": _set_comparison(qs),
         "malpractice_rate": _malpractice_rate(qs),
+        "malpractice_breakdown": _malpractice_breakdown(qs),
         "metric_definitions": _METRIC_DEFINITIONS,
     }
 
@@ -1888,6 +2664,17 @@ class AdminAssignmentAnalyticsExportView(APIView):
         output.write("﻿")
         writer = csv.writer(output)
 
+        writer.writerow(["Assessment Analytics"])
+        writer.writerow(["Generated At", data["generated_at"]])
+        writer.writerow(["Completed Sessions", f'{data["total_completed"]} / {data["total_allocated"]}'])
+        writer.writerow(["Average Score %", data["average_score_percentage"]])
+        writer.writerow([
+            "Average Completion Time (seconds)",
+            data["average_completion_time_seconds"] if data["average_completion_time_seconds"] is not None else "",
+        ])
+        writer.writerow(["Exam Duration Allowed (minutes)", data["exam_duration_minutes"]])
+        writer.writerow([])
+
         writer.writerow(["Score Distribution"])
         writer.writerow(["Bucket", "Count"])
         for row in data["score_distribution"]:
@@ -1903,9 +2690,12 @@ class AdminAssignmentAnalyticsExportView(APIView):
         writer.writerow([])
 
         writer.writerow(["Per-Question Difficulty"])
-        writer.writerow(["Set", "Question #", "Total Answered", "Correct", "% Correct"])
+        writer.writerow(["Set", "Question #", "Total Answered", "Correct", "% Correct", "Avg Seconds Spent"])
         for q in data["question_difficulty"]:
-            writer.writerow([q["set_label"], q["question_number"], q["total_answered"], q["correct_count"], q["percentage_correct"]])
+            writer.writerow([
+                q["set_label"], q["question_number"], q["total_answered"], q["correct_count"],
+                q["percentage_correct"], q["average_seconds_spent"],
+            ])
         writer.writerow([])
 
         writer.writerow(["Department Comparison"])
@@ -1914,11 +2704,23 @@ class AdminAssignmentAnalyticsExportView(APIView):
             writer.writerow([d["department"], d["student_count"], d["average_percentage"]])
         writer.writerow([])
 
+        writer.writerow(["Set Comparison"])
+        writer.writerow(["Set", "Student Count", "Average %"])
+        for s in data["set_comparison"]:
+            writer.writerow([s["set_label"], s["student_count"], s["average_percentage"]])
+        writer.writerow([])
+
         writer.writerow(["Malpractice Rate"])
         mp = data["malpractice_rate"]
         writer.writerow(["Flagged", mp["flagged_count"]])
         writer.writerow(["Total", mp["total_count"]])
         writer.writerow(["Rate %", mp["rate_percentage"]])
+        writer.writerow([])
+
+        writer.writerow(["Malpractice Breakdown by Reason"])
+        writer.writerow(["Reason", "Count"])
+        for r in data["malpractice_breakdown"]:
+            writer.writerow([r["reason"], r["count"]])
 
         response = HttpResponse(output.getvalue(), content_type="text/csv; charset=utf-8")
         response["Content-Disposition"] = f'attachment; filename="analytics_{assignment.id}.csv"'
@@ -1942,13 +2744,22 @@ DASHBOARD_CACHE_TTL_SECONDS = 300
 
 _DASHBOARD_METRIC_DEFINITIONS = {
     "completion_rate_percentage": "student_count_completed / student_count_total * 100, where completed = a ResultSummary row exists (SUBMITTED or AUTO_SUBMITTED).",
-    "average_score_percentage": "Mean of score/total_marks (not raw score) across all completed sessions — percentage-normalized so students on different sets remain comparable, same convention as Task 8.1's analytics.",
-    "malpractice_incidents": "Count of completed sessions with malpractice_flag=True (Task 6.2's threshold rule).",
+    "malpractice_incidents": "Count of completed sessions with malpractice_flag=True (Task 6.2's threshold rule) — a live operational alert count. For the rate and the breakdown by specific reason, see this assignment's Analytics page instead.",
     "submission_breakdown": "Of completed sessions: on_time = finalized via manual submit (SUBMITTED), auto_submitted = finalized by the beat sweep or an admin close/ hitting the deadline (AUTO_SUBMITTED).",
+    "time_remaining_seconds": "Seconds until global_expire_time, the assignment-wide exam window close — only meaningful while status=LIVE (null otherwise). An individual student's own session may have a different ends_at if it was ever extended; this is the assignment-level window, not any one student's.",
 }
 
 
 def _compute_dashboard(assignment):
+    """Deliberately does NOT include average_score_percentage (removed
+    2026-08-18): a live partial average — computed from whoever happens to
+    have finished first — is not a meaningful operational signal (early
+    finishers skew the number, and there's nothing a proctor does
+    differently based on it) and duplicated Task 8.1's Analytics page,
+    which is the correct, definitive home for that figure once the exam is
+    actually done. This view's job is "is everything going OK right now,"
+    not "how did it go" — see the class docstring on
+    AdminAssignmentDashboardView below."""
     total = assignment.allocations.count()
     completed_qs = ResultSummary.objects.filter(
         assignment=assignment, institution_id=assignment.institution_id,
@@ -1956,12 +2767,12 @@ def _compute_dashboard(assignment):
     completed = completed_qs.count()
     in_progress = assignment.sessions.filter(status=SESSION_STATUS_IN_PROGRESS).count()
 
-    avg_percentage = completed_qs.annotate(percentage=_PERCENTAGE_ANNOTATION).aggregate(
-        avg=Avg("percentage"),
-    )["avg"]
-
     on_time = completed_qs.filter(status=SESSION_STATUS_SUBMITTED).count()
     auto_submitted = completed_qs.filter(status=SESSION_STATUS_AUTO_SUBMITTED).count()
+
+    time_remaining_seconds = None
+    if assignment.status == ASSIGNMENT_STATUS_LIVE:
+        time_remaining_seconds = max(int((assignment.global_expire_time - timezone.now()).total_seconds()), 0)
 
     return {
         "assignment_id": str(assignment.id),
@@ -1970,7 +2781,8 @@ def _compute_dashboard(assignment):
         "student_count_completed": completed,
         "student_count_in_progress": in_progress,
         "completion_rate_percentage": round(completed / total * 100, 2) if total else 0.0,
-        "average_score_percentage": round(avg_percentage, 2) if avg_percentage is not None else 0.0,
+        "time_remaining_seconds": time_remaining_seconds,
+        "exam_duration_minutes": assignment.exam_duration_minutes,
         "malpractice_incidents": completed_qs.filter(malpractice_flag=True).count(),
         "submission_breakdown": {
             "on_time": on_time,
@@ -2044,7 +2856,10 @@ class AdminAssignmentDashboardExportView(APIView):
         writer.writerow(["Students Completed", data["student_count_completed"]])
         writer.writerow(["Students In Progress", data["student_count_in_progress"]])
         writer.writerow(["Completion Rate %", data["completion_rate_percentage"]])
-        writer.writerow(["Average Score %", data["average_score_percentage"]])
+        writer.writerow([
+            "Time Remaining (seconds)",
+            data["time_remaining_seconds"] if data["time_remaining_seconds"] is not None else "n/a (not LIVE)",
+        ])
         writer.writerow(["Malpractice Incidents", data["malpractice_incidents"]])
         writer.writerow([])
 

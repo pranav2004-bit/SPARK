@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from core.storage import get_cdn_url
-from .models import QuestionPaper, QuestionSet, Question, QuestionOption, BatchAssignment
+from .models import QuestionPaper, QuestionSet, QuestionSection, Question, QuestionOption, BatchAssignment
 
 
 class QuestionPaperSerializer(serializers.ModelSerializer):
@@ -23,6 +23,7 @@ class QuestionPaperSerializer(serializers.ModelSerializer):
 class QuestionSetSerializer(serializers.ModelSerializer):
     question_count = serializers.SerializerMethodField()
     total_marks = serializers.SerializerMethodField()
+    section_count = serializers.SerializerMethodField()
 
     def get_question_count(self, obj):
         if hasattr(obj, "question_count"):
@@ -32,9 +33,26 @@ class QuestionSetSerializer(serializers.ModelSerializer):
     def get_total_marks(self, obj):
         return obj.total_marks()
 
+    def get_section_count(self, obj):
+        if hasattr(obj, "section_count"):
+            return obj.section_count
+        return obj.sections.count()
+
     class Meta:
         model = QuestionSet
-        fields = ["id", "paper", "label", "order", "question_count", "total_marks"]
+        fields = ["id", "paper", "label", "order", "question_count", "total_marks", "section_count"]
+        read_only_fields = ["id"]
+
+
+class QuestionSectionSerializer(serializers.ModelSerializer):
+    question_count = serializers.SerializerMethodField()
+
+    def get_question_count(self, obj):
+        return obj.questions.count()
+
+    class Meta:
+        model = QuestionSection
+        fields = ["id", "set", "title", "order", "question_count"]
         read_only_fields = ["id"]
 
 
@@ -67,7 +85,7 @@ class QuestionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Question
         fields = [
-            "id", "set", "question_number", "question_type", "mcq_type",
+            "id", "set", "section", "question_number", "question_type", "mcq_type",
             "question_content_type", "question_text",
             "question_image_key", "question_image_url",
             "question_image_size_bytes", "marks",
@@ -77,6 +95,13 @@ class QuestionSerializer(serializers.ModelSerializer):
             "id", "question_number", "question_image_url",
             "question_image_size_bytes", "created_at", "updated_at",
         ]
+        extra_kwargs = {
+            # Callers that don't pass a section fall back to Question.save()'s
+            # auto-default-section-per-set behaviour (see models.py) rather
+            # than being rejected here — keeps the older set-level creation
+            # endpoint working unchanged.
+            "section": {"required": False},
+        }
 
 
 class StudentQuestionOptionSerializer(serializers.ModelSerializer):
@@ -101,6 +126,11 @@ class StudentQuestionSerializer(serializers.ModelSerializer):
     (no is_correct) instead of the admin one."""
     question_image_url = serializers.SerializerMethodField()
     options = StudentQuestionOptionSerializer(many=True, read_only=True)
+    # section_id comes straight off the model's own FK column (no explicit
+    # field needed for that one); section_title needs one since it isn't a
+    # direct column. Added so the exam-taking UI can group its question
+    # navigator by section instead of just a flat number list.
+    section_title = serializers.CharField(source="section.title", read_only=True)
 
     def get_question_image_url(self, obj):
         if obj.question_image_key:
@@ -112,6 +142,7 @@ class StudentQuestionSerializer(serializers.ModelSerializer):
         fields = [
             "id", "question_number", "mcq_type", "question_content_type",
             "question_text", "question_image_url", "marks", "options",
+            "section_id", "section_title",
         ]
         read_only_fields = fields
 

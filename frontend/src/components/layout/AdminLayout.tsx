@@ -4,11 +4,12 @@ import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  LayoutDashboard, Users, Briefcase, LogOut, ChevronDown,
-  MessageSquare, Radio, BookOpen, UserCircle, FileText,
+  LayoutDashboard, Briefcase, LogOut, ChevronDown,
+  Radio, BookOpen, UserCircle, FileText,
 } from "lucide-react";
 import { ScrollingUpdates } from "@/components/ui/ScrollingUpdates";
 import { useAuth } from "@/hooks/useAuth";
+import { usePortalGuard } from "@/hooks/usePortalGuard";
 import { useAuthStore } from "@/lib/auth-store";
 import { listenAdminChannel } from "@/lib/adminChannel";
 import { useState, useRef, useEffect } from "react";
@@ -22,11 +23,13 @@ interface NavItem {
   altMatchPrefix?: string;
 }
 
+// Students module removed (2026-08-19) — Batches alone is now Admin's
+// student-facing module; the per-batch view (admin/batch/[batch_id]) still
+// shows that batch's roster read-only. Standalone student search/list is
+// IT-exclusive (/it/students).
 const NAV_ITEMS: NavItem[] = [
   { href: "/admin/batch",     label: "Batches",   icon: <LayoutDashboard size={15} />, matchPrefix: "/admin/batch" },
-  { href: "/admin/students",  label: "Students",  icon: <Users size={15} />,           matchPrefix: "/admin/students" },
   { href: "/admin/resources", label: "Resources", icon: <Briefcase size={15} />,       matchPrefix: "/admin/resources", altMatchPrefix: "/admin/companies" },
-  { href: "/admin/inquiries", label: "Inquiries", icon: <MessageSquare size={15} />,   matchPrefix: "/admin/inquiries" },
   { href: "/admin/practice",  label: "Practice",  icon: <BookOpen size={15} />,        matchPrefix: "/admin/practice" },
   { href: "/admin/assessments", label: "Assessments", icon: <FileText size={15} />, matchPrefix: "/admin/assessments" },
   { href: "/admin/scroll",    label: "Scrollbar", icon: <Radio size={15} />,           matchPrefix: "/admin/scroll" },
@@ -37,6 +40,7 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const { user, logout } = useAuth();
   const setUser = useAuthStore((s) => s.setUser);
+  usePortalGuard("admin");
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -90,7 +94,7 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
         {/* Left — Logos */}
         <div className="flex items-center gap-3 shrink-0">
           <div className="flex items-center gap-2.5">
-            <Image src="/institution-logo.svg" alt="Institution" width={0} height={0}
+            <Image src="/institution-logo.png" alt="Institution" width={0} height={0}
               style={{ height: 52, width: "auto" }} />
             <div style={{ width: 1, height: 36, backgroundColor: "rgba(255,255,255,0.22)", flexShrink: 0 }} />
             <Image src="/spark-logo.svg" alt="SPARK" width={0} height={0}

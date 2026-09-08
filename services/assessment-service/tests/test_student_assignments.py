@@ -5,7 +5,7 @@ import pytest
 from django.utils import timezone
 
 from assessments.models import (
-    QuestionPaper, QuestionSet, BatchAssignment, StudentSetAllocation,
+    QuestionPaper, QuestionSet, Question, BatchAssignment, StudentSetAllocation,
     AssessmentSession, ASSIGNMENT_STATUS_LIVE, ASSIGNMENT_STATUS_SCHEDULED,
     ASSIGNMENT_STATUS_CLOSED, SESSION_STATUS_IN_PROGRESS,
     SESSION_STATUS_SUBMITTED, SESSION_STATUS_AUTO_SUBMITTED,
@@ -87,6 +87,27 @@ class TestStudentAssignmentList:
     def test_admin_forbidden(self, admin_client):
         resp = admin_client.get("/api/assessments/student/assignments/")
         assert resp.status_code == 403
+
+    def test_includes_total_marks_and_question_count_for_the_students_own_set(self, student_client, paper_with_set):
+        # Added 2026-08-27 for the pre-exam briefing screen. Deliberately
+        # from THIS student's own allocated set, not just "any set of the
+        # paper" — proven distinct here by giving a second set of the same
+        # paper a different question count/marks total; only the allocated
+        # set's numbers may leak into the response.
+        paper, qset = paper_with_set
+        Question.objects.create(set=qset, question_text="Q1", marks=2)
+        Question.objects.create(set=qset, question_text="Q2", marks=3)
+        other_set = QuestionSet.objects.create(paper=paper, label="Set B", order=2)
+        Question.objects.create(set=other_set, question_text="Q1", marks=10)
+
+        assignment = _assignment(paper)
+        _allocate(assignment, qset)
+
+        resp = student_client.get("/api/assessments/student/assignments/")
+
+        row = resp.json()["data"][0]
+        assert row["total_marks"] == 5
+        assert row["question_count"] == 2
 
 
 # ── Start / resume session ──────────────────────────────────────────────────

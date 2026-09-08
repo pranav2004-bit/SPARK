@@ -79,6 +79,24 @@ class TestActivityLogIngestion:
         resp = student_client.post(_url(exam_setup["session"].id), {"events": []}, format="json")
         assert resp.status_code == 400
 
+    def test_accepts_screenshot_attempt_and_connection_lost_event_types(self, student_client, exam_setup):
+        # Added 2026-08-18 for the full-transparency activity timeline —
+        # these two are client-detected (useActivityCapture.ts), unlike
+        # question_answered/admin_extended_time which are server-authored
+        # and never arrive through this ingestion endpoint at all.
+        session = exam_setup["session"]
+        resp = student_client.post(_url(session.id), {
+            "events": [
+                {"event_type": "screenshot_attempt"},
+                {"event_type": "connection_lost", "metadata": {"duration_seconds": 42}},
+            ],
+        }, format="json")
+
+        assert resp.status_code == 201
+        assert resp.json()["data"]["logged"] == 2
+        logged_types = set(ActivityLog.objects.filter(session=session).values_list("event_type", flat=True))
+        assert logged_types == {"screenshot_attempt", "connection_lost"}
+
     def test_over_max_batch_size_rejected(self, student_client, exam_setup):
         events = [{"event_type": "tab_switch"} for _ in range(101)]
         resp = student_client.post(_url(exam_setup["session"].id), {"events": events}, format="json")
@@ -256,6 +274,31 @@ class TestMalpracticeFlagging:
         session = exam_setup["session"]
         result = self._finalize(session)
         assert "cadence" not in result.malpractice_reasons
+
+    def test_new_transparency_event_types_never_count_toward_flagging(self, exam_setup):
+        # question_answered/changed, screenshot_attempt, connection_lost,
+        # and admin_extended_time (2026-08-18) are visibility-only —
+        # _compute_malpractice only ever counts tab_switch/fullscreen_exit
+        # rows specifically, so a session with many of these new event
+        # types (even more than the tab_switch/fullscreen_exit thresholds)
+        # must still come back clean.
+        session = exam_setup["session"]
+        question = exam_setup["qset"].questions.first()
+        AssessmentResponse.objects.create(session=session, question=question, selected_option_ids=[])
+        AssessmentSession.objects.filter(pk=session.pk).update(started_at=timezone.now() - timedelta(minutes=5))
+        for event_type, metadata in [
+            ("question_answered", {"question_number": 1}),
+            ("question_answer_changed", {"question_number": 1}),
+            ("screenshot_attempt", {}),
+            ("connection_lost", {"duration_seconds": 30}),
+            ("admin_extended_time", {"added_minutes": 15}),
+        ]:
+            for _ in range(6):  # deliberately over both real thresholds
+                ActivityLog.objects.create(session=session, event_type=event_type, occurred_at=timezone.now(), metadata=metadata)
+
+        result = self._finalize(session)
+        assert result.malpractice_flag is False
+        assert result.malpractice_reasons == []
 
 
 class TestActivityLogLoad:

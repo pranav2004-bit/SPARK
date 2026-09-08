@@ -97,8 +97,8 @@ REST_FRAMEWORK = {
     # -last entry (i.e. what nginx itself appended) as the real client IP.
     "NUM_PROXIES": 1,
     "DEFAULT_THROTTLE_CLASSES": (
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
+        "core.throttling_resilience.ResilientAnonRateThrottle",
+        "core.throttling_resilience.ResilientUserRateThrottle",
     ),
     "DEFAULT_THROTTLE_RATES": {
         "anon": "60/min",

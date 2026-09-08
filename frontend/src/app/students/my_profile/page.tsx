@@ -342,7 +342,7 @@ export default function MyProfilePage() {
   if (isFirstLogin) {
     return (
       <StudentLayout hideNav>
-        <PageWrapper className="max-w-xl pt-8 pb-0">
+        <PageWrapper className="pt-8 pb-0">
           {/* Welcome banner */}
           <div className="flex items-start gap-3 mb-6 p-4 bg-[var(--color-info-bg)] border border-[var(--color-accent)]/30 rounded-[var(--radius-lg)]">
             <Info size={17} className="text-[var(--color-accent)] shrink-0 mt-0.5" />
@@ -512,7 +512,7 @@ export default function MyProfilePage() {
   // ═══════════════════════════════════════════════════════════════════════════
   return (
     <StudentLayout>
-      <PageWrapper className="max-w-4xl pt-8 pb-0">
+      <PageWrapper className="pt-8 pb-0">
 
         {/* Back to Home */}
         <button
