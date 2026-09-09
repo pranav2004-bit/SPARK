@@ -6,6 +6,8 @@ Run against a live docker-compose stack:
 
 Tests are auto-skipped if the gateway is not reachable (see conftest.py).
 """
+import json
+import subprocess
 import uuid
 import time
 
@@ -14,8 +16,49 @@ import requests
 
 from .conftest import GATEWAY, SERVICE_KEY, INSTITUTION_A, STUDENT_USER_ID
 
+PY_EXEC_CONTAINER = "infra-auth-service-1"  # any Django service container — already has network access + stdlib urllib to reach other services directly
 
-# ─── Smoke: all 6 health endpoints reachable through gateway ─────────────────
+
+def _internal_post(service_host, path, payload, headers=None, timeout=15):
+    """POST `payload` directly to http://<service_host>:8000<path> over the
+    internal docker network, bypassing the gateway entirely — the only way
+    to reach a /internal/ endpoint, since gateway/nginx.dev.conf deliberately
+    blocks every /api/*/internal/ path from external access (see
+    TestRoutingErrors.test_internal_endpoint_blocked_regardless_of_service_key).
+    Runs from inside an already-running Django service container via `docker
+    exec` (stdlib urllib.request only — no extra dependency needed), since
+    this host process has no route to the internal-only network at all.
+    Returns (status_code, parsed_json_or_None).
+    """
+    script = (
+        "import json, urllib.request, urllib.error\n"
+        f"req = urllib.request.Request(\n"
+        f"    {f'http://{service_host}:8000{path}'!r},\n"
+        f"    data=json.dumps({payload!r}).encode(),\n"
+        f"    method='POST',\n"
+        f"    headers={{'Content-Type': 'application/json', **{(headers or {})!r}}},\n"
+        ")\n"
+        "try:\n"
+        "    resp = urllib.request.urlopen(req, timeout=10)\n"
+        "    print(resp.status)\n"
+        "    print(resp.read().decode())\n"
+        "except urllib.error.HTTPError as e:\n"
+        "    print(e.code)\n"
+        "    print(e.read().decode())\n"
+    )
+    result = subprocess.run(
+        ["docker", "exec", PY_EXEC_CONTAINER, "python3", "-c", script],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    assert result.returncode == 0, f"docker exec failed: {result.stderr}"
+    lines = result.stdout.splitlines()
+    status_code = int(lines[0])
+    body = "\n".join(lines[1:])
+    data = json.loads(body) if body else None
+    return status_code, data
+
+
+# ─── Smoke: all 7 health endpoints reachable through gateway ─────────────────
 
 class TestHealthRouting:
     @pytest.mark.parametrize("path,service", [
@@ -25,6 +68,7 @@ class TestHealthRouting:
         ("/api/practice/health/", "practice-service"),
         ("/api/notifications/health/", "notification-service"),
         ("/api/analytics/health/", "analytics-service"),
+        ("/api/assessments/health/", "assessment-service"),
     ])
     def test_health_returns_200(self, path, service):
         resp = requests.get(f"{GATEWAY}{path}", timeout=10)
@@ -39,6 +83,7 @@ class TestHealthRouting:
         ("/api/practice/health/", "practice-service"),
         ("/api/notifications/health/", "notification-service"),
         ("/api/analytics/health/", "analytics-service"),
+        ("/api/assessments/health/", "assessment-service"),
     ])
     def test_health_returns_json(self, path, service):
         resp = requests.get(f"{GATEWAY}{path}", timeout=10)
@@ -123,7 +168,13 @@ class TestRoutingErrors:
         resp = requests.get(f"{GATEWAY}/api/notifications/", timeout=10)
         assert resp.status_code == 401
 
-    def test_protected_endpoint_without_service_key_returns_403(self):
+    def test_internal_endpoint_blocked_regardless_of_service_key(self):
+        """gateway/nginx.dev.conf deliberately returns a blanket 404 for every
+        /api/*/internal/ path — "must never be reachable from outside" — so a
+        valid X-Service-Key doesn't get you through either; only a direct
+        internal-network call (bypassing the gateway) reaches this endpoint at
+        all. This replaces an older version of this test that expected 403
+        without a key, written before that blocking rule existed."""
         payload = {
             "user_ids": [str(uuid.uuid4())],
             "institution_id": str(INSTITUTION_A),
@@ -131,12 +182,22 @@ class TestRoutingErrors:
             "title": "Test",
             "body": "Body",
         }
-        resp = requests.post(
+        no_key_resp = requests.post(
+            f"{GATEWAY}/api/notifications/internal/send/", json=payload, timeout=10,
+        )
+        assert no_key_resp.status_code == 404
+
+        with_key_resp = requests.post(
             f"{GATEWAY}/api/notifications/internal/send/",
             json=payload,
+            headers={"X-Service-Key": SERVICE_KEY},
             timeout=10,
         )
-        assert resp.status_code == 403
+        assert with_key_resp.status_code == 404, (
+            "A valid X-Service-Key must not bypass the gateway's internal-route "
+            "block — internal endpoints are only reachable on the internal "
+            "docker network, never through the public gateway"
+        )
 
 
 # ─── Rate limiting ────────────────────────────────────────────────────────────
@@ -192,8 +253,12 @@ class TestRateLimiting:
 # ─── Cross-service integration ────────────────────────────────────────────────
 
 class TestCrossServiceIntegration:
-    def test_internal_send_notification_via_gateway(self, service_headers):
-        """resource-service (or any service) → gateway → notification-service internal endpoint."""
+    def test_internal_send_notification_direct(self):
+        """resource-service (or any service) → notification-service internal
+        endpoint, called directly on the internal network. Not through
+        GATEWAY: nginx deliberately blocks every /api/*/internal/ path from
+        external access (see TestRoutingErrors) — this is the correct way to
+        exercise the endpoint's real behavior now."""
         user_id = str(uuid.uuid4())
         payload = {
             "user_ids": [user_id],
@@ -202,18 +267,17 @@ class TestCrossServiceIntegration:
             "title": "New resource available",
             "body": "A new PDF has been uploaded.",
         }
-        resp = requests.post(
-            f"{GATEWAY}/api/notifications/internal/send/",
-            json=payload,
-            headers=service_headers,
-            timeout=10,
+        status, data = _internal_post(
+            "notification-service", "/api/notifications/internal/send/", payload,
+            headers={"X-Service-Key": SERVICE_KEY},
         )
-        assert resp.status_code == 201
-        data = resp.json()
+        assert status == 201, f"Expected 201, got {status}: {data}"
         assert data["data"]["sent"] == 1
 
-    def test_internal_analytics_event_via_gateway(self, service_headers):
-        """practice-service → gateway → analytics-service internal endpoint."""
+    def test_internal_analytics_event_direct(self):
+        """practice-service → analytics-service internal endpoint, called
+        directly on the internal network (see test_internal_send_notification_direct
+        for why not through GATEWAY)."""
         payload = {
             "event_type": "practice_attempt",
             "student_id": str(STUDENT_USER_ID),
@@ -224,17 +288,22 @@ class TestCrossServiceIntegration:
             "difficulty": "medium",
             "is_correct": True,
         }
-        resp = requests.post(
-            f"{GATEWAY}/api/analytics/internal/event/",
-            json=payload,
-            headers=service_headers,
-            timeout=10,
+        status, data = _internal_post(
+            "analytics-service", "/api/analytics/internal/event/", payload,
+            headers={"X-Service-Key": SERVICE_KEY},
         )
-        assert resp.status_code == 201
-        assert resp.json()["data"]["event_type"] == "practice_attempt"
+        assert status == 201, f"Expected 201, got {status}: {data}"
+        assert data["data"]["event_type"] == "practice_attempt"
 
-    def test_service_key_passes_through_gateway(self, service_headers):
-        """Nginx must forward X-Service-Key header unchanged to internal services."""
+    def test_internal_endpoint_rejects_missing_service_key(self):
+        """Defense in depth: analytics-service validates X-Service-Key itself
+        (core/permissions.py's IsServiceKey), independent of the gateway.
+        This replaces an older version of this test ("nginx forwards
+        X-Service-Key unchanged") whose premise is gone now that nginx never
+        routes to /internal/ paths at all — there's nothing left for nginx to
+        forward. What still matters, and still needs coverage, is that the
+        service doesn't blindly trust "reachable on the internal network" as
+        proof of authorization — it checks the key itself too."""
         payload = {
             "event_type": "resource_view",
             "student_id": str(STUDENT_USER_ID),
@@ -242,13 +311,22 @@ class TestCrossServiceIntegration:
             "company_id": str(uuid.uuid4()),
             "resource_id": str(uuid.uuid4()),
         }
-        resp = requests.post(
-            f"{GATEWAY}/api/analytics/internal/event/",
-            json=payload,
-            headers=service_headers,
-            timeout=10,
+        no_key_status, _ = _internal_post(
+            "analytics-service", "/api/analytics/internal/event/", payload,
         )
-        assert resp.status_code == 201
+        assert no_key_status == 403, f"Expected 403 without a service key, got {no_key_status}"
+
+        wrong_key_status, _ = _internal_post(
+            "analytics-service", "/api/analytics/internal/event/", payload,
+            headers={"X-Service-Key": "wrong-key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+        )
+        assert wrong_key_status == 403, f"Expected 403 with a wrong service key, got {wrong_key_status}"
+
+        valid_key_status, data = _internal_post(
+            "analytics-service", "/api/analytics/internal/event/", payload,
+            headers={"X-Service-Key": SERVICE_KEY},
+        )
+        assert valid_key_status == 201, f"Expected 201 with the real service key, got {valid_key_status}: {data}"
 
     def test_jwt_passes_through_gateway_to_notification_service(self, student_headers):
         """JWT token accepted by notification-service through nginx."""
@@ -270,24 +348,25 @@ class TestCrossServiceIntegration:
         )
         assert resp.status_code == 200
 
-    def test_end_to_end_notification_flow(self, service_headers, student_headers):
+    def test_end_to_end_notification_flow(self, student_headers):
         """Full cross-service flow: send notification → appears in student's list."""
         user_id = str(STUDENT_USER_ID)
 
-        # Step 1: Send notification via internal endpoint (simulating resource-service)
-        send_resp = requests.post(
-            f"{GATEWAY}/api/notifications/internal/send/",
-            json={
+        # Step 1: Send notification via internal endpoint (simulating
+        # resource-service) — direct on the internal network, not through
+        # GATEWAY (nginx blocks /internal/ paths; see TestRoutingErrors).
+        send_status, send_data = _internal_post(
+            "notification-service", "/api/notifications/internal/send/",
+            {
                 "user_ids": [user_id],
                 "institution_id": str(INSTITUTION_A),
                 "type": "announcement",
                 "title": "E2E Test Announcement",
                 "body": "Integration test notification.",
             },
-            headers=service_headers,
-            timeout=10,
+            headers={"X-Service-Key": SERVICE_KEY},
         )
-        assert send_resp.status_code == 201
+        assert send_status == 201, f"Expected 201, got {send_status}: {send_data}"
 
         # Step 2: Student retrieves notification list
         list_resp = requests.get(
@@ -299,12 +378,14 @@ class TestCrossServiceIntegration:
         titles = [n["title"] for n in list_resp.json()["results"]]
         assert "E2E Test Announcement" in titles
 
-    def test_end_to_end_analytics_flow(self, service_headers, student_headers):
+    def test_end_to_end_analytics_flow(self, student_headers):
         """Full cross-service flow: ingest event → appears in student analytics."""
-        # Step 1: Ingest a practice event (simulating practice-service)
-        ingest_resp = requests.post(
-            f"{GATEWAY}/api/analytics/internal/event/",
-            json={
+        # Step 1: Ingest a practice event (simulating practice-service) —
+        # direct on the internal network, not through GATEWAY (nginx blocks
+        # /internal/ paths; see TestRoutingErrors).
+        ingest_status, ingest_data = _internal_post(
+            "analytics-service", "/api/analytics/internal/event/",
+            {
                 "event_type": "practice_attempt",
                 "student_id": str(STUDENT_USER_ID),
                 "institution_id": str(INSTITUTION_A),
@@ -314,10 +395,9 @@ class TestCrossServiceIntegration:
                 "difficulty": "hard",
                 "is_correct": False,
             },
-            headers=service_headers,
-            timeout=10,
+            headers={"X-Service-Key": SERVICE_KEY},
         )
-        assert ingest_resp.status_code == 201
+        assert ingest_status == 201, f"Expected 201, got {ingest_status}: {ingest_data}"
 
         # Step 2: Student's analytics reflect the new event (cache may delay this)
         analytics_resp = requests.get(
@@ -369,6 +449,7 @@ class TestEdgeCases:
             "/api/practice/health/",
             "/api/notifications/health/",
             "/api/analytics/health/",
+            "/api/assessments/health/",
         ]
         for path in paths:
             start = time.monotonic()

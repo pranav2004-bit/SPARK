@@ -3,13 +3,14 @@ Task 5.2 — Query optimisation, indexes, PgBouncer, backup automation tests.
 
 Requires the full stack running:
   docker-compose -f infra/docker-compose.dev.yml up --build -d
-  pip install psycopg2-binary pytest
+  pip install pytest
   pytest tests/integration/test_task52.py -v
 
 Gateway tests use raw sockets (HTTP/1.1 + Connection: close) to work around
 Docker Desktop WSL relay keep-alive issues on Windows.
-PostgreSQL is exposed on port 5433 (host) to avoid conflict with local Postgres.
-PgBouncer is queried via docker exec (not exposed on a host port).
+PostgreSQL and PgBouncer are both queried via `docker exec` + psql — neither
+is exposed on a host port (matches production; see infra/docker-compose.dev.yml's
+own "No host port — DB is internal only" comment on the postgres service).
 Backup tests execute backup.sh inside the db-backup container via docker exec.
 """
 
@@ -19,15 +20,11 @@ import socket
 import subprocess
 import time
 
-import psycopg2
 import pytest
 
 GATEWAY_HOST = os.environ.get("GATEWAY_HOST", "localhost")
 GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "80"))
-PG_HOST = os.environ.get("PG_HOST", "localhost")
-PG_PORT = int(os.environ.get("PG_PORT", "5433"))
 PG_SUPERUSER = "postgres"
-PG_SUPERPASS = "dev_password"
 BACKUP_CONTAINER = "infra-db-backup-1"
 PGBOUNCER_CONTAINER = "infra-pgbouncer-1"
 POSTGRES_CONTAINER = "infra-postgres-1"
@@ -39,6 +36,7 @@ SERVICES = [
     {"name": "practice",     "db": "practice_db",     "user": "practice_db_user",     "password": "practice_dev_password_2024",     "health_path": "/api/practice/health/"},
     {"name": "notification", "db": "notification_db", "user": "notification_db_user", "password": "notification_dev_password_2024", "health_path": "/api/notifications/health/"},
     {"name": "analytics",    "db": "analytics_db",    "user": "analytics_db_user",    "password": "analytics_dev_password_2024",    "health_path": "/api/analytics/health/"},
+    {"name": "assessment",   "db": "assessment_db",   "user": "assessment_db_user",   "password": "assessment_dev_password_2024",   "health_path": "/api/assessments/health/"},
 ]
 
 
@@ -78,28 +76,6 @@ def _http_get(path, host=None, port=None, timeout=10):
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _pg_connect(dbname="postgres"):
-    return psycopg2.connect(
-        host=PG_HOST, port=PG_PORT,
-        user=PG_SUPERUSER, password=PG_SUPERPASS,
-        dbname=dbname, connect_timeout=5,
-    )
-
-
-def _explain(dbname, sql, force_index=True):
-    """Return EXPLAIN text; optionally disable seqscan to reveal index capability."""
-    conn = _pg_connect(dbname)
-    conn.set_session(autocommit=True)
-    cur = conn.cursor()
-    if force_index:
-        cur.execute("SET enable_seqscan = off;")
-    cur.execute(f"EXPLAIN {sql}")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return "\n".join(r[0] for r in rows)
-
-
 def _docker_exec(container, *args, env=None):
     cmd = ["docker", "exec"]
     if env:
@@ -111,6 +87,25 @@ def _docker_exec(container, *args, env=None):
     return result
 
 
+def _pg_query(sql, dbname="postgres"):
+    """Run SQL as the postgres superuser via `docker exec` + psql — local-socket
+    trust auth inside the container, no host port or password needed. Only
+    safe for read-only/introspection use (see module docstring); this file
+    never needs per-service credential auth, unlike test_task51.py."""
+    result = _docker_exec(
+        POSTGRES_CONTAINER,
+        "psql", "-U", PG_SUPERUSER, "-d", dbname, "-t", "-c", sql,
+    )
+    return result.stdout.strip()
+
+
+def _explain(dbname, sql, force_index=True):
+    """Return EXPLAIN text; optionally disable seqscan to reveal index capability."""
+    statements = "SET enable_seqscan = off; " if force_index else ""
+    statements += f"EXPLAIN {sql}"
+    return _pg_query(statements, dbname)
+
+
 def _pgbouncer_query(sql):
     result = _docker_exec(
         PGBOUNCER_CONTAINER,
@@ -120,27 +115,20 @@ def _pgbouncer_query(sql):
 
 
 def _index_exists(dbname, indexname):
-    conn = _pg_connect(dbname)
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname=%s",
-        (indexname,),
-    )
-    exists = cur.fetchone() is not None
-    cur.close()
-    conn.close()
-    return exists
+    sql = f"SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname='{indexname}';"
+    return "1" in _pg_query(sql, dbname)
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session", autouse=True)
 def require_postgres():
-    try:
-        conn = _pg_connect()
-        conn.close()
-    except Exception as exc:
-        pytest.skip(f"PostgreSQL unreachable on {PG_HOST}:{PG_PORT} — {exc}")
+    result = _docker_exec(POSTGRES_CONTAINER, "pg_isready", "-U", PG_SUPERUSER)
+    if result.returncode != 0:
+        pytest.skip(
+            f"PostgreSQL unreachable in container {POSTGRES_CONTAINER} — "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -241,7 +229,8 @@ class TestFunctionality:
     def test_backup_creates_dump_files(self, run_backup):
         result = _docker_exec(BACKUP_CONTAINER, "sh", "-c", "ls /backups/daily/*.dump 2>/dev/null | wc -l")
         count = int(result.stdout.strip())
-        assert count >= 6, f"Expected ≥ 6 .dump files in /backups/daily/, found {count}"
+        assert count >= len(SERVICES), \
+            f"Expected ≥ {len(SERVICES)} .dump files in /backups/daily/, found {count}"
 
     def test_backup_creates_manifest(self, run_backup):
         result = _docker_exec(BACKUP_CONTAINER, "sh", "-c", "ls /backups/manifest_*.json 2>/dev/null | wc -l")
@@ -257,11 +246,11 @@ class TestFunctionality:
         assert result.returncode == 0, "Could not read manifest file"
         manifest = json.loads(result.stdout)
         assert "databases" in manifest, "Manifest missing 'databases' key"
-        assert len(manifest["databases"]) == 6, \
-            f"Expected 6 DB entries in manifest, got {len(manifest['databases'])}"
+        assert len(manifest["databases"]) == len(SERVICES), \
+            f"Expected {len(SERVICES)} DB entries in manifest, got {len(manifest['databases'])}"
 
     def test_backup_dump_files_non_zero(self, run_backup):
-        """All 6 databases in the latest manifest have size > 0."""
+        """All databases in the latest manifest have size > 0."""
         result = _docker_exec(
             BACKUP_CONTAINER,
             "sh", "-c",
@@ -276,7 +265,7 @@ class TestFunctionality:
 
 class TestIntegration:
     def test_all_services_reachable_through_pgbouncer(self):
-        """All 6 service health endpoints return 200 — traffic flows through PgBouncer."""
+        """All service health endpoints return 200 — traffic flows through PgBouncer."""
         failures = []
         for svc in SERVICES:
             try:
@@ -287,7 +276,7 @@ class TestIntegration:
                 failures.append(f"{svc['name']}: {exc}")
         assert not failures, "Services unreachable through PgBouncer: " + ", ".join(failures)
 
-    def test_pgbouncer_shows_all_six_pools(self):
+    def test_pgbouncer_shows_all_service_pools(self):
         output = _pgbouncer_query("SHOW POOLS;")
         for svc in SERVICES:
             assert svc["db"] in output, \
@@ -296,20 +285,18 @@ class TestIntegration:
     def test_pgbouncer_pools_in_transaction_mode(self):
         output = _pgbouncer_query("SHOW POOLS;")
         pools_in_transaction = output.count("transaction")
-        assert pools_in_transaction >= 6, \
-            f"Expected ≥ 6 transaction-mode pools, output: {output}"
+        assert pools_in_transaction >= len(SERVICES), \
+            f"Expected ≥ {len(SERVICES)} transaction-mode pools, output: {output}"
 
     def test_active_pg_connections_bounded(self):
-        """Under normal idle load, real PG server connections ≤ 15 (PgBouncer pools ≤ pool_size×6=60)."""
-        conn = _pg_connect()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT count(*) FROM pg_stat_activity "
-            "WHERE datname IN ('auth_db','user_db','resource_db','practice_db','notification_db','analytics_db')"
-        )
-        active = cur.fetchone()[0]
-        cur.close()
-        conn.close()
+        """Under normal idle load, real PG server connections ≤ 15 (PgBouncer
+        pools ≤ pool_size×7=70 max). Threshold unchanged from the original
+        6-service measurement — measured 5 active connections against the
+        live 7-service stack before touching this, well within the existing
+        ceiling, so no evidence to justify loosening it."""
+        dbnames = ",".join(f"'{svc['db']}'" for svc in SERVICES)
+        sql = f"SELECT count(*) FROM pg_stat_activity WHERE datname IN ({dbnames});"
+        active = int(_pg_query(sql))
         assert active <= 15, \
             f"Expected ≤ 15 real PG connections (PgBouncer pool), found {active}"
 
@@ -325,10 +312,12 @@ class TestNegative:
             "AUTH_DB_PASSWORD=wrong USER_DB_PASSWORD=wrong "
             "RESOURCE_DB_PASSWORD=wrong PRACTICE_DB_PASSWORD=wrong "
             "NOTIFICATION_DB_PASSWORD=wrong ANALYTICS_DB_PASSWORD=wrong "
+            "ASSESSMENT_DB_PASSWORD=wrong "
             "/tmp/backup.sh",
             env={"AUTH_DB_PASSWORD": "wrong", "USER_DB_PASSWORD": "wrong",
                  "RESOURCE_DB_PASSWORD": "wrong", "PRACTICE_DB_PASSWORD": "wrong",
-                 "NOTIFICATION_DB_PASSWORD": "wrong", "ANALYTICS_DB_PASSWORD": "wrong"},
+                 "NOTIFICATION_DB_PASSWORD": "wrong", "ANALYTICS_DB_PASSWORD": "wrong",
+                 "ASSESSMENT_DB_PASSWORD": "wrong"},
         )
         assert result.returncode != 0, \
             "backup.sh should exit non-zero on authentication failure"
@@ -396,12 +385,7 @@ class TestEdge:
 
     def test_autovacuum_enabled(self):
         """PostgreSQL autovacuum is on — prevents table bloat."""
-        conn = _pg_connect()
-        cur = conn.cursor()
-        cur.execute("SHOW autovacuum;")
-        value = cur.fetchone()[0]
-        cur.close()
-        conn.close()
+        value = _pg_query("SHOW autovacuum;")
         assert value == "on", f"autovacuum is '{value}', expected 'on'"
 
     def test_pgbouncer_max_client_conn(self):

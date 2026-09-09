@@ -452,7 +452,7 @@ export default function StudentExamPage() {
   // trusting state, since state may still be `null` (never dragged before,
   // sized purely by flex-basis).
   const startPanelResize = useCallback((
-    e: React.MouseEvent, panelRef: React.RefObject<HTMLDivElement>, setWidth: (w: number) => void, direction: 1 | -1
+    e: React.MouseEvent, panelRef: React.RefObject<HTMLDivElement | null>, setWidth: (w: number) => void, direction: 1 | -1
   ) => {
     e.preventDefault();
     const startX = e.clientX;

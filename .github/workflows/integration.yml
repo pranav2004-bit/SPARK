@@ -40,6 +40,20 @@ jobs:
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Compose already defaults the project name to "infra" here — it's
+      # the basename of the directory containing docker-compose.dev.yml,
+      # not the invoking working directory, so this holds regardless of
+      # where in the repo `docker compose` is actually run from (verified:
+      # even invoking from an unrelated directory outside the repo entirely
+      # still resolves to "infra"). Pinned explicitly anyway, since
+      # tests/integration/ hardcodes infra-postgres-1, infra-auth-service-1,
+      # infra-db-backup-1, infra-pgbouncer-1 for its `docker exec` calls
+      # (real network/auth tests that can't just hit a host-published port
+      # — see those test files' own docstrings), and that's too much to
+      # leave resting on an implicit Compose naming rule nobody would think
+      # to check if this workflow's invocation ever changed shape.
+      COMPOSE_PROJECT_NAME: infra
     steps:
       - uses: actions/checkout@v4
 

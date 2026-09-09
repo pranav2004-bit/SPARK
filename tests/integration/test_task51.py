@@ -3,24 +3,41 @@ Task 5.1 — Database isolation tests.
 
 Requires the full stack running:
   docker-compose -f infra/docker-compose.dev.yml up --build -d
-  pip install psycopg2-binary pytest
+  pip install pytest
   pytest tests/integration/test_task51.py -v
 
-Tests connect to PostgreSQL via the exposed port 5433 (localhost).
 Gateway tests use raw sockets (HTTP/1.1 + Connection: close) to work around
 Docker Desktop WSL relay keep-alive issues on Windows.
+
+PostgreSQL has no host-published port (matches production; see
+infra/docker-compose.dev.yml's "No host port — DB is internal only" comment
+on the postgres service). This file's whole purpose is verifying real
+per-service credential isolation — wrong passwords rejected, cross-database
+access denied — which requires a genuine network + pg_hba.conf password
+authentication attempt, not just "can we reach Postgres somehow". A
+docker-exec straight into the Postgres container would use local-socket
+trust auth, which never checks a password at all and would make every test
+in this file trivially pass regardless of whether isolation is actually
+configured correctly. Instead, connections are made via `docker exec` into
+an already-running Django service container (PY_EXEC_CONTAINER below) —
+it's already on the same internal docker network as Postgres and already
+has psycopg2-binary installed, so it stands in for "a real client" making a
+real TCP connection to postgres:5432, subject to the real pg_hba.conf rules.
 """
 import json
 import os
 import socket
+import subprocess
 import time
 
 import pytest
 
 GATEWAY_HOST = os.environ.get("GATEWAY_HOST", "localhost")
 GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "80"))
-PG_HOST = os.environ.get("PG_HOST", "localhost")
-PG_PORT = int(os.environ.get("PG_PORT", "5433"))
+POSTGRES_HOST = "postgres"       # internal docker network hostname (spark-internal)
+POSTGRES_PORT = 5432
+POSTGRES_CONTAINER = "infra-postgres-1"
+PY_EXEC_CONTAINER = "infra-auth-service-1"  # any Django service container — already has psycopg2-binary + network route to postgres:5432
 PG_SUPERUSER = "postgres"
 PG_SUPERPASS = "dev_password"
 
@@ -68,6 +85,13 @@ SERVICES = [
         "password": "analytics_dev_password_2024",
         "health_path": "/api/analytics/health/",
     },
+    {
+        "name": "assessment",
+        "db": "assessment_db",
+        "user": "assessment_db_user",
+        "password": "assessment_dev_password_2024",
+        "health_path": "/api/assessments/health/",
+    },
 ]
 
 
@@ -106,25 +130,36 @@ def _http_get(path, host=None, port=None, timeout=10):
     return _HTTPResponse(status_code, body)
 
 
-def _pg_connect(dbname, user, password, connect_timeout=5):
-    import psycopg2
-    return psycopg2.connect(
-        host=PG_HOST,
-        port=PG_PORT,
-        dbname=dbname,
-        user=user,
-        password=password,
-        connect_timeout=connect_timeout,
+def _docker_exec(container, *args):
+    cmd = ["docker", "exec", container, *args]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+
+def _pg_script(dbname, user, password, body):
+    """Run `body` (raw, module-level Python source) inside PY_EXEC_CONTAINER
+    with a ready `conn` — a real psycopg2 connection to postgres:5432 over
+    the internal docker network, authenticated with exactly the given
+    user/password. A bad password or a cross-database access denial makes
+    the `psycopg2.connect()` call itself raise, so the whole script exits
+    non-zero with the real Postgres error on stderr — check
+    `result.returncode` and `result.stderr` for those cases; `body` never
+    even runs. See the module docstring for why this can't just be a
+    docker-exec into the Postgres container instead.
+    """
+    preamble = (
+        "import psycopg2\n"
+        f"conn = psycopg2.connect(host={POSTGRES_HOST!r}, port={POSTGRES_PORT}, "
+        f"dbname={dbname!r}, user={user!r}, password={password!r}, connect_timeout=5)\n"
     )
+    return _docker_exec(PY_EXEC_CONTAINER, "python3", "-c", preamble + body)
 
 
 def _is_postgres_up():
-    try:
-        conn = _pg_connect("postgres", PG_SUPERUSER, PG_SUPERPASS)
-        conn.close()
-        return True
-    except Exception:
-        return False
+    result = subprocess.run(
+        ["docker", "exec", POSTGRES_CONTAINER, "pg_isready", "-U", PG_SUPERUSER],
+        capture_output=True, text=True, timeout=10,
+    )
+    return result.returncode == 0
 
 
 def _is_gateway_up():
@@ -142,7 +177,7 @@ def _is_gateway_up():
 @pytest.fixture(scope="session", autouse=True)
 def require_postgres():
     if not _is_postgres_up():
-        pytest.skip("PostgreSQL not reachable on localhost:5433 — start the stack first")
+        pytest.skip(f"PostgreSQL not reachable in container {POSTGRES_CONTAINER} — start the stack first")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -156,14 +191,13 @@ def require_gateway():
 class TestSmoke:
     @pytest.mark.parametrize("svc", SERVICES, ids=[s["name"] for s in SERVICES])
     def test_service_user_can_connect_and_select_1(self, svc):
-        conn = _pg_connect(svc["db"], svc["user"], svc["password"])
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT 1")
-            result = cur.fetchone()
-            assert result == (1,), f"{svc['name']}: SELECT 1 returned {result}"
-        finally:
-            conn.close()
+        result = _pg_script(svc["db"], svc["user"], svc["password"], (
+            "cur = conn.cursor()\n"
+            "cur.execute('SELECT 1')\n"
+            "assert cur.fetchone() == (1,)\n"
+            "conn.close()\n"
+        ))
+        assert result.returncode == 0, f"{svc['name']}: {result.stderr}"
 
 
 # ── Sanity: Django tables present in each database ─────────────────────────────
@@ -171,21 +205,15 @@ class TestSmoke:
 class TestSanity:
     @pytest.mark.parametrize("svc", SERVICES, ids=[s["name"] for s in SERVICES])
     def test_django_tables_exist(self, svc):
-        conn = _pg_connect(svc["db"], svc["user"], svc["password"])
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename"
-            )
-            tables = [row[0] for row in cur.fetchall()]
-            assert "django_migrations" in tables, (
-                f"{svc['name']}: django_migrations missing. Tables: {tables}"
-            )
-            assert "django_content_type" in tables, (
-                f"{svc['name']}: django_content_type missing"
-            )
-        finally:
-            conn.close()
+        result = _pg_script(svc["db"], svc["user"], svc["password"], (
+            "cur = conn.cursor()\n"
+            "cur.execute(\"SELECT tablename FROM pg_tables WHERE schemaname = 'public'\")\n"
+            "tables = [r[0] for r in cur.fetchall()]\n"
+            "assert 'django_migrations' in tables, tables\n"
+            "assert 'django_content_type' in tables, tables\n"
+            "conn.close()\n"
+        ))
+        assert result.returncode == 0, f"{svc['name']}: {result.stderr}"
 
 
 # ── Functionality: CRUD with service user ─────────────────────────────────────
@@ -193,32 +221,32 @@ class TestSanity:
 class TestFunctionality:
     @pytest.mark.parametrize("svc", SERVICES, ids=[s["name"] for s in SERVICES])
     def test_service_user_can_crud(self, svc):
-        conn = _pg_connect(svc["db"], svc["user"], svc["password"])
-        conn.autocommit = False
         try:
-            cur = conn.cursor()
-            cur.execute(
-                "CREATE TABLE IF NOT EXISTS _task51_crud_test "
-                "(id serial PRIMARY KEY, val text NOT NULL)"
-            )
-            cur.execute("INSERT INTO _task51_crud_test (val) VALUES (%s) RETURNING id", ("hello",))
-            row_id = cur.fetchone()[0]
-            cur.execute("SELECT val FROM _task51_crud_test WHERE id = %s", (row_id,))
-            assert cur.fetchone()[0] == "hello"
-            cur.execute("UPDATE _task51_crud_test SET val = %s WHERE id = %s", ("world", row_id))
-            cur.execute("SELECT val FROM _task51_crud_test WHERE id = %s", (row_id,))
-            assert cur.fetchone()[0] == "world"
-            cur.execute("DELETE FROM _task51_crud_test WHERE id = %s", (row_id,))
-            cur.execute("SELECT COUNT(*) FROM _task51_crud_test WHERE id = %s", (row_id,))
-            assert cur.fetchone()[0] == 0
-            conn.rollback()
+            result = _pg_script(svc["db"], svc["user"], svc["password"], (
+                "conn.autocommit = False\n"
+                "cur = conn.cursor()\n"
+                "cur.execute('CREATE TABLE IF NOT EXISTS _task51_crud_test "
+                "(id serial PRIMARY KEY, val text NOT NULL)')\n"
+                "cur.execute('INSERT INTO _task51_crud_test (val) VALUES (%s) RETURNING id', ('hello',))\n"
+                "row_id = cur.fetchone()[0]\n"
+                "cur.execute('SELECT val FROM _task51_crud_test WHERE id = %s', (row_id,))\n"
+                "assert cur.fetchone()[0] == 'hello'\n"
+                "cur.execute('UPDATE _task51_crud_test SET val = %s WHERE id = %s', ('world', row_id))\n"
+                "cur.execute('SELECT val FROM _task51_crud_test WHERE id = %s', (row_id,))\n"
+                "assert cur.fetchone()[0] == 'world'\n"
+                "cur.execute('DELETE FROM _task51_crud_test WHERE id = %s', (row_id,))\n"
+                "cur.execute('SELECT COUNT(*) FROM _task51_crud_test WHERE id = %s', (row_id,))\n"
+                "assert cur.fetchone()[0] == 0\n"
+                "conn.rollback()\n"
+                "conn.close()\n"
+            ))
+            assert result.returncode == 0, f"{svc['name']}: {result.stderr}"
         finally:
-            conn.rollback()
-            conn.close()
-            cleanup = _pg_connect(svc["db"], PG_SUPERUSER, PG_SUPERPASS)
-            cleanup.autocommit = True
-            cleanup.cursor().execute("DROP TABLE IF EXISTS _task51_crud_test")
-            cleanup.close()
+            _pg_script(svc["db"], PG_SUPERUSER, PG_SUPERPASS, (
+                "conn.autocommit = True\n"
+                "conn.cursor().execute('DROP TABLE IF EXISTS _task51_crud_test')\n"
+                "conn.close()\n"
+            ))
 
 
 # ── Integration: REST-only inter-service communication ────────────────────────
@@ -241,30 +269,25 @@ class TestIntegration:
 
 class TestNegative:
     def test_auth_user_cannot_connect_to_user_db(self):
-        import psycopg2
-        with pytest.raises(psycopg2.OperationalError) as exc_info:
-            conn = _pg_connect("user_db", "auth_db_user", "auth_dev_password_2024")
-            conn.close()
-        err = str(exc_info.value).lower()
+        result = _pg_script("user_db", "auth_db_user", "auth_dev_password_2024", "conn.close()\n")
+        assert result.returncode != 0, "Expected cross-database connection to be denied"
+        err = result.stderr.lower()
         assert any(k in err for k in ["permission denied", "password", "fatal"]), (
-            f"Expected auth-denied error, got: {err}"
+            f"Expected auth-denied error, got: {result.stderr}"
         )
 
     def test_user_user_cannot_connect_to_auth_db(self):
-        import psycopg2
-        with pytest.raises(psycopg2.OperationalError) as exc_info:
-            conn = _pg_connect("auth_db", "user_db_user", "user_dev_password_2024")
-            conn.close()
-        err = str(exc_info.value).lower()
+        result = _pg_script("auth_db", "user_db_user", "user_dev_password_2024", "conn.close()\n")
+        assert result.returncode != 0, "Expected cross-database connection to be denied"
+        err = result.stderr.lower()
         assert any(k in err for k in ["permission denied", "password", "fatal"]), (
-            f"Expected auth-denied error, got: {err}"
+            f"Expected auth-denied error, got: {result.stderr}"
         )
 
     @pytest.mark.parametrize("svc", SERVICES, ids=[s["name"] for s in SERVICES])
     def test_wrong_password_rejected(self, svc):
-        import psycopg2
-        with pytest.raises(psycopg2.OperationalError):
-            _pg_connect(svc["db"], svc["user"], "wrong_password_xxxxx")
+        result = _pg_script(svc["db"], svc["user"], "wrong_password_xxxxx", "conn.close()\n")
+        assert result.returncode != 0, f"{svc['name']}: expected wrong password to be rejected"
 
 
 # ── Edge: reconnect resilience and PostgreSQL config ──────────────────────────
@@ -272,28 +295,31 @@ class TestNegative:
 class TestEdge:
     def test_reconnect_after_connection_close(self):
         svc = SERVICES[0]
-        conn1 = _pg_connect(svc["db"], svc["user"], svc["password"])
-        conn1.close()
-        conn2 = _pg_connect(svc["db"], svc["user"], svc["password"])
-        try:
-            cur = conn2.cursor()
-            cur.execute("SELECT 1")
-            assert cur.fetchone() == (1,)
-        finally:
-            conn2.close()
+        r1 = _pg_script(svc["db"], svc["user"], svc["password"], "conn.close()\n")
+        assert r1.returncode == 0, r1.stderr
+        # A second, separate connection — proves the server accepts a fresh
+        # reconnect, not just one long-lived session.
+        r2 = _pg_script(svc["db"], svc["user"], svc["password"], (
+            "cur = conn.cursor()\n"
+            "cur.execute('SELECT 1')\n"
+            "assert cur.fetchone() == (1,)\n"
+            "conn.close()\n"
+        ))
+        assert r2.returncode == 0, r2.stderr
 
     def test_max_connections_setting(self):
-        conn = _pg_connect("postgres", PG_SUPERUSER, PG_SUPERPASS)
-        try:
-            cur = conn.cursor()
-            cur.execute("SHOW max_connections")
-            val = int(cur.fetchone()[0])
-            assert val == 200, f"Expected max_connections=200, got {val}"
-        finally:
-            conn.close()
+        result = _pg_script("postgres", PG_SUPERUSER, PG_SUPERPASS, (
+            "cur = conn.cursor()\n"
+            "cur.execute('SHOW max_connections')\n"
+            "print(cur.fetchone()[0])\n"
+            "conn.close()\n"
+        ))
+        assert result.returncode == 0, result.stderr
+        val = int(result.stdout.strip())
+        assert val == 200, f"Expected max_connections=200, got {val}"
 
 
-# ── Regression: all 6 health endpoints return db: ok ─────────────────────────
+# ── Regression: all health endpoints return db: ok ────────────────────────────
 
 class TestRegression:
     @pytest.mark.parametrize("svc", SERVICES, ids=[s["name"] for s in SERVICES])
