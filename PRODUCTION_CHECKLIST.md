@@ -15,7 +15,7 @@ Add new items as you discover them during development.
 | `SECRET_KEY` (each service) | `dev-{service}-secret-key-replace-...` | Generate separate key per service |
 | `DB_PASSWORD` (each service) | `auth_dev_password_2024` etc. | Strong random passwords, never reuse across services |
 | `POSTGRES_PASSWORD` | `dev_password` | Strong password, store in secrets manager |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Real IAM user `spark-app-s3-user` credentials (already the real value — see Section 9) | Already done; no dev placeholder to replace. Rotate to an EC2 instance role once compute moves off local/dev hosting. |
+| `MINIO_ROOT_PASSWORD` | `minioadmin` | Replace with R2 credentials (access key + secret key) |
 | Redis | No password set | Add `requirepass` in production Redis config |
 | `EMAIL_HOST_USER` | *(blank)* | Gmail address used to send dead-letter alerts — set in outbox-worker secrets |
 | `EMAIL_HOST_PASSWORD` | *(blank)* | Gmail App Password (16 chars) — **never** your regular Gmail password |
@@ -211,35 +211,22 @@ Missing either one causes the silent pure Python fallback described above.
   - Added a per-account login throttle (`services/auth-service/authentication/throttling.py::LoginAttemptThrottle`, 5/min), keyed on the submitted `student_id`/`email` rather than IP — closes the gap where nginx's IP-keyed `auth_zone` can't stop an attacker spreading login guesses against one account across many source IPs.
   - See `BUGTRACKER.md` for anything that regresses.
   - **assessment-service note (added during Phase 15 doc pass):** built after this hardening pass, so it already has the equivalent protections natively rather than needing this same retrofit — `NUM_PROXIES = 1` is set in its `core/settings.py` (confirmed), and its own DRF throttle classes (`core.throttling_resilience.ResilientAnonRateThrottle`/`ResilientUserRateThrottle`, Task 13.1 — fail-open on Redis errors rather than the plain DRF classes the other 6 use) plus a dedicated per-student answer-submit throttle (Task 11.2) are already live. `gateway/nginx.conf`'s `api_zone`/`sensitive_zone`/`export_zone` already cover its routes too (Task 11.2's follow-up). Nothing outstanding here for assessment-service specifically.
-- [x] **No longer applicable (2026-09-11):** MinIO console port (`9001`) — moot, MinIO itself (container, image, and volume) was removed entirely when media storage moved to real AWS S3. See Section 9.
-- [x] **No longer applicable (2026-09-11):** the `$minio_cors_origin` nginx map and its port-9002 presigned-upload proxy were removed from both `gateway/nginx.conf` and `nginx.dev.conf` — real S3 has its own native bucket-level CORS instead. See Section 13 for the still-open equivalent (setting the real production domain on the *bucket's* CORS config, not nginx's).
+- [ ] Remove or restrict access to MinIO console port (`9001`) — internal only
+- [ ] Replace the `TODO: YOUR_PROD_DOMAIN_HERE` placeholder in `gateway/nginx.conf`'s `$minio_cors_origin` map with the real production domain(s) — until this is filled in, the MinIO/R2 presigned-upload proxy (port 9002) rejects CORS from every origin (fails closed, not open) and browser uploads will not work at all in production. See Section 13.
 - [x] **Done (2026-06-20):** `/api/notifications/internal/` and `/api/analytics/internal/` were reachable from outside — only `/api/auth/internal/` had a `return 404;` block. Both internal endpoints relied solely on the `X-Service-Key` header with no network-level block, unlike auth-service's two-layer protection. Added matching `return 404;` blocks for both paths in `nginx.conf` and `nginx.dev.conf`. Verified live: both now return 404 from outside; internal Docker-network service-to-service calls are unaffected (they never went through nginx in the first place).
 
 ---
 
-## 9. MinIO → AWS S3
+## 9. MinIO → Cloudflare R2
 
-**Superseded (2026-09-11):** this section originally planned a move to Cloudflare R2. That
-never happened — the actual migration went to real AWS S3 instead, used for local dev too
-(not just production), so the real integration is proven before any launch rather than only
-simulated. Fully done; see the "Items Added During Development" entry near the end of this
-file for the complete record (bucket/IAM/policy setup, the `storage.py` rewrite, the real bug
-found and fixed during end-to-end testing, the 40-object data migration, and the full
-cross-role CRUD/upload production-readiness sweep). MinIO (container, image, and volume) has
-been removed entirely, everywhere, including local dev.
+Dev uses MinIO as a local S3-compatible store. Production uses Cloudflare R2.
 
-- [x] AWS credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`) set — real IAM user
-  `spark-app-s3-user`, same value used in dev and production alike (see Section 1).
-- [x] `AWS_STORAGE_BUCKET_NAME`/`AWS_S3_CDN_DOMAIN` set to the real bucket (`spark-app-media-2026`).
-- [x] MinIO and minio-init containers removed from `docker-compose.dev.yml` (never existed in
-  `docker-compose.prod.yml` to begin with).
-- [x] File upload and download verified end-to-end against the live bucket — both a direct
-  boto3 round-trip and a full cross-role sweep through the real app API (49/49 + 10/10 checks
-  passed, 2026-09-11).
-- [ ] **Still open:** add the real production frontend domain to the S3 bucket's CORS
-  configuration before launch — it currently only allows `http://localhost:3000` (the dev
-  origin). See Section 13's CORS item, which now applies to the bucket's own CORS config
-  rather than an nginx proxy.
+- [ ] Set `R2_ACCESS_KEY_ID` to real R2 access key
+- [ ] Set `R2_SECRET_ACCESS_KEY` to real R2 secret key
+- [ ] Set `R2_ENDPOINT_URL` to real R2 endpoint
+- [ ] Set `R2_CDN_DOMAIN` to real CDN domain
+- [ ] Remove MinIO and minio-init containers from production compose
+- [ ] Verify file upload and download work end-to-end on production before launch announcement (part of the production smoke test in Task 10.1)
 
 ---
 
@@ -334,15 +321,12 @@ extension/MIME/size/magic-byte validation, per-section storage quota, ClamAV mal
 and a CORS origin restriction on the presigned-upload proxy. All of it is live in dev except the
 two items below, which need a real deployment environment to finish.
 
-- [ ] **Set the production CORS origin — now on the S3 bucket itself, not nginx.** The
-  `$minio_cors_origin` nginx map this item used to describe was removed 2026-09-11 along with
-  the rest of the MinIO CORS proxy (see Section 9) — real S3 uses the bucket's own native CORS
-  configuration instead. That's currently set to allow only `http://localhost:3000` (the dev
-  origin). Before deploying, add the real production frontend domain(s) to the bucket's CORS
-  rule (AWS Console → S3 → `spark-app-media-2026` → Permissions → Cross-origin resource
-  sharing). Left as-is, uploads/reads from the production frontend will fail closed (no origin
-  matches) rather than open to a wildcard `*` — intentional, but it means uploads simply won't
-  work from the real domain until this is filled in.
+- [ ] **Set the production CORS origin.** `gateway/nginx.conf` has a `map $http_origin
+  $minio_cors_origin { ... }` block with a placeholder line:
+  `"https://YOUR_PROD_DOMAIN_HERE"  $http_origin;` — replace `YOUR_PROD_DOMAIN_HERE` with the
+  real production frontend domain(s) before deploying. Left unset, uploads fail closed (no
+  origin matches, so no CORS header is sent) rather than failing open to a wildcard `*` —
+  intentional, but it means uploads simply won't work until this is filled in.
 - [ ] **Let ClamAV finish its first-boot virus-DB download, then do one real test upload.**
   `docker compose up -d clamav` on a machine with real internet access; first boot downloads
   the signature database (~300MB via freshclam) before `clamd` accepts connections — can take
@@ -416,25 +400,3 @@ Add new items here as you discover them. Format: `- [ ] Description — discover
 - [ ] Production CORS domain + ClamAV first-boot DB download + live scan verification — see Section 13 — added during resource-service upload-security hardening (2026-07-10)
 - [x] GitHub branch protection on `main` requires the `CI Result` status check (`.github/workflows/ci.yml`) — configured 2026-09-09 under Settings → Branches: branch pattern `main`, "Require a pull request before merging" (approvals not required — single-maintainer repo), "Require status checks to pass before merging" → `CI Result`, "Require branches to be up to date before merging". Direct pushes to `main` are no longer possible for anyone; every change now goes through a PR gated on CI. Verified end-to-end with a real test PR (this branch) rather than assumed.
   — added during CI/CD pipeline setup (2026-09-08), closed 2026-09-09
-- [x] Media storage migration from local MinIO to AWS S3, replacing MinIO everywhere including local dev (not just production) — deliberate choice, so the real S3 integration gets proven before any production launch, not just simulated against MinIO's S3-compatible-but-not-identical implementation. Started 2026-09-10, closed 2026-09-10.
-
-  **AWS side:**
-  - Bucket `spark-app-media-2026` (ap-south-2), SSE-S3, Object Ownership "ACLs disabled", CORS allowing GET/PUT/HEAD from `http://localhost:3000`.
-  - Block Public Access: the 2 ACL-related boxes remain checked (unused, since ACLs are disabled bucket-wide); the 2 policy-related boxes were deliberately unchecked to allow the bucket policy below — this is *not* "fully private" any more, by design.
-  - Bucket policy: public `s3:GetObject` on `arn:aws:s3:::spark-app-media-2026/uploads/*` only (Sid `PublicReadUploadsOnly`) — matches MinIO's current `mc anonymous set download` behavior. Nothing outside `uploads/` is public, and no other action (list, write, delete) is public.
-  - Least-privilege customer-managed IAM policy `spark-media-s3-policy` (PutObject/GetObject/DeleteObject + ListBucket, scoped to only this bucket) attached to IAM user `spark-app-s3-user`.
-  - Access key `AKIASNQ6GXVPLGOG2WCI` (Access Key ID only — the secret is never recorded anywhere, including here). Note for anyone touching this later: the first access key created (`AKIASNQ6GXVPOR7FHEYX`) had its one-time secret reveal fail to render in the console (a UI glitch, not a security event) — that key was deactivated and deleted unused, and this one created fresh in its place. Separately, this key's secret was inadvertently displayed once in an AI assistant's context via an automatic file-change notification when it was added to `infra/.env`; the owner made an informed decision not to rotate it, accepting that risk knowingly rather than by oversight.
-
-  **Code side:**
-  - `storage.py` in resource-service/practice-service/assessment-service rewritten: dropped the MinIO-only `endpoint_url="http://minio:9000"` workaround and the separate "public client" hack in `generate_presigned_upload_url`. Env vars renamed from `R2_*` to boto3-standard names (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`, `AWS_STORAGE_BUCKET_NAME`, `AWS_S3_CDN_DOMAIN`) — this also happens to be exactly what makes a later move to an EC2 instance role a zero-code change (see below).
-  - Real bug found and fixed during end-to-end testing: `boto3.client("s3", region_name="ap-south-2")` with no `endpoint_url` resolves the *regular* API endpoint correctly, but `generate_presigned_url()` still falls back to the global `bucket.s3.amazonaws.com` host — which "opt-in" regions like `ap-south-2` reject outright (`IllegalLocationConstraintException`), since they only accept requests on their own regional endpoint. Fixed in all 3 services' `_get_client()` by passing an explicit `endpoint_url=f"https://s3.{region}.amazonaws.com"` and `Config(s3={"addressing_style": "virtual"})`. Confirmed via a real presigned PUT + public GET round-trip against the live bucket after the fix (200/200, body verified byte-for-byte), and all 3 services' full test suites re-run clean afterward.
-  - `docker-compose.dev.yml`: removed `minio`/`minio-init` services and the `minio_data` volume; all 4 env blocks that carried `R2_*` (`resource-service`, `resource-worker`, `practice-service`, `assessment-service`) now carry the `AWS_*` vars instead. Each of those 3 services' `.env.example` updated to match. (`user-service` has its own unused copy of `storage.py` — dead code, no env vars configured for it, boto3 not even in its requirements.txt — left alone, out of scope.)
-  - `gateway/nginx.dev.conf`: removed the port-9002 CORS-proxy workaround (S3's own bucket CORS + bucket policy replace it). Verified live via `nginx -t` + reload — port 9002 no longer listening.
-  - Migrated the 40 pre-existing dev-upload objects (`uploads/{image,pdf}/...`) from the MinIO bucket to the new S3 bucket via a one-off boto3 script run inside the `resource-service` container (MinIO container was left running by `docker compose up` since it's no longer in the compose file — Compose doesn't delete orphaned containers/volumes automatically). All 40/40 copied, object counts verified matching on both sides. The old MinIO container, image, and volume were removed afterward once the migration was confirmed.
-  - Full cross-role production-readiness sweep (2026-09-11): a real end-to-end test drove every CRUD + file action (create/upload, read/fetch, update, delete) against the live gateway (`nginx` → real HTTP, real JWTs, real S3 — nothing mocked) across all three services, for every role (`admin`, `super_admin`, `student`, `it`):
-    - **resource-service**: company/section/upload create, presigned S3 PUT, confirm-upload, list, rename (PATCH), delete — as admin; student correctly blocked from write/update/delete and reads via the read-only student endpoints; `it` correctly 403s everywhere here (no CRUD access in any of the 3 services, by design).
-    - **practice-service**: module/section/question create, presigned S3 PUT of a question image, PATCH-to-attach — as admin; student correctly blocked from create/update/delete; unpublished content (`is_published` defaults to `False`) correctly 404s on student read endpoints until published — verified this is the designed behavior, not a bug.
-    - **assessment-service**: paper/set/section/question create, presigned S3 PUT of a set/question image, update, delete — as admin and `super_admin`; verified the ownership rule directly (a second `admin` account gets 403 editing another admin's paper; `super_admin` bypasses ownership and can edit/delete any paper); student correctly blocked from all admin-surface writes.
-    - 49/49 checks passed. All test accounts, records, and S3 objects created for the sweep were cleaned up afterward; no residue left in any service's database or the bucket.
-
-  Access keys must be retired once this app moves onto AWS compute (EC2/ECS/etc.): attach an IAM role directly to the instance instead, stop passing `aws_access_key_id`/`aws_secret_access_key` to `boto3.client()` in `storage.py` (boto3 then auto-picks-up short-lived, auto-rotating credentials from the instance itself), then deactivate and delete this IAM user's access keys.

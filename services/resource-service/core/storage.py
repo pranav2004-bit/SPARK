@@ -19,7 +19,7 @@ def build_file_key(upload_type: str, original_filename: str) -> str:
 
 
 def get_cdn_url(file_key: str) -> str:
-    cdn_domain = getattr(settings, "AWS_S3_CDN_DOMAIN", "")
+    cdn_domain = getattr(settings, "R2_CDN_DOMAIN", "")
     if not cdn_domain:
         return file_key
     if cdn_domain.startswith("localhost") or cdn_domain.startswith("127."):
@@ -28,55 +28,58 @@ def get_cdn_url(file_key: str) -> str:
 
 
 def _get_client():
-    """No explicit credentials: boto3.client("s3") already reads
-    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the environment on its
-    own — this is also exactly what makes the later move to an EC2 instance
-    role a zero-code change (see AWS_ACCESS_KEY_ID's own comment in
-    settings.py).
-
-    endpoint_url + virtual addressing_style ARE explicit here, not optional:
-    boto3's presigned-URL generator otherwise falls back to the global
-    "bucket.s3.amazonaws.com" host, which "opt-in" regions like ap-south-2
-    reject outright (IllegalLocationConstraintException) since they only
-    accept requests on their own regional endpoint."""
-    if not getattr(settings, "AWS_ACCESS_KEY_ID", ""):
-        raise RuntimeError("Storage credentials not configured.")
-
     try:
         import boto3
         from botocore.client import Config
     except ImportError:
         raise RuntimeError("boto3 is not installed.")
 
-    region = settings.AWS_DEFAULT_REGION
+    access_key = getattr(settings, "R2_ACCESS_KEY_ID", "")
+    if not access_key:
+        raise RuntimeError("Storage credentials not configured.")
+
     return boto3.client(
         "s3",
-        region_name=region,
-        endpoint_url=f"https://s3.{region}.amazonaws.com",
-        config=Config(s3={"addressing_style": "virtual"}),
+        endpoint_url=settings.R2_ENDPOINT_URL,
+        aws_access_key_id=settings.R2_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.R2_SECRET_ACCESS_KEY,
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
     )
 
 
 def generate_presigned_upload_url(file_key: str, content_type: str, expires_in: int = None) -> str:
-    """Same client as every other call here — unlike MinIO, real S3 has no
-    separate "internal vs. browser-facing" endpoint distinction to work
-    around."""
+    import boto3
+    from botocore.client import Config
     from botocore.exceptions import ClientError
 
     if expires_in is None:
-        expires_in = getattr(settings, "AWS_S3_PRESIGNED_URL_EXPIRY", 3600)
+        expires_in = getattr(settings, "R2_PRESIGNED_URL_EXPIRY", 3600)
 
-    client = _get_client()
+    access_key = getattr(settings, "R2_ACCESS_KEY_ID", "")
+    if not access_key:
+        raise RuntimeError("Storage credentials not configured.")
+
+    public_endpoint = getattr(settings, "R2_PUBLIC_ENDPOINT_URL", None) or settings.R2_ENDPOINT_URL
+    public_client = boto3.client(
+        "s3",
+        endpoint_url=public_endpoint,
+        aws_access_key_id=settings.R2_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.R2_SECRET_ACCESS_KEY,
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
+    )
     try:
-        return client.generate_presigned_url(
+        url = public_client.generate_presigned_url(
             "put_object",
             Params={
-                "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
+                "Bucket": settings.R2_BUCKET_NAME,
                 "Key": file_key,
                 "ContentType": content_type,
             },
             ExpiresIn=expires_in,
         )
+        return url
     except ClientError as exc:
         logger.error("Failed to generate presigned URL for key=%s: %s", file_key, exc)
         raise
@@ -98,7 +101,7 @@ def verify_uploaded_object(file_key: str, upload_type: str):
     from botocore.exceptions import ClientError
 
     client = _get_client()
-    bucket = settings.AWS_STORAGE_BUCKET_NAME
+    bucket = settings.R2_BUCKET_NAME
 
     try:
         head = client.head_object(Bucket=bucket, Key=file_key)
@@ -138,12 +141,13 @@ def verify_uploaded_object(file_key: str, upload_type: str):
 def get_object_stream(file_key: str):
     """Streaming body for an object — caller reads it (used by the malware-scan task)."""
     client = _get_client()
-    obj = client.get_object(Bucket=settings.AWS_STORAGE_BUCKET_NAME, Key=file_key)
+    obj = client.get_object(Bucket=settings.R2_BUCKET_NAME, Key=file_key)
     return obj["Body"]
 
 
 def delete_file(file_key: str) -> None:
-    if not getattr(settings, "AWS_ACCESS_KEY_ID", ""):
+    access_key = getattr(settings, "R2_ACCESS_KEY_ID", "")
+    if not access_key:
         logger.debug("Storage not configured, skipping deletion of %s", file_key)
         return
 
@@ -151,8 +155,8 @@ def delete_file(file_key: str) -> None:
 
     client = _get_client()
     try:
-        client.delete_object(Bucket=settings.AWS_STORAGE_BUCKET_NAME, Key=file_key)
-        logger.info("S3 object deleted: %s", file_key)
+        client.delete_object(Bucket=settings.R2_BUCKET_NAME, Key=file_key)
+        logger.info("R2 object deleted: %s", file_key)
     except ClientError as exc:
-        logger.error("Failed to delete S3 object key=%s: %s", file_key, exc)
+        logger.error("Failed to delete R2 object key=%s: %s", file_key, exc)
         raise
