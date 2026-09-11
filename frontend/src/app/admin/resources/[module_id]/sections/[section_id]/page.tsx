@@ -238,7 +238,7 @@ export default function ResourceSectionUploadsPage() {
       );
       const presignedData = presignedResponse.data;
 
-      // Step 2 — PUT directly to R2/MinIO (no auth header). Retries on
+      // Step 2 — PUT directly to S3 (no auth header). Retries on
       // transient network drops — the presigned URL stays valid for its
       // full expiry window, so re-sending the same PUT is safe.
       await putFileWithRetry(presignedData.upload_url, selectedFile, setUploadProgress);

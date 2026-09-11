@@ -166,7 +166,7 @@ export default function UploadsPage() {
 
       const presignedData = presignedResponse.data;
 
-      // Step 2: PUT file directly to R2/MinIO (raw axios, no auth header)
+      // Step 2: PUT file directly to S3 (raw axios, no auth header)
       await axios.put(presignedData.upload_url, selectedFile, {
         headers: { "Content-Type": selectedFile.type || "application/octet-stream" },
         onUploadProgress: (e) => {
