@@ -100,7 +100,7 @@ Readiness check (`get_assignment_readiness_blockers`, `validators.py`) extends t
 | `question_number` | int | auto-increment per set (`Max()` aggregate, mirrors `practice-service`) |
 | `question_content_type` | enum | `text` / `image` / `both` |
 | `question_text` | text | |
-| `question_image_key` | string | S3 object key |
+| `question_image_key` | string | MinIO/R2 object key |
 | `question_image_size_bytes` | int | |
 | `question_type` | enum | `mcq` only in V1 |
 | `mcq_type` | enum | `single` / `multiple` |

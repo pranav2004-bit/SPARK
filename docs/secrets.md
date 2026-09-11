@@ -20,8 +20,8 @@ SPARK has 7 microservices, each requiring its own set of secrets. This document 
 | `DB_PASSWORD` | All 7 | PostgreSQL password for the service's dedicated user |
 | `JWT_SIGNING_KEY` | All 7 | Shared JWT signing/verification key — SAME value in all services |
 | `SERVICE_KEY` | notification, analytics | Shared secret for internal service-to-service calls. assessment-service does **not** need this — its `core/user_service_client.py` forwards the requesting admin's own JWT (`Authorization` header) to user-service rather than using a shared service secret, so this row is deliberately not "All 7." |
-| `AWS_ACCESS_KEY_ID` | resource, practice, assessment | AWS IAM user `spark-app-s3-user`'s access key for the media bucket (assessment-service added Phase 1 of `LIVETRACKER2_V1.md` — question images). Retire once services run on AWS compute — attach an IAM role to the instance instead and drop these two vars entirely. |
-| `AWS_SECRET_ACCESS_KEY` | resource, practice, assessment | Matching AWS secret key |
+| `R2_ACCESS_KEY_ID` | resource, practice, assessment | Cloudflare R2 API key (assessment-service added Phase 1 of `LIVETRACKER2_V1.md` — question images) |
+| `R2_SECRET_ACCESS_KEY` | resource, practice, assessment | Cloudflare R2 secret |
 | `SENTRY_DSN` | All 7 | Sentry project DSN for error tracking |
 
 ---
@@ -151,10 +151,9 @@ When rotating secrets, follow this order to avoid downtime:
    - Update in secrets manager for both sending and receiving services
    - Restart both services simultaneously (rolling restart is safe if both are updated before restart)
 
-4. **AWS S3 access keys**:
-   - Generate new key in AWS Console → IAM → `spark-app-s3-user` → Security credentials
+4. **R2 API keys**:
+   - Generate new key in Cloudflare dashboard
    - Update secret, restart resource-service, practice-service, and assessment-service
-   - Deactivate and delete the old key once the new one is confirmed working
 
 ---
 
