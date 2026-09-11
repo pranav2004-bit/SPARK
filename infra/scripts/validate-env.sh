@@ -63,12 +63,12 @@ validate_service_env "user-service" \
 validate_service_env "resource-service" \
     "$REPO_ROOT/services/resource-service/.env" \
     "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" \
-    "R2_ACCESS_KEY_ID" "R2_SECRET_ACCESS_KEY" "R2_BUCKET_NAME" "R2_CDN_DOMAIN"
+    "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_STORAGE_BUCKET_NAME" "AWS_S3_CDN_DOMAIN"
 
 validate_service_env "practice-service" \
     "$REPO_ROOT/services/practice-service/.env" \
     "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" \
-    "R2_ACCESS_KEY_ID" "R2_SECRET_ACCESS_KEY" "R2_BUCKET_NAME" "R2_CDN_DOMAIN"
+    "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_STORAGE_BUCKET_NAME" "AWS_S3_CDN_DOMAIN"
 
 validate_service_env "notification-service" \
     "$REPO_ROOT/services/notification-service/.env" \
@@ -81,7 +81,7 @@ validate_service_env "analytics-service" \
 validate_service_env "assessment-service" \
     "$REPO_ROOT/services/assessment-service/.env" \
     "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" \
-    "R2_ACCESS_KEY_ID" "R2_SECRET_ACCESS_KEY" "R2_BUCKET_NAME" "R2_CDN_DOMAIN"
+    "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_STORAGE_BUCKET_NAME" "AWS_S3_CDN_DOMAIN"
 
 echo ""
 echo "─────────────────────────────────────────────────"

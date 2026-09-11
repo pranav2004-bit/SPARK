@@ -256,7 +256,7 @@ export default function UploadsPage() {
 
       const presignedData = presignedResponse.data;
 
-      // Step 2: PUT file directly to R2/MinIO (raw axios, no auth header).
+      // Step 2: PUT file directly to S3 (raw axios, no auth header).
       // Retries on transient network drops — the presigned URL stays valid
       // for its full expiry window, so re-sending the same PUT is safe.
       await putFileWithRetry(presignedData.upload_url, selectedFile, setUploadProgress);

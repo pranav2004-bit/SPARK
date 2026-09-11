@@ -3,7 +3,7 @@ name: Integration
 # tests/integration/ is a real cross-service suite (gateway routing,
 # security headers, rate limiting, cross-service auth/JWT flows) that only
 # passes against the full stack — nginx + all 7 Django services + Postgres +
-# Redis + MinIO + ClamAV, exactly as documented in tests/integration/conftest.py.
+# Redis + AWS S3 + ClamAV, exactly as documented in tests/integration/conftest.py.
 # That is fundamentally different from ci.yml's backend-tests, which run
 # each service in isolation against sqlite/LocMemCache with zero external
 # dependencies by design.
@@ -62,7 +62,7 @@ jobs:
 
       # Polls the same health endpoint tests/integration/conftest.py checks
       # before running any test, just with a much longer window (10 min) to
-      # cover a cold `--build` plus Postgres/MinIO/ClamAV first-boot time —
+      # cover a cold `--build` plus Postgres/ClamAV first-boot time —
       # conftest.py's own 3-attempt/6-second retry is tuned for an
       # already-warm local stack, not a from-scratch CI boot.
       - name: Wait for the gateway to become healthy

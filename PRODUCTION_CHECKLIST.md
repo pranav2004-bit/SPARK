@@ -15,7 +15,7 @@ Add new items as you discover them during development.
 | `SECRET_KEY` (each service) | `dev-{service}-secret-key-replace-...` | Generate separate key per service |
 | `DB_PASSWORD` (each service) | `auth_dev_password_2024` etc. | Strong random passwords, never reuse across services |
 | `POSTGRES_PASSWORD` | `dev_password` | Strong password, store in secrets manager |
-| `MINIO_ROOT_PASSWORD` | `minioadmin` | Replace with R2 credentials (access key + secret key) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Real IAM user `spark-app-s3-user` credentials (already the real value — see Section 9) | Already done; no dev placeholder to replace. Rotate to an EC2 instance role once compute moves off local/dev hosting. |
 | Redis | No password set | Add `requirepass` in production Redis config |
 | `EMAIL_HOST_USER` | *(blank)* | Gmail address used to send dead-letter alerts — set in outbox-worker secrets |
 | `EMAIL_HOST_PASSWORD` | *(blank)* | Gmail App Password (16 chars) — **never** your regular Gmail password |
@@ -211,22 +211,35 @@ Missing either one causes the silent pure Python fallback described above.
   - Added a per-account login throttle (`services/auth-service/authentication/throttling.py::LoginAttemptThrottle`, 5/min), keyed on the submitted `student_id`/`email` rather than IP — closes the gap where nginx's IP-keyed `auth_zone` can't stop an attacker spreading login guesses against one account across many source IPs.
   - See `BUGTRACKER.md` for anything that regresses.
   - **assessment-service note (added during Phase 15 doc pass):** built after this hardening pass, so it already has the equivalent protections natively rather than needing this same retrofit — `NUM_PROXIES = 1` is set in its `core/settings.py` (confirmed), and its own DRF throttle classes (`core.throttling_resilience.ResilientAnonRateThrottle`/`ResilientUserRateThrottle`, Task 13.1 — fail-open on Redis errors rather than the plain DRF classes the other 6 use) plus a dedicated per-student answer-submit throttle (Task 11.2) are already live. `gateway/nginx.conf`'s `api_zone`/`sensitive_zone`/`export_zone` already cover its routes too (Task 11.2's follow-up). Nothing outstanding here for assessment-service specifically.
-- [ ] Remove or restrict access to MinIO console port (`9001`) — internal only
-- [ ] Replace the `TODO: YOUR_PROD_DOMAIN_HERE` placeholder in `gateway/nginx.conf`'s `$minio_cors_origin` map with the real production domain(s) — until this is filled in, the MinIO/R2 presigned-upload proxy (port 9002) rejects CORS from every origin (fails closed, not open) and browser uploads will not work at all in production. See Section 13.
+- [x] **No longer applicable (2026-09-11):** MinIO console port (`9001`) — moot, MinIO itself (container, image, and volume) was removed entirely when media storage moved to real AWS S3. See Section 9.
+- [x] **No longer applicable (2026-09-11):** the `$minio_cors_origin` nginx map and its port-9002 presigned-upload proxy were removed from both `gateway/nginx.conf` and `nginx.dev.conf` — real S3 has its own native bucket-level CORS instead. See Section 13 for the still-open equivalent (setting the real production domain on the *bucket's* CORS config, not nginx's).
 - [x] **Done (2026-06-20):** `/api/notifications/internal/` and `/api/analytics/internal/` were reachable from outside — only `/api/auth/internal/` had a `return 404;` block. Both internal endpoints relied solely on the `X-Service-Key` header with no network-level block, unlike auth-service's two-layer protection. Added matching `return 404;` blocks for both paths in `nginx.conf` and `nginx.dev.conf`. Verified live: both now return 404 from outside; internal Docker-network service-to-service calls are unaffected (they never went through nginx in the first place).
 
 ---
 
-## 9. MinIO → Cloudflare R2
+## 9. MinIO → AWS S3
 
-Dev uses MinIO as a local S3-compatible store. Production uses Cloudflare R2.
+**Superseded (2026-09-11):** this section originally planned a move to Cloudflare R2. That
+never happened — the actual migration went to real AWS S3 instead, used for local dev too
+(not just production), so the real integration is proven before any launch rather than only
+simulated. Fully done; see the "Items Added During Development" entry near the end of this
+file for the complete record (bucket/IAM/policy setup, the `storage.py` rewrite, the real bug
+found and fixed during end-to-end testing, the 40-object data migration, and the full
+cross-role CRUD/upload production-readiness sweep). MinIO (container, image, and volume) has
+been removed entirely, everywhere, including local dev.
 
-- [ ] Set `R2_ACCESS_KEY_ID` to real R2 access key
-- [ ] Set `R2_SECRET_ACCESS_KEY` to real R2 secret key
-- [ ] Set `R2_ENDPOINT_URL` to real R2 endpoint
-- [ ] Set `R2_CDN_DOMAIN` to real CDN domain
-- [ ] Remove MinIO and minio-init containers from production compose
-- [ ] Verify file upload and download work end-to-end on production before launch announcement (part of the production smoke test in Task 10.1)
+- [x] AWS credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`) set — real IAM user
+  `spark-app-s3-user`, same value used in dev and production alike (see Section 1).
+- [x] `AWS_STORAGE_BUCKET_NAME`/`AWS_S3_CDN_DOMAIN` set to the real bucket (`spark-app-media-2026`).
+- [x] MinIO and minio-init containers removed from `docker-compose.dev.yml` (never existed in
+  `docker-compose.prod.yml` to begin with).
+- [x] File upload and download verified end-to-end against the live bucket — both a direct
+  boto3 round-trip and a full cross-role sweep through the real app API (49/49 + 10/10 checks
+  passed, 2026-09-11).
+- [ ] **Still open:** add the real production frontend domain to the S3 bucket's CORS
+  configuration before launch — it currently only allows `http://localhost:3000` (the dev
+  origin). See Section 13's CORS item, which now applies to the bucket's own CORS config
+  rather than an nginx proxy.
 
 ---
 
@@ -321,12 +334,15 @@ extension/MIME/size/magic-byte validation, per-section storage quota, ClamAV mal
 and a CORS origin restriction on the presigned-upload proxy. All of it is live in dev except the
 two items below, which need a real deployment environment to finish.
 
-- [ ] **Set the production CORS origin.** `gateway/nginx.conf` has a `map $http_origin
-  $minio_cors_origin { ... }` block with a placeholder line:
-  `"https://YOUR_PROD_DOMAIN_HERE"  $http_origin;` — replace `YOUR_PROD_DOMAIN_HERE` with the
-  real production frontend domain(s) before deploying. Left unset, uploads fail closed (no
-  origin matches, so no CORS header is sent) rather than failing open to a wildcard `*` —
-  intentional, but it means uploads simply won't work until this is filled in.
+- [ ] **Set the production CORS origin — now on the S3 bucket itself, not nginx.** The
+  `$minio_cors_origin` nginx map this item used to describe was removed 2026-09-11 along with
+  the rest of the MinIO CORS proxy (see Section 9) — real S3 uses the bucket's own native CORS
+  configuration instead. That's currently set to allow only `http://localhost:3000` (the dev
+  origin). Before deploying, add the real production frontend domain(s) to the bucket's CORS
+  rule (AWS Console → S3 → `spark-app-media-2026` → Permissions → Cross-origin resource
+  sharing). Left as-is, uploads/reads from the production frontend will fail closed (no origin
+  matches) rather than open to a wildcard `*` — intentional, but it means uploads simply won't
+  work from the real domain until this is filled in.
 - [ ] **Let ClamAV finish its first-boot virus-DB download, then do one real test upload.**
   `docker compose up -d clamav` on a machine with real internet access; first boot downloads
   the signature database (~300MB via freshclam) before `clamd` accepts connections — can take
