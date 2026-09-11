@@ -13,7 +13,7 @@ class TestVerifyUploadedObject:
     what actually landed in storage (never the client-reported size/type)."""
 
     def test_object_not_found_in_storage(self, settings):
-        settings.AWS_ACCESS_KEY_ID = "test-key"
+        settings.R2_ACCESS_KEY_ID = "test-key"
         mock_client = MagicMock()
         mock_client.head_object.side_effect = _client_error("404")
         with patch("boto3.client", return_value=mock_client):
@@ -23,7 +23,7 @@ class TestVerifyUploadedObject:
         assert "not found" in error.lower()
 
     def test_rejects_oversized_object(self, settings):
-        settings.AWS_ACCESS_KEY_ID = "test-key"
+        settings.R2_ACCESS_KEY_ID = "test-key"
         mock_client = MagicMock()
         mock_client.head_object.return_value = {"ContentLength": 100 * 1024 * 1024}  # 100MB > 25MB pdf cap
         with patch("boto3.client", return_value=mock_client):
@@ -33,7 +33,7 @@ class TestVerifyUploadedObject:
         assert "25 MB" in error
 
     def test_rejects_magic_byte_mismatch(self, settings):
-        settings.AWS_ACCESS_KEY_ID = "test-key"
+        settings.R2_ACCESS_KEY_ID = "test-key"
         mock_client = MagicMock()
         mock_client.head_object.return_value = {"ContentLength": 1024}
         body = MagicMock()
@@ -46,7 +46,7 @@ class TestVerifyUploadedObject:
         assert "do not match" in error.lower()
 
     def test_accepts_valid_pdf(self, settings):
-        settings.AWS_ACCESS_KEY_ID = "test-key"
+        settings.R2_ACCESS_KEY_ID = "test-key"
         mock_client = MagicMock()
         mock_client.head_object.return_value = {"ContentLength": 2048}
         body = MagicMock()

@@ -35,9 +35,9 @@ ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost 127.0.0.1").split()
 if ENVIRONMENT == "production":
     _require_env("DB_PASSWORD")
     _require_env("JWT_SIGNING_KEY", min_length=32)
-    _require_env("AWS_ACCESS_KEY_ID")
-    _require_env("AWS_SECRET_ACCESS_KEY")
-    _require_env("AWS_S3_CDN_DOMAIN")
+    _require_env("R2_ACCESS_KEY_ID")
+    _require_env("R2_SECRET_ACCESS_KEY")
+    _require_env("R2_CDN_DOMAIN")
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
@@ -124,21 +124,22 @@ CACHES = {
     }
 }
 
-# AWS S3 (media storage). Deliberately named to match boto3's own standard
-# credential/region env vars (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-# AWS_DEFAULT_REGION) — storage.py's boto3.client("s3") call passes none of
-# these explicitly, letting boto3's own default credential chain pick them
-# up. That's what makes the later move to EC2 a zero-code-change swap: an
-# IAM role attached to the instance is just another rung on that same
-# chain, ahead of the explicit env vars, so the exact same boto3.client("s3")
-# call keeps working — see PRODUCTION_CHECKLIST.md's "Items Added During
-# Development" for the retirement plan.
-AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
-AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
-AWS_DEFAULT_REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-south-2")
-AWS_STORAGE_BUCKET_NAME = os.environ.get("AWS_STORAGE_BUCKET_NAME", "spark-app-media-2026")
-AWS_S3_CDN_DOMAIN = os.environ.get("AWS_S3_CDN_DOMAIN", "")
-AWS_S3_PRESIGNED_URL_EXPIRY = 3600
+# Cloudflare R2 / MinIO
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "")
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "spark")
+R2_ENDPOINT_URL = os.environ.get(
+    "R2_ENDPOINT_URL",
+    f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com" if R2_ACCOUNT_ID else "http://localhost:9000",
+)
+# Endpoint handed to the browser for presigned PUT URLs — may differ from
+# R2_ENDPOINT_URL (the internal boto3 connection) when the service and the
+# storage backend are reached via different hostnames, e.g. Docker-internal
+# "minio:9000" vs. the browser-facing "localhost:9002" nginx CORS proxy.
+R2_PUBLIC_ENDPOINT_URL = os.environ.get("R2_PUBLIC_ENDPOINT_URL", "")
+R2_CDN_DOMAIN = os.environ.get("R2_CDN_DOMAIN", "")
+R2_PRESIGNED_URL_EXPIRY = 3600
 
 # ClamAV — malware scanning for confirmed file uploads (resources/tasks.py).
 # Empty CLAMAV_HOST disables scanning (local dev without the clamav
