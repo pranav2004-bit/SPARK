@@ -1,33 +1,41 @@
 """
-Task 5.2 — Query optimisation, indexes, PgBouncer, backup automation tests.
+Task 5.2 — Query optimisation, indexes, PgBouncer tests.
 
 Requires the full stack running:
   docker-compose -f infra/docker-compose.dev.yml up --build -d
-  pip install pytest
+  pip install pytest psycopg2-binary
   pytest tests/integration/test_task52.py -v
 
 Gateway tests use raw sockets (HTTP/1.1 + Connection: close) to work around
 Docker Desktop WSL relay keep-alive issues on Windows.
-PostgreSQL and PgBouncer are both queried via `docker exec` + psql — neither
-is exposed on a host port (matches production; see infra/docker-compose.dev.yml's
-own "No host port — DB is internal only" comment on the postgres service).
-Backup tests execute backup.sh inside the db-backup container via docker exec.
+
+Database queries connect directly to real AWS RDS over the network, using
+each database's own dedicated per-service credentials (the same dev-only
+values already committed in infra/pgbouncer/userlist.txt and
+docker-compose.dev.yml — not the RDS master user, which this file must
+never embed). PgBouncer is still queried via `docker exec` + its own admin
+console login, since that part is local and unchanged by the RDS migration.
+
+Backup-specific tests (db-backup/backup.sh) were removed 2026-09-12 — that
+container no longer exists; RDS provides its own automated backups
+natively instead. See PRODUCTION_CHECKLIST.md's "Items Added During
+Development" for the full migration record.
 """
 
 import json
 import os
 import socket
 import subprocess
-import time
 
+import psycopg2
 import pytest
 
 GATEWAY_HOST = os.environ.get("GATEWAY_HOST", "localhost")
 GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "80"))
-PG_SUPERUSER = "postgres"
-BACKUP_CONTAINER = "infra-db-backup-1"
+RDS_HOST = os.environ.get(
+    "RDS_HOST", "spark-primary-db.c5y2w486ef6p.ap-south-2.rds.amazonaws.com"
+)
 PGBOUNCER_CONTAINER = "infra-pgbouncer-1"
-POSTGRES_CONTAINER = "infra-postgres-1"
 
 SERVICES = [
     {"name": "auth",         "db": "auth_db",         "user": "auth_db_user",         "password": "auth_dev_password_2024",         "health_path": "/api/auth/health/"},
@@ -38,6 +46,7 @@ SERVICES = [
     {"name": "analytics",    "db": "analytics_db",    "user": "analytics_db_user",    "password": "analytics_dev_password_2024",    "health_path": "/api/analytics/health/"},
     {"name": "assessment",   "db": "assessment_db",   "user": "assessment_db_user",   "password": "assessment_dev_password_2024",   "health_path": "/api/assessments/health/"},
 ]
+_SERVICE_BY_DB = {svc["db"]: svc for svc in SERVICES}
 
 
 # ── HTTP helper (raw socket, avoids urllib3 keep-alive WSL relay issue) ────────
@@ -87,16 +96,27 @@ def _docker_exec(container, *args, env=None):
     return result
 
 
-def _pg_query(sql, dbname="postgres"):
-    """Run SQL as the postgres superuser via `docker exec` + psql — local-socket
-    trust auth inside the container, no host port or password needed. Only
-    safe for read-only/introspection use (see module docstring); this file
-    never needs per-service credential auth, unlike test_task51.py."""
-    result = _docker_exec(
-        POSTGRES_CONTAINER,
-        "psql", "-U", PG_SUPERUSER, "-d", dbname, "-t", "-c", sql,
+def _pg_query(sql, dbname="auth_db"):
+    """Run SQL against real RDS over the network, using that database's own
+    dedicated per-service credentials — never the RDS master user, which
+    this file must never embed. Only safe for read-only/introspection use;
+    this file never needs write access."""
+    svc = _SERVICE_BY_DB[dbname]
+    conn = psycopg2.connect(
+        host=RDS_HOST, port=5432, dbname=dbname,
+        user=svc["user"], password=svc["password"],
+        sslmode="require", connect_timeout=10,
     )
-    return result.stdout.strip()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        try:
+            rows = cur.fetchall()
+            return "\n".join(" | ".join("" if c is None else str(c) for c in row) for row in rows)
+        except psycopg2.ProgrammingError:
+            return ""  # statement had no result set (e.g. a bare SET)
+    finally:
+        conn.close()
 
 
 def _explain(dbname, sql, force_index=True):
@@ -122,13 +142,16 @@ def _index_exists(dbname, indexname):
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session", autouse=True)
-def require_postgres():
-    result = _docker_exec(POSTGRES_CONTAINER, "pg_isready", "-U", PG_SUPERUSER)
-    if result.returncode != 0:
-        pytest.skip(
-            f"PostgreSQL unreachable in container {POSTGRES_CONTAINER} — "
-            f"{result.stderr.strip() or result.stdout.strip()}"
+def require_rds():
+    try:
+        conn = psycopg2.connect(
+            host=RDS_HOST, port=5432, dbname="auth_db",
+            user="auth_db_user", password="auth_dev_password_2024",
+            sslmode="require", connect_timeout=10,
         )
+        conn.close()
+    except Exception as exc:
+        pytest.skip(f"RDS unreachable at {RDS_HOST} — {exc}")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -214,53 +237,6 @@ class TestSanity:
             f"Expected aggregation plan for company+sections join, got: {plan}"
 
 
-# ── Functionality: backup.sh creates files and manifest ───────────────────────
-
-class TestFunctionality:
-    @pytest.fixture(scope="class")
-    def run_backup(self):
-        result = _docker_exec(BACKUP_CONTAINER, "/tmp/backup.sh")
-        return result
-
-    def test_backup_exits_zero(self, run_backup):
-        assert run_backup.returncode == 0, \
-            f"backup.sh failed:\nSTDOUT: {run_backup.stdout}\nSTDERR: {run_backup.stderr}"
-
-    def test_backup_creates_dump_files(self, run_backup):
-        result = _docker_exec(BACKUP_CONTAINER, "sh", "-c", "ls /backups/daily/*.dump 2>/dev/null | wc -l")
-        count = int(result.stdout.strip())
-        assert count >= len(SERVICES), \
-            f"Expected ≥ {len(SERVICES)} .dump files in /backups/daily/, found {count}"
-
-    def test_backup_creates_manifest(self, run_backup):
-        result = _docker_exec(BACKUP_CONTAINER, "sh", "-c", "ls /backups/manifest_*.json 2>/dev/null | wc -l")
-        count = int(result.stdout.strip())
-        assert count >= 1, "No manifest JSON file found in /backups/"
-
-    def test_backup_manifest_is_valid_json_with_all_dbs(self, run_backup):
-        result = _docker_exec(
-            BACKUP_CONTAINER,
-            "sh", "-c",
-            "cat $(ls -t /backups/manifest_*.json | head -1)",
-        )
-        assert result.returncode == 0, "Could not read manifest file"
-        manifest = json.loads(result.stdout)
-        assert "databases" in manifest, "Manifest missing 'databases' key"
-        assert len(manifest["databases"]) == len(SERVICES), \
-            f"Expected {len(SERVICES)} DB entries in manifest, got {len(manifest['databases'])}"
-
-    def test_backup_dump_files_non_zero(self, run_backup):
-        """All databases in the latest manifest have size > 0."""
-        result = _docker_exec(
-            BACKUP_CONTAINER,
-            "sh", "-c",
-            "cat $(ls -t /backups/manifest_*.json | head -1)",
-        )
-        manifest = json.loads(result.stdout)
-        zero_size = [d["db"] for d in manifest["databases"] if d.get("size", 0) == 0]
-        assert not zero_size, f"Backup files with size=0 in manifest: {zero_size}"
-
-
 # ── Integration: PgBouncer transparent, connection count bounded ───────────────
 
 class TestIntegration:
@@ -290,10 +266,7 @@ class TestIntegration:
 
     def test_active_pg_connections_bounded(self):
         """Under normal idle load, real PG server connections ≤ 15 (PgBouncer
-        pools ≤ pool_size×7=70 max). Threshold unchanged from the original
-        6-service measurement — measured 5 active connections against the
-        live 7-service stack before touching this, well within the existing
-        ceiling, so no evidence to justify loosening it."""
+        pools ≤ pool_size×7=70 max)."""
         dbnames = ",".join(f"'{svc['db']}'" for svc in SERVICES)
         sql = f"SELECT count(*) FROM pg_stat_activity WHERE datname IN ({dbnames});"
         active = int(_pg_query(sql))
@@ -304,35 +277,6 @@ class TestIntegration:
 # ── Negative: failure modes are visible and reported ──────────────────────────
 
 class TestNegative:
-    def test_backup_fails_with_wrong_password(self):
-        """backup.sh exits non-zero when credentials are incorrect."""
-        result = _docker_exec(
-            BACKUP_CONTAINER,
-            "sh", "-c",
-            "AUTH_DB_PASSWORD=wrong USER_DB_PASSWORD=wrong "
-            "RESOURCE_DB_PASSWORD=wrong PRACTICE_DB_PASSWORD=wrong "
-            "NOTIFICATION_DB_PASSWORD=wrong ANALYTICS_DB_PASSWORD=wrong "
-            "ASSESSMENT_DB_PASSWORD=wrong "
-            "/tmp/backup.sh",
-            env={"AUTH_DB_PASSWORD": "wrong", "USER_DB_PASSWORD": "wrong",
-                 "RESOURCE_DB_PASSWORD": "wrong", "PRACTICE_DB_PASSWORD": "wrong",
-                 "NOTIFICATION_DB_PASSWORD": "wrong", "ANALYTICS_DB_PASSWORD": "wrong",
-                 "ASSESSMENT_DB_PASSWORD": "wrong"},
-        )
-        assert result.returncode != 0, \
-            "backup.sh should exit non-zero on authentication failure"
-
-    def test_backup_script_logs_error_on_failure(self):
-        """backup.sh writes ERROR to stderr when a database backup fails."""
-        result = _docker_exec(
-            BACKUP_CONTAINER,
-            "sh", "-c",
-            "AUTH_DB_PASSWORD=wrong /tmp/backup.sh 2>&1 || true",
-            env={"AUTH_DB_PASSWORD": "wrong"},
-        )
-        assert "ERROR" in result.stdout or "failed" in result.stdout.lower(), \
-            "backup.sh did not log an error on failure"
-
     def test_unindexed_column_shows_seq_scan(self):
         """Unindexed columns still produce Seq Scan — confirms EXPLAIN tests are meaningful."""
         plan = _explain(
@@ -343,49 +287,25 @@ class TestNegative:
         assert "Seq Scan" in plan, \
             "Expected Seq Scan on unindexed 'fullname' column"
 
-    def test_backup_container_not_restarting(self):
-        result = subprocess.run(
-            ["docker", "inspect", BACKUP_CONTAINER,
-             "--format", "{{.RestartCount}}"],
-            capture_output=True, text=True, timeout=10,
-        )
-        restart_count = int(result.stdout.strip())
-        assert restart_count == 0, \
-            f"db-backup container has restarted {restart_count} time(s) — check entrypoint"
+    def test_wrong_service_credential_rejected(self):
+        """A service's own user cannot connect to a different service's database
+        (per-service isolation via REVOKE CONNECT FROM PUBLIC in init-db.sql,
+        replicated identically on RDS)."""
+        with pytest.raises(Exception):
+            conn = psycopg2.connect(
+                host=RDS_HOST, port=5432, dbname="user_db",
+                user="auth_db_user", password="auth_dev_password_2024",
+                sslmode="require", connect_timeout=10,
+            )
+            conn.close()
 
 
-# ── Edge: boundary conditions and script quality ──────────────────────────────
+# ── Edge: boundary conditions ───────────────────────────────────────────────────
 
 class TestEdge:
-    def test_backup_script_has_retention_cleanup(self):
-        """backup.sh deletes backups older than 30 days (daily) and 365 days (monthly)."""
-        result = _docker_exec(BACKUP_CONTAINER, "grep", "-c", "mtime", "/tmp/backup.sh")
-        count = int(result.stdout.strip())
-        assert count >= 2, \
-            "backup.sh should have at least 2 'mtime' retention clauses (daily + monthly)"
-
-    def test_backup_script_has_monthly_copy_logic(self):
-        """backup.sh includes first-Sunday monthly retention copy."""
-        result = _docker_exec(BACKUP_CONTAINER, "grep", "-c", r"IS_FIRST_SUNDAY\|monthly", "/tmp/backup.sh")
-        count = int(result.stdout.strip())
-        assert count >= 2, \
-            "backup.sh missing monthly backup / IS_FIRST_SUNDAY logic"
-
-    def test_backup_script_uses_max_compression(self):
-        """backup.sh uses pg_dump --compress=9 for maximum compression."""
-        result = _docker_exec(BACKUP_CONTAINER, "grep", "-c", "compress=9", "/tmp/backup.sh")
-        count = int(result.stdout.strip())
-        assert count >= 1, "backup.sh does not use --compress=9"
-
-    def test_backup_script_has_retry_logic(self):
-        """backup.sh retries each database up to MAX_RETRIES times."""
-        result = _docker_exec(BACKUP_CONTAINER, "grep", "-c", r"MAX_RETRIES\|attempt", "/tmp/backup.sh")
-        count = int(result.stdout.strip())
-        assert count >= 2, "backup.sh missing retry logic (MAX_RETRIES / attempt)"
-
     def test_autovacuum_enabled(self):
         """PostgreSQL autovacuum is on — prevents table bloat."""
-        value = _pg_query("SHOW autovacuum;")
+        value = _pg_query("SHOW autovacuum;", "auth_db")
         assert value == "on", f"autovacuum is '{value}', expected 'on'"
 
     def test_pgbouncer_max_client_conn(self):

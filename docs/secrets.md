@@ -17,7 +17,8 @@ SPARK has 7 microservices, each requiring its own set of secrets. This document 
 | Variable | Services | Description |
 |----------|----------|-------------|
 | `SECRET_KEY` | All 7 | Django secret key — minimum 50 characters, unique per service |
-| `DB_PASSWORD` | All 7 | PostgreSQL password for the service's dedicated user |
+| `DB_PASSWORD` | All 7 | PostgreSQL password for the service's own dedicated, least-privilege user (`auth_db_user`, etc.) — scoped to only that one database, never the RDS instance as a whole. |
+| RDS master password | None (not used by any service) | A separate, more powerful credential — full admin access to the RDS instance `spark-primary-db` and all 7 databases. No application service ever uses this; it exists only for one-off admin tasks (creating databases/users, running the parameter-group/backup setup). Store it in a password manager, not in any service's `.env`. Rotate via RDS Console → Modify → set new master password (a dynamic change, no reboot needed). |
 | `JWT_SIGNING_KEY` | All 7 | Shared JWT signing/verification key — SAME value in all services |
 | `SERVICE_KEY` | notification, analytics | Shared secret for internal service-to-service calls. assessment-service does **not** need this — its `core/user_service_client.py` forwards the requesting admin's own JWT (`Authorization` header) to user-service rather than using a shared service secret, so this row is deliberately not "All 7." |
 | `AWS_ACCESS_KEY_ID` | resource, practice, assessment | AWS IAM user `spark-app-s3-user`'s access key for the media bucket (assessment-service added Phase 1 of `LIVETRACKER2_V1.md` — question images). Retire once services run on AWS compute — attach an IAM role to the instance instead and drop these two vars entirely. |

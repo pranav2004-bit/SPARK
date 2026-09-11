@@ -18,36 +18,11 @@ services:
 
   # ── Infrastructure ───────────────────────────────────────────────────────────
 
-  postgres:
-    image: postgres:15-alpine
-    restart: always
-    command: >
-      postgres
-      -c max_connections=200
-      -c shared_buffers=128MB
-      -c effective_cache_size=384MB
-      -c work_mem=16MB
-      -c wal_buffers=64MB
-      -c log_min_duration_statement=200
-      -c log_line_prefix='%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: dev_password
-      POSTGRES_DB: postgres
-      POSTGRES_HOST_AUTH_METHOD: md5
-    # No host port — DB is internal only, matching production.
-    # Shell access: docker exec -it <postgres-container> psql -U postgres
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
-    networks:
-      - spark-internal
+  # Local postgres/init-db.sql removed 2026-09-12 — database now points at
+  # real AWS RDS (instance spark-primary-db), used for local dev too, not
+  # just production, matching the same "prove it for real" approach already
+  # taken for media storage (S3). See PRODUCTION_CHECKLIST.md's "Items Added
+  # During Development" for the full migration record.
 
   redis:
     image: redis:7-alpine
@@ -66,15 +41,14 @@ services:
   pgbouncer:
     image: edoburu/pgbouncer:latest
     restart: always
+    # DB_HOST/DB_PORT below are unused — pgbouncer.ini (mounted, has its own
+    # per-database host/port/credentials) takes precedence over these.
     environment:
       DB_HOST: postgres
       DB_PORT: "5432"
     volumes:
       - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 || exit 1"]
       interval: 10s
@@ -428,7 +402,7 @@ services:
     entrypoint: ["celery", "-A", "core", "beat", "--loglevel=info",
                  "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
     depends_on:
-      postgres:
+      pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -447,7 +421,7 @@ services:
       DB_USER: analytics_db_user
       DB_PASSWORD: analytics_dev_password_2024
     depends_on:
-      postgres:
+      pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -641,9 +615,13 @@ services:
       context: ../gateway
       dockerfile: Dockerfile
     restart: always
+    # Port 9002 (MinIO CORS proxy) removed 2026-09-11 alongside the rest of
+    # that workaround — real S3 has its own native bucket-level CORS, so
+    # nginx no longer listens on 9002 internally (see gateway/nginx.dev.conf's
+    # own removal note). This mapping was stale, exposing a port nothing
+    # was listening on.
     ports:
       - "80:80"
-      - "9002:9002"
     volumes:
       - ../gateway/nginx.dev.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -678,43 +656,14 @@ services:
     networks:
       - spark-internal
 
-  # ── Backup container ─────────────────────────────────────────────────────────
-
-  db-backup:
-    image: postgres:15-alpine
-    restart: always
-    environment:
-      DB_PASSWORD: dev_password
-      AUTH_DB_PASSWORD: auth_dev_password_2024
-      USER_DB_PASSWORD: user_dev_password_2024
-      RESOURCE_DB_PASSWORD: resource_dev_password_2024
-      PRACTICE_DB_PASSWORD: practice_dev_password_2024
-      NOTIFICATION_DB_PASSWORD: notification_dev_password_2024
-      ANALYTICS_DB_PASSWORD: analytics_dev_password_2024
-      ASSESSMENT_DB_PASSWORD: assessment_dev_password_2024
-      PG_HOST: postgres
-      PG_PORT: "5432"
-      BACKUP_DIR: /backups
-    volumes:
-      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
-      - backup_data:/backups
-    entrypoint: >
-      /bin/sh -c "
-      cp /usr/local/bin/backup.sh /tmp/backup.sh &&
-      chmod +x /tmp/backup.sh &&
-      echo '0 2 * * * /tmp/backup.sh >> /backups/backup.log 2>&1' | crontab - &&
-      crond -f -l 8
-      "
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - spark-internal
+  # Local db-backup (cron pg_dump of the local postgres container) removed
+  # 2026-09-12 — real AWS RDS provides its own automated backups natively
+  # (14-day retention, configured directly on the instance), which now
+  # protect the real data instead. See PRODUCTION_CHECKLIST.md's "Items
+  # Added During Development" for the full migration record.
 
 volumes:
-  postgres_data:
   redis_data:
-  backup_data:
   frontend_next_cache:
   clamav_data:
 

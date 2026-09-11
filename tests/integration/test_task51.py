@@ -3,26 +3,28 @@ Task 5.1 — Database isolation tests.
 
 Requires the full stack running:
   docker-compose -f infra/docker-compose.dev.yml up --build -d
-  pip install pytest
+  pip install pytest psycopg2-binary
   pytest tests/integration/test_task51.py -v
 
 Gateway tests use raw sockets (HTTP/1.1 + Connection: close) to work around
 Docker Desktop WSL relay keep-alive issues on Windows.
 
-PostgreSQL has no host-published port (matches production; see
-infra/docker-compose.dev.yml's "No host port — DB is internal only" comment
-on the postgres service). This file's whole purpose is verifying real
-per-service credential isolation — wrong passwords rejected, cross-database
-access denied — which requires a genuine network + pg_hba.conf password
-authentication attempt, not just "can we reach Postgres somehow". A
-docker-exec straight into the Postgres container would use local-socket
-trust auth, which never checks a password at all and would make every test
-in this file trivially pass regardless of whether isolation is actually
-configured correctly. Instead, connections are made via `docker exec` into
-an already-running Django service container (PY_EXEC_CONTAINER below) —
-it's already on the same internal docker network as Postgres and already
-has psycopg2-binary installed, so it stands in for "a real client" making a
-real TCP connection to postgres:5432, subject to the real pg_hba.conf rules.
+Database is real AWS RDS (spark-primary-db) — this file's whole purpose is
+verifying real per-service credential isolation (wrong passwords rejected,
+cross-database access denied), which requires a genuine network + password
+authentication attempt, not just "can we reach Postgres somehow". Connections
+are made via `docker exec` into an already-running Django service container
+(PY_EXEC_CONTAINER below) — it's already on the same Docker network,
+already has psycopg2-binary installed, and already has a real route to the
+internet, so it stands in for "a real client" making a real TCP+TLS
+connection to RDS, subject to the real per-database GRANT/REVOKE rules
+(see infra/init-db.sql, replicated identically on RDS).
+
+No RDS master credential is used anywhere in this file, on purpose — every
+test operates as one of the 7 per-service users, which already have
+everything they need (their own schema's CREATE privilege covers creating
+*and* dropping their own test tables; SHOW max_connections needs no special
+privilege at all). Never add the master password here.
 """
 import json
 import os
@@ -34,14 +36,13 @@ import pytest
 
 GATEWAY_HOST = os.environ.get("GATEWAY_HOST", "localhost")
 GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "80"))
-POSTGRES_HOST = "postgres"       # internal docker network hostname (spark-internal)
-POSTGRES_PORT = 5432
-POSTGRES_CONTAINER = "infra-postgres-1"
-PY_EXEC_CONTAINER = "infra-auth-service-1"  # any Django service container — already has psycopg2-binary + network route to postgres:5432
-PG_SUPERUSER = "postgres"
-PG_SUPERPASS = "dev_password"
+RDS_HOST = os.environ.get(
+    "RDS_HOST", "spark-primary-db.c5y2w486ef6p.ap-south-2.rds.amazonaws.com"
+)
+RDS_PORT = 5432
+PY_EXEC_CONTAINER = "infra-auth-service-1"  # any Django service container — already has psycopg2-binary + a real route to RDS
 
-# Per-service credentials matching docker-compose.dev.yml
+# Per-service credentials matching docker-compose.dev.yml / infra/pgbouncer/userlist.txt
 SERVICES = [
     {
         "name": "auth",
@@ -137,28 +138,26 @@ def _docker_exec(container, *args):
 
 def _pg_script(dbname, user, password, body):
     """Run `body` (raw, module-level Python source) inside PY_EXEC_CONTAINER
-    with a ready `conn` — a real psycopg2 connection to postgres:5432 over
-    the internal docker network, authenticated with exactly the given
-    user/password. A bad password or a cross-database access denial makes
-    the `psycopg2.connect()` call itself raise, so the whole script exits
-    non-zero with the real Postgres error on stderr — check
-    `result.returncode` and `result.stderr` for those cases; `body` never
-    even runs. See the module docstring for why this can't just be a
-    docker-exec into the Postgres container instead.
+    with a ready `conn` — a real psycopg2 connection to RDS over the
+    internet, authenticated with exactly the given user/password, with SSL
+    required (RDS enforces this server-side via rds.force_ssl). A bad
+    password or a cross-database access denial makes the `psycopg2.connect()`
+    call itself raise, so the whole script exits non-zero with the real
+    Postgres error on stderr — check `result.returncode` and `result.stderr`
+    for those cases; `body` never even runs.
     """
     preamble = (
         "import psycopg2\n"
-        f"conn = psycopg2.connect(host={POSTGRES_HOST!r}, port={POSTGRES_PORT}, "
-        f"dbname={dbname!r}, user={user!r}, password={password!r}, connect_timeout=5)\n"
+        f"conn = psycopg2.connect(host={RDS_HOST!r}, port={RDS_PORT}, "
+        f"dbname={dbname!r}, user={user!r}, password={password!r}, "
+        "sslmode='require', connect_timeout=10)\n"
     )
     return _docker_exec(PY_EXEC_CONTAINER, "python3", "-c", preamble + body)
 
 
-def _is_postgres_up():
-    result = subprocess.run(
-        ["docker", "exec", POSTGRES_CONTAINER, "pg_isready", "-U", PG_SUPERUSER],
-        capture_output=True, text=True, timeout=10,
-    )
+def _is_rds_up():
+    svc = SERVICES[0]
+    result = _pg_script(svc["db"], svc["user"], svc["password"], "conn.close()\n")
     return result.returncode == 0
 
 
@@ -175,9 +174,9 @@ def _is_gateway_up():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def require_postgres():
-    if not _is_postgres_up():
-        pytest.skip(f"PostgreSQL not reachable in container {POSTGRES_CONTAINER} — start the stack first")
+def require_rds():
+    if not _is_rds_up():
+        pytest.skip(f"RDS not reachable at {RDS_HOST} — start the stack first")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -221,6 +220,8 @@ class TestSanity:
 class TestFunctionality:
     @pytest.mark.parametrize("svc", SERVICES, ids=[s["name"] for s in SERVICES])
     def test_service_user_can_crud(self, svc):
+        # Cleanup uses the SAME per-service user, not a superuser — a user
+        # with CREATE on a schema can also DROP tables it owns there.
         try:
             result = _pg_script(svc["db"], svc["user"], svc["password"], (
                 "conn.autocommit = False\n"
@@ -242,7 +243,7 @@ class TestFunctionality:
             ))
             assert result.returncode == 0, f"{svc['name']}: {result.stderr}"
         finally:
-            _pg_script(svc["db"], PG_SUPERUSER, PG_SUPERPASS, (
+            _pg_script(svc["db"], svc["user"], svc["password"], (
                 "conn.autocommit = True\n"
                 "conn.cursor().execute('DROP TABLE IF EXISTS _task51_crud_test')\n"
                 "conn.close()\n"
@@ -308,7 +309,15 @@ class TestEdge:
         assert r2.returncode == 0, r2.stderr
 
     def test_max_connections_setting(self):
-        result = _pg_script("postgres", PG_SUPERUSER, PG_SUPERPASS, (
+        """SHOW max_connections needs no special privilege — any authenticated
+        user can read it, so this uses an ordinary per-service credential,
+        never the RDS master user. RDS auto-tunes this based on instance
+        class (currently ~1700 for db.m7g.xlarge) rather than a fixed value
+        a local Postgres command-line flag used to set, so this checks for
+        a sane floor rather than pinning an exact number that would break
+        every time the instance is resized."""
+        svc = SERVICES[0]
+        result = _pg_script(svc["db"], svc["user"], svc["password"], (
             "cur = conn.cursor()\n"
             "cur.execute('SHOW max_connections')\n"
             "print(cur.fetchone()[0])\n"
@@ -316,7 +325,7 @@ class TestEdge:
         ))
         assert result.returncode == 0, result.stderr
         val = int(result.stdout.strip())
-        assert val == 200, f"Expected max_connections=200, got {val}"
+        assert val >= 200, f"Expected max_connections >= 200, got {val}"
 
 
 # ── Regression: all health endpoints return db: ok ────────────────────────────
