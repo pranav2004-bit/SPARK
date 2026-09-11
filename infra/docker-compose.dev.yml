@@ -84,45 +84,12 @@ services:
     networks:
       - spark-internal
 
-  minio:
-    image: minio/minio:latest
-    restart: always
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data --console-address ":9001"
-    ports:
-      - "9001:9001"   # MinIO admin console only (http://localhost:9001)
-      # Port 9000 (S3 API) is NOT exposed — all MinIO traffic routes through
-      # nginx:9002 (presigned uploads) and nginx:80/api/resources (file URLs).
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 90s
-    networks:
-      - spark-internal
-
-  minio-init:
-    image: minio/mc:latest
-    restart: on-failure
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      until mc alias set local http://minio:9000 minioadmin minioadmin; do
-        echo 'Waiting for MinIO...'; sleep 2;
-      done;
-      mc mb --ignore-existing local/spark;
-      mc anonymous set download local/spark;
-      echo 'MinIO bucket ready.';
-      "
-    networks:
-      - spark-internal
+  # MinIO/minio-init removed 2026-09-10 — media storage now points at real
+  # AWS S3 (bucket spark-app-media-2026), used for local dev too, not just
+  # production, so the actual integration is proven rather than only
+  # simulated against MinIO's S3-compatible-but-not-identical behavior. See
+  # PRODUCTION_CHECKLIST.md's "Items Added During Development" for the full
+  # migration record.
 
   clamav:
     image: clamav/clamav:stable
@@ -305,20 +272,17 @@ services:
       DB_NAME: resource_db
       DB_USER: resource_db_user
       DB_PASSWORD: resource_dev_password_2024
-      R2_ACCESS_KEY_ID: minioadmin
-      R2_SECRET_ACCESS_KEY: minioadmin
-      R2_BUCKET_NAME: spark
-      R2_ENDPOINT_URL: http://minio:9000          # internal boto3 connection
-      R2_PUBLIC_ENDPOINT_URL: http://localhost:9002 # presigned PUT URLs sent to browser → nginx CORS proxy
-      R2_CDN_DOMAIN: "localhost:9002/spark"        # served file URLs → nginx CORS proxy
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ap-south-2
+      AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
+      AWS_S3_CDN_DOMAIN: spark-app-media-2026.s3.ap-south-2.amazonaws.com
       CLAMAV_HOST: clamav
       CLAMAV_PORT: "3310"
     depends_on:
       pgbouncer:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      minio:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c",
@@ -341,12 +305,11 @@ services:
       DB_NAME: resource_db
       DB_USER: resource_db_user
       DB_PASSWORD: resource_dev_password_2024
-      R2_ACCESS_KEY_ID: minioadmin
-      R2_SECRET_ACCESS_KEY: minioadmin
-      R2_BUCKET_NAME: spark
-      R2_ENDPOINT_URL: http://minio:9000          # internal boto3 connection (delete tasks)
-      R2_PUBLIC_ENDPOINT_URL: http://localhost:9002
-      R2_CDN_DOMAIN: "localhost:9002/spark"
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ap-south-2
+      AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
+      AWS_S3_CDN_DOMAIN: spark-app-media-2026.s3.ap-south-2.amazonaws.com
       CLAMAV_HOST: clamav
       CLAMAV_PORT: "3310"
     entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=2", "-Q", "resource-service"]
@@ -354,8 +317,6 @@ services:
       pgbouncer:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      minio:
         condition: service_healthy
       # NOT service_healthy — the worker also runs unrelated tasks (e.g.
       # async_delete_file) that must keep working even if ClamAV is slow to
@@ -379,20 +340,17 @@ services:
       DB_NAME: practice_db
       DB_USER: practice_db_user
       DB_PASSWORD: practice_dev_password_2024
-      R2_ACCESS_KEY_ID: minioadmin
-      R2_SECRET_ACCESS_KEY: minioadmin
-      R2_BUCKET_NAME: spark
-      R2_ENDPOINT_URL: http://minio:9000          # internal boto3 connection
-      R2_PUBLIC_ENDPOINT_URL: http://localhost:9002 # presigned PUT URLs sent to browser → nginx CORS proxy
-      R2_CDN_DOMAIN: "localhost:9002/spark"        # served file URLs → nginx CORS proxy
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ap-south-2
+      AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
+      AWS_S3_CDN_DOMAIN: spark-app-media-2026.s3.ap-south-2.amazonaws.com
       CLAMAV_HOST: clamav
       CLAMAV_PORT: "3310"
     depends_on:
       pgbouncer:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      minio:
         condition: service_healthy
       # NOT service_healthy — scanning happens synchronously in this
       # service's own API process (no worker to isolate it from), but this
@@ -555,12 +513,11 @@ services:
       DB_NAME: assessment_db
       DB_USER: assessment_db_user
       DB_PASSWORD: assessment_dev_password_2024
-      R2_ACCESS_KEY_ID: minioadmin
-      R2_SECRET_ACCESS_KEY: minioadmin
-      R2_BUCKET_NAME: spark
-      R2_ENDPOINT_URL: http://minio:9000          # internal boto3 connection
-      R2_PUBLIC_ENDPOINT_URL: http://localhost:9002 # presigned PUT URLs sent to browser → nginx CORS proxy
-      R2_CDN_DOMAIN: "localhost:9002/spark"        # served file URLs → nginx CORS proxy
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ap-south-2
+      AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
+      AWS_S3_CDN_DOMAIN: spark-app-media-2026.s3.ap-south-2.amazonaws.com
       CLAMAV_HOST: clamav
       CLAMAV_PORT: "3310"
       USER_SERVICE_URL: http://user-service:8000   # roster snapshot, Task 3.1 — internal Docker network, bypasses nginx
@@ -568,8 +525,6 @@ services:
       pgbouncer:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      minio:
         condition: service_healthy
       # NOT service_healthy — scanning happens synchronously in this
       # service's own API process (no worker to isolate it from), but this
@@ -759,7 +714,6 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  minio_data:
   backup_data:
   frontend_next_cache:
   clamav_data:
