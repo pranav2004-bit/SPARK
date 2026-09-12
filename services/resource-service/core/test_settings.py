@@ -26,7 +26,11 @@ CACHES = {
 
 AWS_ACCESS_KEY_ID = ""
 AWS_SECRET_ACCESS_KEY = ""
-AWS_STORAGE_BUCKET_NAME = ""
+# Non-empty (2026-09-12): storage.py's _get_client() guard now checks this
+# instead of AWS_ACCESS_KEY_ID (production uses an EC2 instance role, so
+# that var is deliberately empty there too) — tests that mock boto3.client
+# directly still need this truthy to get past the guard at all.
+AWS_STORAGE_BUCKET_NAME = "test-bucket"
 AWS_DEFAULT_REGION = "ap-south-2"
 AWS_S3_CDN_DOMAIN = ""
 
