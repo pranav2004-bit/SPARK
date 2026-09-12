@@ -208,6 +208,16 @@ services:
     image: ${REGISTRY:-spark}/resource-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/resource-service/.env
+    environment:
+      # No AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY here (2026-09-12) —
+      # production runs on an EC2 instance with role spark-backend-ec2-role
+      # attached; boto3 picks up credentials from the instance itself. Only
+      # non-secret bucket/region config is set directly here, same as
+      # docker-compose.dev.yml (which does pass explicit keys, since dev has
+      # no instance role to fall back on).
+      AWS_DEFAULT_REGION: ap-south-2
+      AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
+      AWS_S3_CDN_DOMAIN: spark-app-media-2026.s3.ap-south-2.amazonaws.com
     depends_on:
       pgbouncer:
         condition: service_healthy
@@ -230,6 +240,11 @@ services:
     image: ${REGISTRY:-spark}/resource-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/resource-service/.env
+    environment:
+      # Same reasoning as resource-service above.
+      AWS_DEFAULT_REGION: ap-south-2
+      AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
+      AWS_S3_CDN_DOMAIN: spark-app-media-2026.s3.ap-south-2.amazonaws.com
     entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=4", "-Q", "resource-service"]
     depends_on:
       pgbouncer:
@@ -249,6 +264,11 @@ services:
     image: ${REGISTRY:-spark}/practice-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/practice-service/.env
+    environment:
+      # Same reasoning as resource-service's block — see its comment.
+      AWS_DEFAULT_REGION: ap-south-2
+      AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
+      AWS_S3_CDN_DOMAIN: spark-app-media-2026.s3.ap-south-2.amazonaws.com
     depends_on:
       pgbouncer:
         condition: service_healthy
@@ -394,6 +414,10 @@ services:
       AUTH_SERVICE_RETRIES: "3"
       USER_SERVICE_TIMEOUT: "5"
       USER_SERVICE_RETRIES: "3"
+      # Same reasoning as resource-service's block — see its comment.
+      AWS_DEFAULT_REGION: ap-south-2
+      AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
+      AWS_S3_CDN_DOMAIN: spark-app-media-2026.s3.ap-south-2.amazonaws.com
     depends_on:
       pgbouncer:
         condition: service_healthy

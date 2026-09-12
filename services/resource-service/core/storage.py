@@ -29,18 +29,23 @@ def get_cdn_url(file_key: str) -> str:
 
 def _get_client():
     """No explicit credentials: boto3.client("s3") already reads
-    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the environment on its
-    own — this is also exactly what makes the later move to an EC2 instance
-    role a zero-code change (see AWS_ACCESS_KEY_ID's own comment in
-    settings.py).
+    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the environment when
+    they're set, and falls back to an EC2 instance's attached IAM role
+    automatically when they're not. Production (2026-09-12) runs on an EC2
+    instance with role spark-backend-ec2-role attached and deliberately sets
+    neither env var, so boto3 picks up short-lived, auto-rotating
+    credentials from the instance itself instead of a long-lived static key
+    — this is the zero-code-change move described when this file was
+    written; it required relaxing the guard below, which used to (wrongly)
+    require AWS_ACCESS_KEY_ID and would have blocked exactly this.
 
     endpoint_url + virtual addressing_style ARE explicit here, not optional:
     boto3's presigned-URL generator otherwise falls back to the global
     "bucket.s3.amazonaws.com" host, which "opt-in" regions like ap-south-2
     reject outright (IllegalLocationConstraintException) since they only
     accept requests on their own regional endpoint."""
-    if not getattr(settings, "AWS_ACCESS_KEY_ID", ""):
-        raise RuntimeError("Storage credentials not configured.")
+    if not getattr(settings, "AWS_STORAGE_BUCKET_NAME", ""):
+        raise RuntimeError("Storage bucket not configured.")
 
     try:
         import boto3
