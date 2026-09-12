@@ -59,6 +59,44 @@ function processPendingQueue(error: unknown, token: string | null) {
   pendingQueue = [];
 }
 
+// A 429 here means the gateway's per-IP rate limit on this endpoint was
+// hit — it says nothing about whether the refresh token itself is valid.
+// Students in the same exam hall/lab commonly share one public IP, and
+// with the 15-min access token lifetime every one of them calls this
+// endpoint automatically throughout an exam; retrying with backoff (rather
+// than immediately treating it as a dead session) is what actually fixes
+// the underlying "student force-logged-out mid-exam" bug — see
+// gateway/nginx.conf's token_refresh_zone comment for the full story.
+const REFRESH_RETRY_ATTEMPTS = 3;
+
+async function refreshAccessToken(refreshToken: string): Promise<string> {
+  for (let attempt = 1; attempt <= REFRESH_RETRY_ATTEMPTS; attempt++) {
+    try {
+      const { data } = await axios.post(`${BASE_URL}/auth/token/refresh/`, {
+        refresh: refreshToken,
+      });
+      return data.access;
+    } catch (err) {
+      const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+      if (status !== 429 || attempt === REFRESH_RETRY_ATTEMPTS) {
+        throw err;
+      }
+      // Honor the gateway's advertised Retry-After when present (see
+      // nginx.conf's @rate_limit_error block); otherwise back off 1s, 2s.
+      const retryAfterHeader = axios.isAxiosError(err)
+        ? Number(err.response?.headers?.["retry-after"])
+        : NaN;
+      const delayMs = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
+        ? retryAfterHeader * 1000
+        : attempt * 1000;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  // Unreachable: the loop above always either returns or throws on its
+  // final attempt.
+  throw new Error("refreshAccessToken: exhausted retries without resolving");
+}
+
 api.interceptors.response.use(
   (response: AxiosResponse) => response,
   async (error) => {
@@ -111,13 +149,20 @@ api.interceptors.response.use(
 
       let newAccess: string;
       try {
-        const { data } = await axios.post(`${BASE_URL}/auth/token/refresh/`, {
-          refresh: refreshToken,
-        });
-        newAccess = data.access;
+        newAccess = await refreshAccessToken(refreshToken);
       } catch (refreshError) {
-        // The refresh call itself failed (refresh token invalid/expired,
-        // or a network error) — the session is definitively dead.
+        if (axios.isAxiosError(refreshError) && refreshError.response?.status === 429) {
+          // Still rate-limited after retrying with backoff — fail this one
+          // request softly instead of forcing logout. The refresh token may
+          // well still be valid; the session stays intact and the next
+          // natural retry (autosave, activity-log ping, polling, etc.) can
+          // succeed once the shared IP's rate-limit bucket has room again.
+          processPendingQueue(refreshError, null);
+          isRefreshing = false;
+          throw refreshError;
+        }
+        // Any other failure (400 invalid/blacklisted token, 401, network
+        // error) means the refresh token itself is genuinely dead.
         processPendingQueue(refreshError, null);
         isRefreshing = false;
         return forceLogout(refreshError);

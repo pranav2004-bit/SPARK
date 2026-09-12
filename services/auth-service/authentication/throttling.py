@@ -1,6 +1,36 @@
-from rest_framework.throttling import SimpleRateThrottle
+from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle
 
 from core.throttling_resilience import ResilientThrottleMixin
+
+
+class TokenRefreshThrottle(ResilientThrottleMixin, AnonRateThrottle):
+    """
+    Dedicated, generously-sized bucket for POST /api/auth/token/refresh/
+    (2026-09-12 fix) — independent of DEFAULT_THROTTLE_RATES["anon"].
+
+    Without this, TokenRefreshView (rest_framework_simplejwt, used as-is —
+    see urls.py) fell through to the global anon default of 60/min per IP,
+    same as every other unauthenticated endpoint. That default was sized
+    for general API abuse protection, not reasoned about this endpoint's
+    actual traffic shape: access tokens live 15 min (SIMPLE_JWT above), so
+    every logged-in browser calls this automatically roughly every <15 min
+    for the length of an exam, and students in one exam hall/lab commonly
+    share a single public IP (school NAT/gateway) whose refresh calls
+    cluster together near exam start.
+
+    This is the same fix as gateway/nginx.conf's token_refresh_zone, at the
+    application layer — nginx's per-IP limit_req and this DRF throttle both
+    apply to the same request, so leaving this one at the tighter 60/min
+    anon default would have silently capped the endpoint there regardless
+    of how generous the nginx zone was made. Kept at parity with nginx's
+    120/min so neither layer is the surprise bottleneck.
+
+    A refresh token isn't a guessable secret, so brute-force isn't the
+    threat model here (unlike login) — this exists to keep pace with
+    legitimate concurrent exam traffic, not to gate credential guessing.
+    """
+
+    scope = "token_refresh"
 
 
 class LoginAttemptThrottle(ResilientThrottleMixin, SimpleRateThrottle):

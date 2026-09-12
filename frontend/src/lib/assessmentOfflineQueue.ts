@@ -68,21 +68,29 @@ export function pendingCount(sessionId: string): number {
   return Object.keys(readQueue(sessionId)).length;
 }
 
-/** True only for transport-level failures — never for a real HTTP response
- * (4xx/5xx). A 403 (time expired, assignment closed) is a genuine
- * rejection, not a connectivity problem — retrying it forever would be
- * wrong; the caller should surface that as a real error, not silently requeue. */
+/** True for a transport-level failure (no response at all) or a 429 —
+ * both are transient conditions the queue should retry, not a genuine
+ * rejection of the write itself. A 429 here can arrive with no fault of
+ * the student's own: e.g. the api.ts interceptor's refresh-on-401 path
+ * getting rate-limited on a shared exam-hall IP (2026-09-12) surfaces to
+ * this caller as a 429 on the original request, not the underlying 401 —
+ * treating that as "genuine failure" would drop the student's in-progress
+ * answer instead of queuing it for the next retry tick, working against
+ * the very fix that stopped the rate limit from logging them out. A 403
+ * (time expired, assignment closed) or other 4xx/5xx is still a real
+ * rejection — retrying those forever would be wrong; the caller should
+ * surface them as errors, not silently requeue. */
 function isRetryableNetworkError(err: unknown): boolean {
   if (!axios.isAxiosError(err)) return false;
-  return err.response === undefined;
+  return err.response === undefined || err.response.status === 429;
 }
 
 /**
- * Attempts to save one answer live. On a transport-level failure, queues
- * it locally instead of throwing — the caller (the exam UI) shows a
- * "saved locally, reconnecting…" state rather than an error. On a real
+ * Attempts to save one answer live. On a transport-level failure or a 429,
+ * queues it locally instead of throwing — the caller (the exam UI) shows a
+ * "saved locally, reconnecting…" state rather than an error. On any other
  * HTTP rejection (4xx/5xx), throws as usual — that's a genuine failure,
- * not a connectivity gap the queue can fix.
+ * not a transient condition the queue can retry past.
  */
 export async function saveAnswerResilient(
   sessionId: string,
