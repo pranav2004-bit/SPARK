@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated, SAFE_METHODS
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.views import TokenRefreshView as SimpleJWTTokenRefreshView
 from django.core.cache import cache
 
 from core.responses import success_response, error_response
@@ -25,7 +26,7 @@ from .serializers import (
     DepartmentSerializer, DepartmentCreateSerializer, DepartmentUpdateSerializer,
 )
 from .tokens import get_tokens_for_user
-from .throttling import LoginAttemptThrottle
+from .throttling import LoginAttemptThrottle, TokenRefreshThrottle
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -70,6 +71,17 @@ class HealthView(APIView):
                 "institution_id": institution_ok,
             }
         )
+
+
+# ── Token refresh ────────────────────────────────────────────────────────────
+# Thin subclass (2026-09-12) — the only change from rest_framework_simplejwt's
+# own TokenRefreshView is throttle_classes. Left as a subclass rather than
+# editing settings.py's DEFAULT_THROTTLE_CLASSES globally so this scoped rate
+# applies only to this endpoint, not every anonymous view in the service. See
+# TokenRefreshThrottle's docstring (authentication/throttling.py) for why the
+# global "anon" 60/min default isn't safe to leave this endpoint on.
+class TokenRefreshView(SimpleJWTTokenRefreshView):
+    throttle_classes = [TokenRefreshThrottle]
 
 
 # ── Unified Login ──────────────────────────────────────────────────────────────

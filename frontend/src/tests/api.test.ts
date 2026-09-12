@@ -458,4 +458,64 @@ describe("Response interceptor — 401 redirect behaviour", () => {
     expect(result).toEqual({ data: { success: true } });
     expect(mockLocationHref).toBe("");
   });
+
+  // ── 429 on token refresh — rate-limited, NOT proof the token is invalid ────
+  //
+  // Regression coverage for a real bug: students sharing one exam-hall IP
+  // could exceed the gateway's per-IP rate limit on /auth/token/refresh/
+  // (nginx.conf's token_refresh_zone), and the interceptor used to treat
+  // ANY refresh failure — including this one — as a dead session and force
+  // logout. A 429 here says nothing about the refresh token's validity; the
+  // fix retries with backoff and, if still rate-limited, fails the one
+  // in-flight request softly instead of clearing auth and redirecting.
+
+  function make429Error(retryAfter = "0.01") {
+    const err = new Error("Rate limit exceeded") as any;
+    err.isAxiosError = true;
+    err.response = { status: 429, headers: { "retry-after": retryAfter } };
+    return err;
+  }
+
+  it("does NOT force logout when refresh keeps getting rate-limited (429)", async () => {
+    mockStore.refreshToken = "valid_refresh_token";
+    mockStore.user = { role: "student" };
+    jest.spyOn(freshAxios, "post").mockRejectedValue(make429Error());
+
+    await expect(getResponseErrorHandler()(make401Error())).rejects.toMatchObject({
+      response: { status: 429 },
+    });
+
+    expect(mockStore.clearAuth).not.toHaveBeenCalled();
+    expect(mockLocationHref).toBe("");
+  });
+
+  it("retries with backoff and succeeds once the rate limit clears, without forcing logout", async () => {
+    mockStore.refreshToken = "valid_refresh_token";
+    mockStore.user = { role: "student" };
+    jest.spyOn(freshAxios, "post")
+      .mockRejectedValueOnce(make429Error())
+      .mockResolvedValueOnce({ data: { access: "new_access_token" } });
+    jest.spyOn(freshApi, "request").mockResolvedValue({ data: { success: true } });
+
+    const result = await getResponseErrorHandler()(make401Error());
+
+    expect(result).toEqual({ data: { success: true } });
+    expect(freshAxios.post).toHaveBeenCalledTimes(2);
+    expect(mockStore.clearAuth).not.toHaveBeenCalled();
+    expect(mockLocationHref).toBe("");
+  });
+
+  it("gives up and force-logs-out on a genuine 400 invalid/blacklisted refresh token (not 429)", async () => {
+    mockStore.refreshToken = "stale_refresh_token";
+    mockStore.user = { role: "student" };
+    const err = new Error("Invalid or already blacklisted token") as any;
+    err.isAxiosError = true;
+    err.response = { status: 400 };
+    jest.spyOn(freshAxios, "post").mockRejectedValue(err);
+
+    await getResponseErrorHandler()(make401Error()).catch(() => {});
+
+    expect(mockStore.clearAuth).toHaveBeenCalledTimes(1);
+    expect(mockLocationHref).toBe("/students/login");
+  });
 });

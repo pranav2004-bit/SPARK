@@ -117,6 +117,11 @@ REST_FRAMEWORK = {
         # Per-account login throttle (authentication/throttling.py) — keyed
         # on the submitted student_id/email, not IP.
         "login": "5/min",
+        # Token refresh (authentication/throttling.py, TokenRefreshThrottle)
+        # — its own bucket, kept at parity with gateway/nginx.conf's
+        # token_refresh_zone. See that throttle class's docstring for why
+        # the global "anon" 60/min default isn't safe to leave this on.
+        "token_refresh": "120/min",
     },
 }
 

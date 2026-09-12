@@ -117,6 +117,20 @@ describe("saveAnswerResilient", () => {
     await expect(saveAnswerResilient(SESSION_ID, "q1", ["a"])).rejects.toBeTruthy();
     expect(pendingCount(SESSION_ID)).toBe(0);
   });
+
+  // 2026-09-12: a 429 here can arrive with no fault of the student's own —
+  // e.g. api.ts's refresh-on-401 interceptor getting rate-limited on a
+  // shared exam-hall IP surfaces to this caller as a 429 on the original
+  // PUT, not the underlying 401. Treating that like a genuine rejection
+  // (403/404/etc.) would drop the answer instead of queuing it for retry.
+  it("queues locally and returns 'queued' on a 429 rate-limit response", async () => {
+    (api.put as jest.Mock).mockRejectedValueOnce(httpError(429));
+
+    const outcome = await saveAnswerResilient(SESSION_ID, "q1", ["a"]);
+
+    expect(outcome).toBe("queued");
+    expect(pendingCount(SESSION_ID)).toBe(1);
+  });
 });
 
 describe("flushQueue", () => {
@@ -155,6 +169,16 @@ describe("flushQueue", () => {
 
     expect(flushed).toBe(0);
     expect(pendingCount(SESSION_ID)).toBe(0); // cleared, not retried forever
+  });
+
+  it("keeps a still-failing entry queued after a 429 flush attempt (not dropped)", async () => {
+    enqueueAnswer(SESSION_ID, "q1", ["a"]);
+    (api.put as jest.Mock).mockRejectedValueOnce(httpError(429));
+
+    const flushed = await flushQueue(SESSION_ID);
+
+    expect(flushed).toBe(0);
+    expect(pendingCount(SESSION_ID)).toBe(1); // still there for the next attempt
   });
 
   it("one failing entry does not block other entries from flushing", async () => {
