@@ -26,6 +26,11 @@ CACHES = {
 
 AWS_ACCESS_KEY_ID = ""
 AWS_SECRET_ACCESS_KEY = ""
+# Deliberately empty — several tests (test_companies.py, test_modules.py)
+# rely on this to naturally trigger storage.py's "not configured" guard
+# without mocking anything. Tests that DO want a working mocked client
+# (tests/test_upload_security.py) override AWS_STORAGE_BUCKET_NAME
+# per-test instead of changing this global default.
 AWS_STORAGE_BUCKET_NAME = ""
 AWS_DEFAULT_REGION = "ap-south-2"
 AWS_S3_CDN_DOMAIN = ""

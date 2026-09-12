@@ -35,8 +35,13 @@ ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost 127.0.0.1").split()
 if ENVIRONMENT == "production":
     _require_env("DB_PASSWORD")
     _require_env("JWT_SIGNING_KEY", min_length=32)
-    _require_env("AWS_ACCESS_KEY_ID")
-    _require_env("AWS_SECRET_ACCESS_KEY")
+    # AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY deliberately NOT required here
+    # (2026-09-12) — production now runs on an EC2 instance with an attached
+    # IAM role (spark-backend-ec2-role), and boto3's default credential chain
+    # picks that up automatically with no explicit keys at all. Requiring
+    # them here would force static keys back into production even though
+    # storage.py's _get_client() never needs them. See storage.py's own
+    # comment for the matching change on that side.
     _require_env("AWS_S3_CDN_DOMAIN")
 
 INSTALLED_APPS = [

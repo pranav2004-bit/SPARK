@@ -29,6 +29,9 @@ CELERY_TASK_EAGER_PROPAGATES = True
 
 AWS_ACCESS_KEY_ID = ""
 AWS_SECRET_ACCESS_KEY = ""
+# Deliberately empty — this service's storage tests rely on this to
+# naturally trigger storage.py's "not configured" guard without mocking
+# anything.
 AWS_STORAGE_BUCKET_NAME = ""
 AWS_DEFAULT_REGION = "ap-south-2"
 AWS_S3_CDN_DOMAIN = ""

@@ -26,6 +26,8 @@ CACHES = {
 
 AWS_ACCESS_KEY_ID = ""
 AWS_SECRET_ACCESS_KEY = ""
+# Deliberately empty — tests/test_practice.py relies on this to naturally
+# trigger storage.py's "not configured" guard without mocking anything.
 AWS_STORAGE_BUCKET_NAME = ""
 AWS_DEFAULT_REGION = "ap-south-2"
 AWS_S3_CDN_DOMAIN = ""
