@@ -26,11 +26,12 @@ CACHES = {
 
 AWS_ACCESS_KEY_ID = ""
 AWS_SECRET_ACCESS_KEY = ""
-# Non-empty (2026-09-12): storage.py's _get_client() guard now checks this
-# instead of AWS_ACCESS_KEY_ID (production uses an EC2 instance role, so
-# that var is deliberately empty there too) — tests that mock boto3.client
-# directly still need this truthy to get past the guard at all.
-AWS_STORAGE_BUCKET_NAME = "test-bucket"
+# Deliberately empty — several tests (test_companies.py, test_modules.py)
+# rely on this to naturally trigger storage.py's "not configured" guard
+# without mocking anything. Tests that DO want a working mocked client
+# (tests/test_upload_security.py) override AWS_STORAGE_BUCKET_NAME
+# per-test instead of changing this global default.
+AWS_STORAGE_BUCKET_NAME = ""
 AWS_DEFAULT_REGION = "ap-south-2"
 AWS_S3_CDN_DOMAIN = ""
 

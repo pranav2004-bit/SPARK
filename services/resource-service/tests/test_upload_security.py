@@ -14,6 +14,11 @@ class TestVerifyUploadedObject:
 
     def test_object_not_found_in_storage(self, settings):
         settings.AWS_ACCESS_KEY_ID = "test-key"
+        # AWS_STORAGE_BUCKET_NAME also required (2026-09-12): storage.py's
+        # _get_client() guard checks this now, not AWS_ACCESS_KEY_ID — see
+        # core/test_settings.py's own comment for why that default stays
+        # empty globally (other tests rely on it to hit the guard).
+        settings.AWS_STORAGE_BUCKET_NAME = "test-bucket"
         mock_client = MagicMock()
         mock_client.head_object.side_effect = _client_error("404")
         with patch("boto3.client", return_value=mock_client):
@@ -24,6 +29,11 @@ class TestVerifyUploadedObject:
 
     def test_rejects_oversized_object(self, settings):
         settings.AWS_ACCESS_KEY_ID = "test-key"
+        # AWS_STORAGE_BUCKET_NAME also required (2026-09-12): storage.py's
+        # _get_client() guard checks this now, not AWS_ACCESS_KEY_ID — see
+        # core/test_settings.py's own comment for why that default stays
+        # empty globally (other tests rely on it to hit the guard).
+        settings.AWS_STORAGE_BUCKET_NAME = "test-bucket"
         mock_client = MagicMock()
         mock_client.head_object.return_value = {"ContentLength": 100 * 1024 * 1024}  # 100MB > 25MB pdf cap
         with patch("boto3.client", return_value=mock_client):
@@ -34,6 +44,11 @@ class TestVerifyUploadedObject:
 
     def test_rejects_magic_byte_mismatch(self, settings):
         settings.AWS_ACCESS_KEY_ID = "test-key"
+        # AWS_STORAGE_BUCKET_NAME also required (2026-09-12): storage.py's
+        # _get_client() guard checks this now, not AWS_ACCESS_KEY_ID — see
+        # core/test_settings.py's own comment for why that default stays
+        # empty globally (other tests rely on it to hit the guard).
+        settings.AWS_STORAGE_BUCKET_NAME = "test-bucket"
         mock_client = MagicMock()
         mock_client.head_object.return_value = {"ContentLength": 1024}
         body = MagicMock()
@@ -47,6 +62,11 @@ class TestVerifyUploadedObject:
 
     def test_accepts_valid_pdf(self, settings):
         settings.AWS_ACCESS_KEY_ID = "test-key"
+        # AWS_STORAGE_BUCKET_NAME also required (2026-09-12): storage.py's
+        # _get_client() guard checks this now, not AWS_ACCESS_KEY_ID — see
+        # core/test_settings.py's own comment for why that default stays
+        # empty globally (other tests rely on it to hit the guard).
+        settings.AWS_STORAGE_BUCKET_NAME = "test-bucket"
         mock_client = MagicMock()
         mock_client.head_object.return_value = {"ContentLength": 2048}
         body = MagicMock()
