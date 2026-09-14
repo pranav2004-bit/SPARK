@@ -35,10 +35,23 @@ services:
     # Caps clamd's memory footprint so it can't consume enough to
     # starve/kill sibling containers on the host. mem_limit is the classic
     # Compose key — applies under plain `docker compose up`, unlike
-    # `deploy.resources.limits` (swarm-only). Production hosts need at
-    # least ~1.5GB free for this alone — see PRODUCTION_CHECKLIST.md.
-    mem_limit: 1500m
-    mem_reservation: 768m
+    # `deploy.resources.limits` (swarm-only).
+    # Raised from 1.5g (2026-09-15) after reproducing a real hang in dev:
+    # 1.5g covers clamd's normal steady-state footprint but not a live
+    # freshclam database reload, which briefly holds the OLD signature set
+    # in memory while validating and loading the NEW one before the atomic
+    # swap — 1.5g left no headroom for that spike, so the container sat
+    # pinned at ~99.8% memory indefinitely (thrashing, not cleanly
+    # OOM-killed) and never finished loading, failing its healthcheck
+    # indefinitely. This isn't dev-specific — freshclam's daily reload runs
+    # in production too, on the same image with the same limit, so it would
+    # eventually hit this here as well. 3g gives real margin above the
+    # reload spike; the EC2 instance sizing (m6g.xlarge, 16GB) already
+    # budgeted for ClamAV's footprint with comfortable headroom to spare.
+    # Production hosts need at least ~3GB free for this alone — see
+    # PRODUCTION_CHECKLIST.md.
+    mem_limit: 3000m
+    mem_reservation: 1500m
     environment:
       # Video/audio uploads go up to 500MB — clamd's INSTREAM defaults (25MB)
       # would reject them outright. Raise the ceiling to match.

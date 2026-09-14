@@ -76,15 +76,25 @@ services:
     # deploy`/swarm). mem_reservation is a soft floor for scheduling.
     # Measured directly: 1g was NOT enough — clamd got OOMKilled by this
     # container's own cgroup limit while loading its full signature set
-    # (~3.6M signatures across main+daily+bytecode). 1.5g is what it
-    # actually needs; matches the prod value. NOTE: this dev host needs
-    # ~2GB of free RAM for clamav alone, on top of everything else — see
+    # (~3.6M signatures across main+daily+bytecode). 1.5g covered a normal
+    # steady-state load, but NOT a live freshclam database reload (2026-09-15):
+    # during a reload clamd briefly holds the OLD signature set in memory
+    # while validating and loading the NEW one before the atomic swap, which
+    # spikes well above the steady-state figure — 1.5g left no headroom for
+    # that spike, so the container sat pinned at ~99.8% memory indefinitely
+    # (thrashing, not cleanly OOM-killed) and never finished "Testing
+    # database", failing its healthcheck for 24+ hours until noticed. 2.2g
+    # gives real margin above the reload spike, confirmed to fit comfortably
+    # within this host's existing ~3.8GB Docker budget (every other
+    # container combined uses ~1.4GB) without needing to raise Docker
+    # Desktop's own memory allocation. NOTE: this dev host still needs
+    # meaningful free RAM for clamav alone, on top of everything else — see
     # PRODUCTION_CHECKLIST.md. On an undersized host this container may
     # simply not be able to run reliably; that's a host-sizing problem,
     # not something a smaller limit here can paper over (a tighter cap
     # just moves the same crash earlier).
-    mem_limit: 1500m
-    mem_reservation: 768m
+    mem_limit: 2200m
+    mem_reservation: 1000m
     environment:
       # Video/audio uploads go up to 500MB — clamd's INSTREAM defaults (25MB)
       # would reject them outright. Raise the ceiling to match.
