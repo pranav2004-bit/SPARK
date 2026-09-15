@@ -20,6 +20,13 @@ jest.mock("next/navigation", () => ({
 
 jest.mock("@/components/layout/StudentLayout", () => ({
   StudentLayout: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  // The real StudentLayout provides this via a Context.Provider that wraps
+  // its children — this mock renders children directly with no provider,
+  // so MobileExamMenu (rendered inside the exam page's own JSX, not by
+  // StudentLayout itself) needs its own default here. `open: false` means
+  // it renders nothing, which is the correct behavior for every test in
+  // this file — none of them are testing the mobile hamburger menu itself.
+  useExamMobileMenu: () => ({ open: false, setOpen: jest.fn() }),
 }));
 
 jest.mock("@/components/ui/Toast", () => ({
@@ -132,6 +139,10 @@ afterEach(() => {
 });
 
 describe("Exam-taking screen — sections navigator", () => {
+  // Trailing 10000 arg: this test does more async find* waiting (two
+  // queries against the effect-driven Sections panel, on top of the
+  // shared entry-gate flow every test here pays) than its siblings, which
+  // occasionally exceeds Jest's 5000ms default.
   it("groups questions into a Sections column when the paper has more than one", async () => {
     mockApi(MULTI_SECTION_QUESTIONS);
     mockStartSession();
@@ -141,12 +152,21 @@ describe("Exam-taking screen — sections navigator", () => {
     await enterExam(user);
 
     expect(await screen.findByText("Question 1 text")).toBeInTheDocument();
-    expect(screen.getByText("Quantitative Aptitude")).toBeInTheDocument();
-    expect(screen.getByText("Verbal Ability")).toBeInTheDocument();
+    // The desktop Sections panel's content renders one tick after mount
+    // (it's positioned via a measured pixel width — sectionsBgWidth — set
+    // by an effect that reads the panel's own DOM rect, so it's always
+    // empty on the very first render). findByText/findAllByText (retries)
+    // rather than getByText (one-shot) is what actually waits for that.
+    // "Quantitative Aptitude" is the currently-active section, so it also
+    // appears in the mobile Sections dropdown's collapsed-button label —
+    // two matches, hence findAllByText; "Verbal Ability" isn't the active
+    // section yet, so it appears exactly once (desktop panel only).
+    expect((await screen.findAllByText("Quantitative Aptitude")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("Verbal Ability")).toBeInTheDocument();
     // 2 of 2 answered in the first section, 0 of 1 in the second.
     expect(screen.getByText("0/2 answered")).toBeInTheDocument();
     expect(screen.getByText("0/1 answered")).toBeInTheDocument();
-  });
+  }, 10000);
 
   it("clicking a section jumps to that section's first question", async () => {
     mockApi(MULTI_SECTION_QUESTIONS);
@@ -157,7 +177,8 @@ describe("Exam-taking screen — sections navigator", () => {
     await enterExam(user);
     await screen.findByText("Question 1 text");
 
-    await user.click(screen.getByText("Verbal Ability"));
+    // See the note in the test above — this panel populates async.
+    await user.click(await screen.findByText("Verbal Ability"));
 
     expect(await screen.findByText("Question 3 text")).toBeInTheDocument();
     expect(screen.queryByText("Question 1 text")).not.toBeInTheDocument();
