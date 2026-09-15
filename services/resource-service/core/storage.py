@@ -148,7 +148,13 @@ def get_object_stream(file_key: str):
 
 
 def delete_file(file_key: str) -> None:
-    if not getattr(settings, "AWS_ACCESS_KEY_ID", ""):
+    # AWS_STORAGE_BUCKET_NAME, not AWS_ACCESS_KEY_ID — same guard as
+    # _get_client() above, for the same reason (2026-09-15 fix): production
+    # deliberately runs with no AWS_ACCESS_KEY_ID set, relying on the EC2
+    # instance's IAM role instead, so gating on that env var being present
+    # made every deletion silently no-op there — the DB record would be
+    # deleted while the actual S3 object was orphaned forever.
+    if not getattr(settings, "AWS_STORAGE_BUCKET_NAME", ""):
         logger.debug("Storage not configured, skipping deletion of %s", file_key)
         return
 

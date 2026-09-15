@@ -60,15 +60,23 @@ validate_service_env "user-service" \
     "$REPO_ROOT/services/user-service/.env" \
     "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY"
 
+# AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY deliberately NOT required below
+# (2026-09-15) — production runs on an EC2 instance with an IAM role
+# attached (spark-backend-ec2-role) and intentionally leaves both unset;
+# boto3 falls back to the instance role automatically (see each service's
+# core/storage.py::_get_client()). Requiring them here would have hard-
+# blocked exactly that deployment. AWS_STORAGE_BUCKET_NAME/AWS_S3_CDN_DOMAIN
+# are still required — those aren't credentials, storage genuinely can't
+# work without them regardless of auth method.
 validate_service_env "resource-service" \
     "$REPO_ROOT/services/resource-service/.env" \
     "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" \
-    "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_STORAGE_BUCKET_NAME" "AWS_S3_CDN_DOMAIN"
+    "AWS_STORAGE_BUCKET_NAME" "AWS_S3_CDN_DOMAIN"
 
 validate_service_env "practice-service" \
     "$REPO_ROOT/services/practice-service/.env" \
     "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" \
-    "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_STORAGE_BUCKET_NAME" "AWS_S3_CDN_DOMAIN"
+    "AWS_STORAGE_BUCKET_NAME" "AWS_S3_CDN_DOMAIN"
 
 validate_service_env "notification-service" \
     "$REPO_ROOT/services/notification-service/.env" \
@@ -81,7 +89,7 @@ validate_service_env "analytics-service" \
 validate_service_env "assessment-service" \
     "$REPO_ROOT/services/assessment-service/.env" \
     "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" \
-    "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_STORAGE_BUCKET_NAME" "AWS_S3_CDN_DOMAIN"
+    "AWS_STORAGE_BUCKET_NAME" "AWS_S3_CDN_DOMAIN"
 
 echo ""
 echo "─────────────────────────────────────────────────"
