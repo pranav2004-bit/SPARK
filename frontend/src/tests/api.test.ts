@@ -198,6 +198,37 @@ describe("getErrorMessage", () => {
     expect(getErrorMessage(err)).toBe("No internet connection. Please check your network and try again.");
   });
 
+  it("returns a clear rate-limit message for a 429, not the raw axios error string", () => {
+    // Regression coverage (2026-09-15): before this, a 429 (nginx's rate-limit
+    // JSON has no message/detail field) fell through to axios's generic
+    // "Request failed with status code 429" being shown as-is on every login
+    // screen — most concretely hit when several students/admins share one
+    // IP (an exam hall/lab) and collide on the login rate limit at once.
+    const err = makeAxiosError({ error: "Rate limit exceeded", retry_after: "12" }, 429);
+    expect(getErrorMessage(err)).toBe("Too many attempts. Please wait a moment and try again.");
+  });
+
+  it("includes the server's Retry-After seconds when the header is present on a 429", () => {
+    const err = makeAxiosError({ error: "Rate limit exceeded" }, 429) as any;
+    err.response.headers = { "retry-after": "12" };
+    expect(getErrorMessage(err)).toBe("Too many attempts. Please wait 12 seconds and try again.");
+  });
+
+  it("returns a clean fallback for a 500 with no recognizable body, not axios's raw string", () => {
+    // Global fix (2026-09-15): every caller of getErrorMessage — all 4
+    // login screens and everywhere else in the app — used to fall through
+    // to axios's own generic "Request failed with status code 500" for
+    // any response shape this helper doesn't recognize. Fixed once here
+    // rather than per-screen, so it can never regress on just one of them.
+    const err = makeAxiosError({}, 500);
+    expect(getErrorMessage(err)).toBe("Something went wrong on our end. Please try again shortly.");
+  });
+
+  it("returns a clean fallback for a 400 with an unrecognized body shape", () => {
+    const err = makeAxiosError("not an object with message/detail/field errors", 400);
+    expect(getErrorMessage(err)).toBe("Something went wrong. Please try again.");
+  });
+
   it("returns error.message for a plain JS Error instance", () => {
     const err = new Error("Network Error");
     expect(getErrorMessage(err)).toBe("Network Error");

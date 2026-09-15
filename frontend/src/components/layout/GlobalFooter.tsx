@@ -5,12 +5,11 @@ import { usePathname } from "next/navigation";
 export function GlobalFooter() {
   const pathname = usePathname();
   const isStudentRoute = pathname.startsWith("/students");
-  const isLandingPage = pathname === "/";
 
   return (
     <footer
       className={[
-        isLandingPage ? "" : "fixed bottom-0 inset-x-0 z-50",
+        "fixed bottom-0 inset-x-0 z-50",
         "h-8 px-5",
         isStudentRoute ? "hidden sm:grid" : "grid",
       ].join(" ")}

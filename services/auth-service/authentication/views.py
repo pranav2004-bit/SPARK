@@ -104,6 +104,14 @@ class LoginView(APIView):
                 user = User.objects.get(student_id=student_id, role="student")
             except User.DoesNotExist:
                 logger.warning("Student login failed — unknown student_id: %s", student_id)
+                # Burn the same CPU time a real password check would take
+                # (Django's own ModelBackend does this — see ticket #20760)
+                # so a nonexistent student_id doesn't respond measurably
+                # faster than a wrong password for a real one. Without
+                # this, response timing lets an attacker enumerate valid
+                # student_ids even though the error message itself is
+                # identical either way.
+                User().set_password(password)
                 return error_response(INVALID_CREDENTIALS_MSG, status_code=401)
             except User.MultipleObjectsReturned:
                 logger.critical("Data integrity error: multiple auth records for student_id=%s", student_id)
@@ -114,6 +122,8 @@ class LoginView(APIView):
                 user = User.objects.get(email=email, role=role)
             except User.DoesNotExist:
                 logger.warning("Login failed — unknown email: %s role: %s", email, role)
+                # Same timing-equalization as the student_id branch above.
+                User().set_password(password)
                 return error_response(INVALID_CREDENTIALS_MSG, status_code=401)
             except User.MultipleObjectsReturned:
                 logger.critical("Data integrity error: multiple auth records for email=%s role=%s", email, role)
