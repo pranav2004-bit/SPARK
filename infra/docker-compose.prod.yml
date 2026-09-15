@@ -30,7 +30,10 @@ services:
       - spark-internal
 
   clamav:
-    image: clamav/clamav:stable
+    # clamav/clamav:stable (Alpine-based) publishes amd64 only. Debian-based
+    # clamav-debian is the same official ClamAV image, multi-arch (amd64 +
+    # arm64), needed for arm64/Graviton EC2 instances.
+    image: clamav/clamav-debian:stable
     restart: always
     # Caps clamd's memory footprint so it can't consume enough to
     # starve/kill sibling containers on the host. mem_limit is the classic
