@@ -540,7 +540,7 @@ services:
       assessment-service:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1/api/auth/health/"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1/healthz"]
       interval: 15s
       timeout: 10s
       retries: 5
