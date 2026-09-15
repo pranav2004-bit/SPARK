@@ -1,17 +1,30 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useContext, createContext } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Home, Briefcase, BookOpen, ClipboardList, Trophy,
-  LogOut, ChevronDown, UserCircle2, MessageSquare, DoorOpen,
+  LogOut, ChevronDown, UserCircle2, MessageSquare, DoorOpen, Menu, X,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { usePortalGuard } from "@/hooks/usePortalGuard";
 import { ScrollingUpdates } from "@/components/ui/ScrollingUpdates";
 import type { StudentUser } from "@/types";
+
+// Mobile/tablet exam hamburger (added 2026-08-31) — StudentLayout owns the
+// open/closed state and the hamburger button itself, but the *content* of
+// what it opens belongs to the exam page (Sections nav, Question-numbers
+// grid, etc.), rendered inline just above the active question rather than
+// as a floating overlay from the header. This context is how the two sides
+// coordinate without StudentLayout needing to know what that content is.
+const ExamMobileMenuContext = createContext<{ open: boolean; setOpen: (open: boolean) => void } | null>(null);
+export function useExamMobileMenu() {
+  const ctx = useContext(ExamMobileMenuContext);
+  if (!ctx) throw new Error("useExamMobileMenu must be called from within a StudentLayout with examMode on");
+  return ctx;
+}
 
 const NAV_ITEMS = [
   {
@@ -62,6 +75,7 @@ export function StudentLayout({
   hideNav = false,
   examMode = false,
   examCenterContent,
+  examRightContent,
   onExitExam,
 }: {
   children: React.ReactNode;
@@ -76,8 +90,17 @@ export function StudentLayout({
   examMode?: boolean;
   /** Rendered in the header's center cell while examMode is on — e.g. the
    * live countdown on the active exam screen. Left empty on screens with
-   * nothing to time yet (briefing, resume, error, finished). */
+   * nothing to time yet (briefing, resume, error, finished). Desktop
+   * (lg:) grid only — the mobile header is just a hamburger; the page
+   * renders its own copy of this content inline, above the question, via
+   * useExamMobileMenu(). */
   examCenterContent?: React.ReactNode;
+  /** Rendered in the header's right cell while examMode is on, immediately
+   * before the "Exit Test" button (added 2026-08-31) — e.g. "Submit Exam".
+   * Grouped with Exit Test since both are session-ending actions, kept
+   * apart from examCenterContent's purely informational countdown.
+   * Desktop (lg:) grid only — see examCenterContent's note on mobile. */
+  examRightContent?: React.ReactNode;
   /** Required in practice whenever examMode is on — falls back to
    * navigating to the assessments list if the caller omits it, so a
    * missed prop never leaves the button dead. */
@@ -89,6 +112,7 @@ export function StudentLayout({
   usePortalGuard("student");
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
+  const [examMobileMenuOpen, setExamMobileMenuOpen] = useState(false);
 
   const studentUser = user as StudentUser | null;
   const compactNav = hideNav || examMode;
@@ -97,6 +121,7 @@ export function StudentLayout({
   // Close menu on route change
   useEffect(() => {
     setUserMenuOpen(false);
+    setExamMobileMenuOpen(false);
   }, [pathname]);
 
   // Close menu on outside click
@@ -111,14 +136,25 @@ export function StudentLayout({
   }, [userMenuOpen]);
 
   return (
+    <ExamMobileMenuContext.Provider value={{ open: examMobileMenuOpen, setOpen: setExamMobileMenuOpen }}>
     <div className="min-h-screen bg-[var(--color-surface-secondary)]">
 
       {/* ── Top Navbar ───────────────────────────────────────────────────────── */}
       <header
-        className="fixed top-0 inset-x-0 z-40 h-14 bg-white/[0.97] backdrop-blur-md border-b border-[var(--color-border)]"
+        className="fixed top-0 inset-x-0 z-40 h-14 bg-white backdrop-blur-md border-b border-[var(--color-border)]"
         style={{ boxShadow: "0 1px 0 0 var(--color-border), 0 2px 20px rgba(26, 49, 80, 0.05)" }}
       >
-        <div className="w-full h-full px-4 sm:px-6 lg:px-8 grid grid-cols-[auto_1fr_auto] items-center gap-3 sm:gap-5">
+        <div
+          className={[
+            "w-full h-full px-4 sm:px-6 lg:px-8 grid-cols-[auto_1fr_auto] items-center gap-3 sm:gap-5",
+            // Non-exam pages keep the original single-row grid at every
+            // width (untouched, not part of this fix). Exam mode swaps to
+            // the new two-row mobile layout below lg, then back to this
+            // exact same grid at lg — desktop is byte-for-byte the same
+            // markup either way.
+            examMode ? "hidden lg:grid" : "grid",
+          ].join(" ")}
+        >
 
           {/* Logo group — a text wordmark in exam mode, not the clickable
               logo lockup: a Link out of this screen would let a student
@@ -230,9 +266,11 @@ export function StudentLayout({
             </nav>
           )}
 
-          {/* Exam mode — exit button only, no account menu */}
+          {/* Exam mode — exit button (+ caller-supplied actions like
+              Submit Exam), no account menu */}
           {examMode ? (
-            <div className="flex items-center justify-end">
+            <div className="flex items-center justify-end gap-2">
+              {examRightContent}
               <button
                 onClick={handleExitExam}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--radius-md)] text-sm font-medium border transition-colors cursor-pointer"
@@ -351,6 +389,49 @@ export function StudentLayout({
           )}
 
         </div>
+
+        {/* Exam mode, mobile/tablet only — the single h-14 grid row above
+            can't fit wordmark + timer + Submit Exam + Exit Test without
+            wrapping/overlapping below lg. The timer stays visible here
+            (always-relevant, unlike the rest); Submit Exam, Exit Test,
+            Sections nav, and the Question-numbers grid go behind a
+            hamburger instead — opened/closed here, but rendered by the
+            exam page itself inline, just above the active question rather
+            than as a floating overlay from the header (2026-08-31,
+            explicit request — see useExamMobileMenu()). Swaps back to the
+            unchanged grid above at lg. */}
+        {examMode && (
+          <div className="lg:hidden w-full h-full px-4 flex items-center justify-between gap-2">
+            <div className="shrink-0 select-none leading-tight min-w-0">
+              <p className="text-sm font-bold truncate" style={{ color: "var(--color-text)" }}>
+                SPARK Proctored <span style={{ color: "var(--color-text-subtle)", fontWeight: 600 }}>v1.0.0</span>
+              </p>
+              <p className="text-[10px] font-semibold uppercase tracking-wider flex items-center gap-1.5" style={{ color: "var(--color-text-subtle)" }}>
+                <span className="relative inline-flex items-center justify-center shrink-0 w-3 h-3">
+                  <span
+                    className="absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-40 animate-ping"
+                    style={{ animationDuration: "2.5s" }}
+                    aria-hidden="true"
+                  />
+                  <span className="relative w-1.5 h-1.5 rounded-full bg-red-500" aria-hidden="true" />
+                </span>
+                Examination Mode
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {examCenterContent}
+              <button
+                onClick={() => setExamMobileMenuOpen(v => !v)}
+                aria-label={examMobileMenuOpen ? "Close exam menu" : "Open exam menu"}
+                aria-expanded={examMobileMenuOpen}
+                className="shrink-0 w-9 h-9 rounded-[var(--radius-md)] flex items-center justify-center border cursor-pointer"
+                style={{ borderColor: "var(--color-border)", background: examMobileMenuOpen ? "var(--color-surface-hover)" : "#fff" }}
+              >
+                {examMobileMenuOpen ? <X size={18} /> : <Menu size={18} />}
+              </button>
+            </div>
+          </div>
+        )}
       </header>
 
       {/* ── Mobile Bottom Navigation ─────────────────────────────────────────── */}
@@ -422,5 +503,6 @@ export function StudentLayout({
       </main>
 
     </div>
+    </ExamMobileMenuContext.Provider>
   );
 }

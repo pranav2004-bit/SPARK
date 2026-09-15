@@ -5,9 +5,9 @@ import { useParams, useRouter } from "next/navigation";
 import {
   Clock, WifiOff, CheckCircle2, Maximize, Minimize, ShieldAlert, AlertTriangle,
   Award, HelpCircle, CalendarClock, UserCircle2, FileText, ListChecks, AppWindow,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, Flag, X, DoorOpen,
 } from "lucide-react";
-import { StudentLayout } from "@/components/layout/StudentLayout";
+import { StudentLayout, useExamMobileMenu } from "@/components/layout/StudentLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -58,6 +58,35 @@ const LOCKOUT_COUNTDOWN_SECONDS = 5;
 // disables a real anti-cheat mechanism for every student, not just this
 // dev session.
 const DEV_DISABLE_ANTI_CHEAT_LOCKOUT = true;
+
+// Mobile hamburger dropdown content (added 2026-08-31, explicit request) —
+// a real component, not just inline JSX in StudentExamPage, because it
+// needs useExamMobileMenu(), and that context is only readable by
+// descendants of the <StudentLayout examMode> that provides it.
+// StudentExamPage itself renders that StudentLayout, so it can't read the
+// context directly — only something nested inside `children` can. Renders
+// in normal document flow, just above the active question, not as a
+// floating overlay.
+function MobileExamMenu({ children }: { children: React.ReactNode }) {
+  const { open, setOpen } = useExamMobileMenu();
+  if (!open) return null;
+  return (
+    <>
+      {/* Backdrop — blurs the rest of the exam behind the dropdown
+          (explicit request 2026-08-31) rather than just dimming it; also
+          closes the dropdown on tap-outside. */}
+      <div
+        className="lg:hidden fixed inset-0 top-14 z-30"
+        style={{ background: "rgba(15, 23, 42, 0.15)", backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)" }}
+        onClick={() => setOpen(false)}
+        aria-hidden="true"
+      />
+      <div className="lg:hidden relative z-40 mb-5 flex flex-col gap-4 rounded-[var(--radius-lg)] bg-white p-4" style={{ border: "1px solid var(--color-border)" }}>
+        {children}
+      </div>
+    </>
+  );
+}
 
 export default function StudentExamPage() {
   const { assignment_id } = useParams<{ assignment_id: string }>();
@@ -119,6 +148,17 @@ export default function StudentExamPage() {
   const [loading, setLoading] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<string, string[]>>({}); // questionId -> selected
+  // Drives the Question-numbers panel's 4-state legend/coloring (not
+  // visited / answered / not answered / flagged) — visited is index-based
+  // (a question is "visited" once it's ever been the active one, tracked
+  // by the effect below), flagged is question-id based and toggled by the
+  // student from the active-question card, independent of whether it's
+  // answered.
+  const [visitedIndices, setVisitedIndices] = useState<Set<number>>(() => new Set([0]));
+  const [flaggedIds, setFlaggedIds] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    setVisitedIndices(prev => (prev.has(activeIndex) ? prev : new Set(prev).add(activeIndex)));
+  }, [activeIndex]);
   const [savingState, setSavingState] = useState<Record<string, "saving" | "saved" | "queued">>({});
   const [confirmSubmit, setConfirmSubmit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -280,6 +320,23 @@ export default function StudentExamPage() {
     });
   }, [saveAnswer]);
 
+  // Single-choice questions have no natural way to deselect (clicking the
+  // same option again is a no-op — see the "single" branch above, which
+  // always ends up with that one option selected), so this is the only way
+  // to unselect once an answer's been picked.
+  const handleClear = useCallback((questionId: string) => {
+    setAnswers(prev => {
+      const next = { ...prev, [questionId]: [] };
+      setSavingState(s => ({ ...s, [questionId]: "saving" }));
+      saveAnswer(questionId, [])
+        .then(outcome => setSavingState(s => ({ ...s, [questionId]: outcome })))
+        .catch(() => {
+          setSavingState(s => { const copy = { ...s }; delete copy[questionId]; return copy; });
+        });
+      return next;
+    });
+  }, [saveAnswer]);
+
   // A ref, not the `submitting` state, guards re-entrancy — state updates
   // are batched/async, so two callers landing in the same tick (e.g. the
   // countdown timer hitting 0 right as the lockout overlay also reaches 0)
@@ -401,6 +458,85 @@ export default function StudentExamPage() {
     [questions, answers]
   );
 
+  // Question-numbers panel's 4-state legend counts. Mutually exclusive so
+  // they sum to questions.length and match each button's single color:
+  // flagged wins over answered/not-answered/not-visited regardless of
+  // actual answer state, same priority order as the button coloring below.
+  const statusCounts = useMemo(() => {
+    let flaggedN = 0, answeredN = 0, notAnsweredN = 0, notVisitedN = 0;
+    questions.forEach((q, i) => {
+      if (flaggedIds.has(q.id)) flaggedN++;
+      else if ((answers[q.id]?.length ?? 0) > 0) answeredN++;
+      else if (visitedIndices.has(i)) notAnsweredN++;
+      else notVisitedN++;
+    });
+    return { flagged: flaggedN, answered: answeredN, notAnswered: notAnsweredN, notVisited: notVisitedN };
+  }, [questions, answers, flaggedIds, visitedIndices]);
+
+  const QUESTION_STATUS_STYLE = {
+    flagged: { background: "#F5F3FF", color: "#7C3AED", border: "#DDD6FE" },
+    answered: { background: "#F0FDF4", color: "#16A34A", border: "#BBF7D0" },
+    notAnswered: { background: "#FEF2F2", color: "#DC2626", border: "#FECACA" },
+    notVisited: { background: "#F3F4F6", color: "var(--color-text-muted)", border: "#E5E7EB" },
+  } as const;
+  const getQuestionStatus = useCallback((q: StudentQuestion, i: number): keyof typeof QUESTION_STATUS_STYLE => {
+    if (flaggedIds.has(q.id)) return "flagged";
+    if ((answers[q.id]?.length ?? 0) > 0) return "answered";
+    if (visitedIndices.has(i)) return "notAnswered";
+    return "notVisited";
+  }, [flaggedIds, answers, visitedIndices]);
+
+  const statusLegend = (
+    <div className="grid grid-cols-2 gap-2.5 mb-3 w-full">
+      {([
+        ["notVisited", "Not Visited", statusCounts.notVisited],
+        ["answered", "Answered", statusCounts.answered],
+        ["notAnswered", "Not Answered", statusCounts.notAnswered],
+        ["flagged", "Flagged", statusCounts.flagged],
+      ] as const).map(([key, label, count]) => (
+        <div
+          key={key}
+          className="flex items-center justify-between px-2 py-2 rounded-[var(--radius-md)] min-w-0"
+          style={{ background: QUESTION_STATUS_STYLE[key].background, border: `1px solid ${QUESTION_STATUS_STYLE[key].border}` }}
+        >
+          <span className="text-[13px] font-medium truncate" style={{ color: QUESTION_STATUS_STYLE[key].color }}>{label}</span>
+          <span className="text-[13px] font-bold shrink-0 pl-1" style={{ color: QUESTION_STATUS_STYLE[key].color }}>{count}</span>
+        </div>
+      ))}
+    </div>
+  );
+
+  // Question-numbers content for the mobile hamburger menu (rendered by
+  // MobileExamMenu, above) — moved out of the page's own 3-column row
+  // (2026-08-31, explicit request) since on narrow screens it used to sit
+  // inline before the actual question, pushing it far down the page. The
+  // desktop fixed/bled version below (inside the row) is untouched.
+  const mobileNumberGrid = (
+    <div className="lg:hidden">
+      {statusLegend}
+      <div className="grid grid-cols-[repeat(5,2.25rem)] gap-2 justify-center">
+        {questions.map((q, i) => {
+          const status = getQuestionStatus(q, i);
+          const isActive = i === activeIndex;
+          return (
+            <button
+              key={q.id}
+              onClick={() => setActiveIndex(i)}
+              className="h-9 w-9 rounded-[var(--radius-md)] text-xs font-semibold flex items-center justify-center transition-colors"
+              style={{
+                background: isActive ? "var(--color-accent)" : QUESTION_STATUS_STYLE[status].background,
+                color: isActive ? "#fff" : QUESTION_STATUS_STYLE[status].color,
+                border: `1.5px solid ${isActive ? "var(--color-accent)" : QUESTION_STATUS_STYLE[status].border}`,
+              }}
+            >
+              {q.question_number}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   // Sections navigator (added 2026-08-28) — questions arrive from the
   // backend already ordered by section then question_number, so grouping
   // by first-seen section_id here preserves that order without a second
@@ -421,53 +557,145 @@ export default function StudentExamPage() {
     return Array.from(bySection.values());
   }, [questions]);
 
-  // Collapse + drag-to-resize for the two side panels (added 2026-08-29) —
-  // desktop-only (mobile stacks everything full-width already, nothing to
-  // reclaim there). Widths are plain component state, not persisted: this
-  // is a page a student lands on once per exam, not a workspace they
-  // return to, so there's nothing worth remembering across visits.
-  //
-  // `null` width means "no explicit size yet" — rendered as `flex: 20 1 0%`
-  // (the question column is `flex: 60 1 0%`), a 20/60/20 split of whatever
-  // width the row actually has, rather than the side panels defaulting to
-  // some arbitrary fixed pixel value. Dragging a panel converts *that*
-  // panel to a fixed `flex: 0 0 <px>` size; the other flexible panes
-  // (question column, and the other side panel if it's still at its
-  // default) redistribute the remaining space between them proportionally
-  // to their own flex-grow, same as any standard resizable-pane layout.
+  // Collapse (no manual drag-resize — removed 2026-08-31, explicit
+  // request) for the two side panels — desktop-only (mobile stacks
+  // everything full-width already, nothing to reclaim there). `null` width
+  // means "no explicit size yet" — rendered as `flex: 0 0 150px`, a fixed
+  // default rather than a proportional share of the row.
   const [sectionsOpen, setSectionsOpen] = useState(true);
   const [navigatorOpen, setNavigatorOpen] = useState(true);
-  const [sectionsWidth, setSectionsWidth] = useState<number | null>(null);
-  const [navigatorWidth, setNavigatorWidth] = useState<number | null>(null);
+  const [sectionsWidth] = useState<number | null>(null);
+  const [navigatorWidth] = useState<number | null>(null);
   const sectionsPanelRef = useRef<HTMLDivElement>(null);
   const navigatorPanelRef = useRef<HTMLDivElement>(null);
-  const PANEL_MIN_WIDTH = 140;
-  const PANEL_MAX_WIDTH = 640;
 
-  // `direction` is +1 when dragging right should grow the panel (its
-  // resize handle sits on the panel's right edge — the Sections panel) and
-  // -1 when dragging right should shrink it (handle on the left edge — the
-  // Navigator panel, anchored to the right side of the layout). Reads the
-  // panel's actual rendered width at drag-start (via ref) rather than
-  // trusting state, since state may still be `null` (never dragged before,
-  // sized purely by flex-basis).
-  const startPanelResize = useCallback((
-    e: React.MouseEvent, panelRef: React.RefObject<HTMLDivElement | null>, setWidth: (w: number) => void, direction: 1 | -1
-  ) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = panelRef.current?.getBoundingClientRect().width ?? PANEL_MIN_WIDTH;
-    function onMouseMove(ev: MouseEvent) {
-      const next = startWidth + (ev.clientX - startX) * direction;
-      setWidth(Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, next)));
+  // Dedicated mobile Sections dropdown (2026-08-31, explicit request) — its
+  // own toggle + state, separate from both the plain inline stack it
+  // briefly used and the hamburger menu it also briefly lived in. Rendered
+  // just below the header / above the question (not here — see near the
+  // return statement), collapsed by default so it doesn't push the actual
+  // question down the page.
+  const [mobileSectionsOpen, setMobileSectionsOpen] = useState(false);
+  const activeSectionTitle = sections.find(s => s.indices.includes(activeIndex))?.title;
+  const mobileSectionsDropdown = sections.length > 1 && (
+    <div className="lg:hidden mb-5 relative z-40">
+      <button
+        onClick={() => setMobileSectionsOpen(v => !v)}
+        aria-expanded={mobileSectionsOpen}
+        className="w-full flex items-center justify-between px-4 py-3 rounded-[var(--radius-lg)] bg-white cursor-pointer"
+        style={{ border: "1px solid var(--color-border)" }}
+      >
+        <span className="text-sm font-semibold truncate" style={{ color: "var(--color-text)" }}>
+          {activeSectionTitle ?? "Sections"}
+        </span>
+        <ChevronRight
+          size={16}
+          className="shrink-0 transition-transform"
+          style={{ color: "var(--color-text-muted)", transform: mobileSectionsOpen ? "rotate(-90deg)" : "rotate(90deg)" }}
+        />
+      </button>
+      {mobileSectionsOpen && (
+        <>
+          {/* Backdrop — blurs the rest of the exam behind the dropdown
+              (explicit request 2026-08-31) rather than just dimming it;
+              also closes the dropdown on tap-outside. */}
+          <div
+            className="fixed inset-0 top-14 z-30"
+            style={{ background: "rgba(15, 23, 42, 0.15)", backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)" }}
+            onClick={() => setMobileSectionsOpen(false)}
+            aria-hidden="true"
+          />
+          <div className="relative mt-2 p-2 rounded-[var(--radius-lg)] bg-white space-y-1" style={{ border: "1px solid var(--color-border)" }}>
+          {sections.map(section => {
+            const answeredInSection = section.indices.filter(
+              i => (answers[questions[i].id]?.length ?? 0) > 0
+            ).length;
+            const isActiveSection = section.indices.includes(activeIndex);
+            return (
+              <button
+                key={section.id}
+                onClick={() => { setActiveIndex(section.indices[0]); setMobileSectionsOpen(false); }}
+                className="w-full text-left pl-3 pr-3.5 py-3 rounded-[var(--radius-md)] transition-colors"
+                style={{
+                  background: isActiveSection ? "var(--color-accent-light)" : "transparent",
+                  border: `1.5px solid ${isActiveSection ? "var(--color-accent)" : "transparent"}`,
+                }}
+              >
+                <p
+                  className="text-sm font-semibold truncate"
+                  style={{ color: isActiveSection ? "var(--color-accent)" : "var(--color-text)" }}
+                >
+                  {section.title}
+                </p>
+                <p
+                  className="text-xs mt-1"
+                  style={{ color: isActiveSection ? "var(--color-accent)" : "var(--color-text-subtle)" }}
+                >
+                  {answeredInSection}/{section.indices.length} answered
+                </p>
+              </button>
+            );
+          })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+
+  // Real viewport-left-edge-to-panel-right-edge pixel width for the
+  // Sections column's full-bleed white background (below). PageWrapper
+  // centers its content (max-w-1400 mx-auto), so the panel's own box is
+  // never flush with the true browser edge — a CSS-only "50vw" bleed trick
+  // only works when its positioned ancestor is itself viewport-centered,
+  // which this narrow flex column isn't. Measuring directly sidesteps that.
+  const [sectionsBgWidth, setSectionsBgWidth] = useState<number | null>(null);
+  useEffect(() => {
+    function measure() {
+      const el = sectionsPanelRef.current;
+      if (el) setSectionsBgWidth(el.getBoundingClientRect().right);
     }
-    function onMouseUp() {
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+    // questions.length: the panel this measures doesn't exist in the DOM
+    // yet on mount (the page is still on the briefing/loading screen) — the
+    // ref is null until the real exam UI replaces it once questions load,
+    // so that transition has to be a dependency or this never re-measures.
+  }, [sectionsOpen, sectionsWidth, questions.length]);
+
+  // Same idea as sectionsBgWidth, mirrored for the Question-numbers panel's
+  // bleed to the true viewport *right* edge: distance from the panel's own
+  // left edge to the right edge of the window.
+  const [navigatorBgWidth, setNavigatorBgWidth] = useState<number | null>(null);
+  useEffect(() => {
+    function measure() {
+      const el = navigatorPanelRef.current;
+      if (el) setNavigatorBgWidth(window.innerWidth - el.getBoundingClientRect().left);
     }
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
-  }, []);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [navigatorOpen, navigatorWidth, questions.length]);
+
+  // The two vertical dividers between Sections/Question/Question-numbers
+  // need to run the full height below the header, not just alongside the
+  // question card — same reasoning as sectionsBgWidth above: their real x
+  // position depends on the (possibly dragged) column widths, so it's
+  // measured rather than guessed at with a fraction.
+  const questionColumnRef = useRef<HTMLDivElement>(null);
+  const [dividerX, setDividerX] = useState<{ left: number; right: number } | null>(null);
+  useEffect(() => {
+    function measure() {
+      const el = questionColumnRef.current;
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        setDividerX({ left: rect.left, right: rect.right });
+      }
+    }
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [sectionsOpen, navigatorOpen, sectionsWidth, navigatorWidth, questions.length]);
 
   // ── Entry gate — shown before start-session is ever called ──────────────
   // Three variants, decided by the fresh fetch above: a full first-time
@@ -825,41 +1053,53 @@ export default function StudentExamPage() {
 
   const lowTime = secondsRemaining !== null && secondsRemaining <= 60;
 
-  // Moved into the exam-mode header's center cell (2026-08-28) — a
-  // persistent, always-visible header is a better home for the one number
-  // a student checks most often than a bar that scrolls away with the
-  // page content.
-  const timerChip = (
-    <div
-      className="inline-flex items-center px-2.5 py-1 rounded-[var(--radius-lg)] font-mono text-sm font-bold"
-      style={{
-        background: lowTime ? "#FEF2F2" : "#EFF6FF",
-        color: lowTime ? "#DC2626" : "#2563EB",
-        border: `1px solid ${lowTime ? "#FECACA" : "#BFDBFE"}`,
-      }}
-    >
-      {secondsRemaining !== null ? formatCountdown(secondsRemaining) : "-:-"}
+  // Moved into the exam-mode header's center cell (2026-08-28, then joined
+  // by the reconnecting badge / answered-count on 2026-08-31, then Submit
+  // Exam moved out to the right cell the same day — grouped with Exit Test
+  // since both are session-ending actions, rather than sitting next to the
+  // purely informational countdown) — a persistent, always-visible header
+  // is a better home for the things a student checks/uses most often than
+  // a bar that scrolls away with the page content.
+  const examCenterContent = (
+    <div className="flex items-center gap-2 flex-wrap justify-center">
+      {(isReconnecting || isSyncFailing) && (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold"
+          style={{ background: "#FFF4E6", color: "#E8820C" }}>
+          <WifiOff size={12} /> Reconnecting…
+        </span>
+      )}
+      <div
+        className="inline-flex items-center px-2.5 py-1 rounded-[var(--radius-lg)] font-mono text-sm font-bold"
+        style={{
+          background: lowTime ? "#FEF2F2" : "#EFF6FF",
+          color: lowTime ? "#DC2626" : "#2563EB",
+          border: `1px solid ${lowTime ? "#FECACA" : "#BFDBFE"}`,
+        }}
+      >
+        {secondsRemaining !== null ? formatCountdown(secondsRemaining) : "-:-"}
+      </div>
     </div>
+  );
+  const examRightContent = (
+    <Button variant="primary" size="sm" onClick={() => setConfirmSubmit(true)}>
+      Submit Exam
+    </Button>
   );
 
   return (
-    <StudentLayout examMode examCenterContent={timerChip} onExitExam={() => setConfirmExit(true)}>
+    <StudentLayout
+      examMode
+      examCenterContent={examCenterContent}
+      examRightContent={examRightContent}
+      onExitExam={() => setConfirmExit(true)}
+    >
       <PageWrapper className="select-none">
-        {/* ── Top bar: connectivity + progress + submit ─────────────────── */}
-        <div className="flex items-center justify-end gap-2 mb-5 flex-wrap">
-          {(isReconnecting || isSyncFailing) && (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold"
-              style={{ background: "#FFF4E6", color: "#E8820C" }}>
-              <WifiOff size={12} /> Reconnecting…
-            </span>
-          )}
-          <span className="text-xs" style={{ color: "var(--color-text-subtle)" }}>
-            {answeredCount}/{questions.length} answered
-          </span>
-          <Button variant="primary" size="sm" onClick={() => setConfirmSubmit(true)}>
-            Submit Exam
-          </Button>
-        </div>
+
+        {/* Dedicated mobile Sections dropdown — just below the header,
+            above everything else on the page (2026-08-31, explicit
+            request: its own standalone dropdown, not inside the hamburger
+            menu, and not the plain always-expanded list it briefly was). */}
+        {mobileSectionsDropdown}
 
         {/* ── Fullscreen nudge — shown again if the student exits fullscreen
             mid-exam. Not a hard block on its own (they get graduated
@@ -901,6 +1141,30 @@ export default function StudentExamPage() {
             stopping wherever that panel's own (often much shorter)
             content ends. */}
         <div className="lg:flex lg:gap-6 lg:items-stretch">
+          {/* The two vertical dividing lines, full height below the header
+              (top-14 to bottom-0) regardless of how tall the columns'
+              actual content is — see dividerX above for why these are
+              measured rather than CSS borders on the question column. */}
+          {dividerX && (
+            <>
+              {/* A|B seam — static divider only, not draggable (removed
+                  2026-08-31, explicit request): the Sections panel is no
+                  longer manually resizable. */}
+              <div
+                aria-hidden="true"
+                className="hidden lg:block fixed top-14 bottom-0 w-px z-20"
+                style={{ left: dividerX.left, background: "var(--color-border)" }}
+              />
+              {/* B|C seam — static divider only, not draggable (removed
+                  2026-08-31, explicit request): the Question-numbers panel
+                  is no longer manually resizable. */}
+              <div
+                aria-hidden="true"
+                className="hidden lg:block fixed top-14 bottom-0 w-px z-20"
+                style={{ left: dividerX.right, background: "var(--color-border)" }}
+              />
+            </>
+          )}
           {/* ── Sections ───────────────────────────────────────────────────
               Only rendered when the paper actually has more than one —
               every question always belongs to *some* section (the backend
@@ -914,73 +1178,77 @@ export default function StudentExamPage() {
             sectionsOpen ? (
               <div
                 ref={sectionsPanelRef}
-                className="relative mb-5 lg:mb-0 lg:order-1 lg:min-w-0 lg:pl-3"
-                style={{ flex: sectionsWidth !== null ? `0 0 ${sectionsWidth}px` : "20 1 0%" }}
+                className="relative mb-5 lg:mb-0 lg:order-1 lg:min-w-0 bg-white"
+                style={{ flex: sectionsWidth !== null ? `0 0 ${sectionsWidth}px` : "0 0 150px" }}
               >
-                {/* One shared card, not each section as its own floating
-                    box — rows inside a single bordered container, same
-                    pattern as the instructions/system-rules pair on the
-                    briefing screen. */}
-                <div
-                  className="rounded-[var(--radius-lg)] p-2 space-y-1.5"
-                  style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)" }}
-                >
-                  {sections.map(section => {
-                    const answeredInSection = section.indices.filter(
-                      i => (answers[questions[i].id]?.length ?? 0) > 0
-                    ).length;
-                    const isActiveSection = section.indices.includes(activeIndex);
-                    return (
-                      <button
-                        key={section.id}
-                        onClick={() => setActiveIndex(section.indices[0])}
-                        className="w-full text-left px-3.5 py-2.5 rounded-[var(--radius-md)] transition-colors"
-                        style={{
-                          background: isActiveSection ? "var(--color-accent-light)" : "transparent",
-                          border: `1.5px solid ${isActiveSection ? "var(--color-accent)" : "transparent"}`,
-                        }}
-                      >
-                        <p
-                          className="text-sm font-semibold truncate"
-                          style={{ color: isActiveSection ? "var(--color-accent)" : "var(--color-text)" }}
-                        >
-                          {section.title}
-                        </p>
-                        <p
-                          className="text-xs mt-0.5"
-                          style={{ color: isActiveSection ? "var(--color-accent)" : "var(--color-text-subtle)" }}
-                        >
-                          {answeredInSection}/{section.indices.length} answered
-                        </p>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* Drag-to-resize BAND — fixed to the actual browser
-                    window's left edge, spanning the full height below the
-                    header. A real filled band (not a hairline), with the
-                    collapse arrow living inside it (not floating outside
-                    as a separate overlapping element). The arrow's own
-                    mousedown stops propagation so clicking it toggles
-                    collapse instead of also starting a drag. */}
-                <div
-                  onMouseDown={e => startPanelResize(e, sectionsPanelRef, setSectionsWidth, -1)}
-                  className="hidden lg:flex fixed left-0 top-14 bottom-0 w-16 z-30 flex-col items-center pt-2 cursor-col-resize group"
-                  style={{ background: "var(--color-surface)", borderRight: "1px solid var(--color-border)", boxShadow: "1px 0 3px rgba(0,0,0,0.03)" }}
-                >
-                  <button
-                    onClick={() => setSectionsOpen(false)}
-                    onMouseDown={e => e.stopPropagation()}
-                    aria-label="Collapse sections panel"
-                    title="Collapse sections panel"
-                    className="w-6 h-6 rounded-full flex items-center justify-center cursor-pointer shrink-0"
-                    style={{ background: "#fff", border: "1px solid var(--color-border)", boxShadow: "var(--shadow-sm)" }}
+                {/* The visible content (below) is rendered fixed to the true
+                    viewport left edge, not here — this box only reserves
+                    width in the flex row so B/C sizing stays correct.
+                    PageWrapper centers its content (max-w-1400 mx-auto)
+                    with its own p-6, so a plain in-flow child here would
+                    sit well short of the real edge on wide screens — the
+                    same reason the background needed the same treatment.
+                    The mobile copy that used to render inline here now
+                    lives in its own dedicated dropdown instead
+                    (mobileSectionsDropdown, rendered just below the header
+                    near the top of the page, not inside this spacer). */}
+                {sectionsBgWidth !== null && (
+                  <div
+                    className="hidden lg:flex lg:flex-col fixed left-0 top-14 bottom-0 bg-white py-2 pl-3 pr-2"
+                    style={{ width: sectionsBgWidth + 24 }}
                   >
-                    <ChevronLeft size={14} style={{ color: "var(--color-text-muted)" }} />
-                  </button>
-                  <div className="flex-1 w-1 mt-3 rounded-full transition-colors group-hover:bg-[var(--color-accent)]" style={{ background: "#D1D5DB" }} />
-                </div>
+                    <div
+                      className="flex items-center justify-between pr-1.5 pb-1.5 mb-1"
+                      style={{ borderBottom: "1px solid var(--color-border)" }}
+                    >
+                      <span className="text-xs font-semibold" style={{ color: "var(--color-text-subtle)" }}>
+                        Sections
+                      </span>
+                      <button
+                        onClick={() => setSectionsOpen(false)}
+                        aria-label="Collapse sections panel"
+                        title="Collapse sections panel"
+                        className="w-6 h-6 rounded-full flex items-center justify-center cursor-pointer"
+                        style={{ background: "#fff", border: "1px solid var(--color-border)", boxShadow: "var(--shadow-sm)" }}
+                      >
+                        <ChevronLeft size={14} style={{ color: "var(--color-text-muted)" }} />
+                      </button>
+                    </div>
+                    <div className="space-y-1 overflow-y-auto">
+                      {sections.map(section => {
+                        const answeredInSection = section.indices.filter(
+                          i => (answers[questions[i].id]?.length ?? 0) > 0
+                        ).length;
+                        const isActiveSection = section.indices.includes(activeIndex);
+                        return (
+                          <button
+                            key={section.id}
+                            onClick={() => setActiveIndex(section.indices[0])}
+                            className="w-full text-left pl-3 pr-3.5 py-3 rounded-[var(--radius-md)] transition-colors"
+                            style={{
+                              background: isActiveSection ? "var(--color-accent-light)" : "transparent",
+                              border: `1.5px solid ${isActiveSection ? "var(--color-accent)" : "transparent"}`,
+                            }}
+                          >
+                            <p
+                              className="text-sm font-semibold truncate"
+                              style={{ color: isActiveSection ? "var(--color-accent)" : "var(--color-text)" }}
+                            >
+                              {section.title}
+                            </p>
+                            <p
+                              className="text-xs mt-1"
+                              style={{ color: isActiveSection ? "var(--color-accent)" : "var(--color-text-subtle)" }}
+                            >
+                              {answeredInSection}/{section.indices.length} answered
+                            </p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
               </div>
             ) : (
               <button
@@ -999,54 +1267,55 @@ export default function StudentExamPage() {
           {navigatorOpen ? (
             <div
               ref={navigatorPanelRef}
-              className="relative mb-5 lg:mb-0 lg:order-3 lg:min-w-0 lg:pr-3"
-              style={{ flex: navigatorWidth !== null ? `0 0 ${navigatorWidth}px` : "20 1 0%" }}
+              className="relative mb-5 lg:mb-0 lg:order-3 lg:min-w-0 bg-white"
+              style={{ flex: navigatorWidth !== null ? `0 0 ${navigatorWidth}px` : "0 0 150px" }}
             >
-              {/* Drag-to-resize BAND — fixed to the actual browser
-                  window's right edge, spanning the full height below the
-                  header. A real filled band (not a hairline), with the
-                  collapse arrow living inside it (not floating outside as
-                  a separate overlapping element). The arrow's own
-                  mousedown stops propagation so clicking it toggles
-                  collapse instead of also starting a drag. */}
-              <div
-                onMouseDown={e => startPanelResize(e, navigatorPanelRef, setNavigatorWidth, 1)}
-                className="hidden lg:flex fixed right-0 top-14 bottom-0 w-16 z-30 flex-col items-center pt-2 cursor-col-resize group"
-                style={{ background: "var(--color-surface)", borderLeft: "1px solid var(--color-border)", boxShadow: "-1px 0 3px rgba(0,0,0,0.03)" }}
-              >
-                <button
-                  onClick={() => setNavigatorOpen(false)}
-                  onMouseDown={e => e.stopPropagation()}
-                  aria-label="Collapse question numbers panel"
-                  title="Collapse question numbers panel"
-                  className="w-6 h-6 rounded-full flex items-center justify-center cursor-pointer shrink-0"
-                  style={{ background: "#fff", border: "1px solid var(--color-border)", boxShadow: "var(--shadow-sm)" }}
+              {/* The spacer here only reserves width for the flex row's
+                  sizing math on desktop — its real visible content is the
+                  fixed, JS-measured panel below. The mobile copy that used
+                  to render inline here now lives in the mobile hamburger
+                  menu instead (mobileNumberGrid, rendered by
+                  MobileExamMenu just above the question) — unlike
+                  Sections, which gets its own dedicated dropdown rather
+                  than sharing this hamburger. */}
+              {navigatorBgWidth !== null && (
+                <div
+                  className="hidden lg:flex lg:flex-col fixed right-0 top-14 bottom-0 bg-white py-2 pr-3 pl-2"
+                  style={{ width: navigatorBgWidth + 24 }}
                 >
-                  <ChevronRight size={14} style={{ color: "var(--color-text-muted)" }} />
-                </button>
-                <div className="flex-1 w-1 mt-3 rounded-full transition-colors group-hover:bg-[var(--color-accent)]" style={{ background: "#D1D5DB" }} />
-              </div>
+                  <button
+                    onClick={() => setNavigatorOpen(false)}
+                    aria-label="Collapse question numbers panel"
+                    title="Collapse question numbers panel"
+                    className="self-start w-6 h-6 mb-2 rounded-full flex items-center justify-center cursor-pointer"
+                    style={{ background: "#fff", border: "1px solid var(--color-border)", boxShadow: "var(--shadow-sm)" }}
+                  >
+                    <ChevronRight size={14} style={{ color: "var(--color-text-muted)" }} />
+                  </button>
 
-              <div className="grid grid-cols-8 sm:grid-cols-10 lg:grid-cols-5 gap-2">
-                {questions.map((q, i) => {
-                  const answered = (answers[q.id]?.length ?? 0) > 0;
-                  const isActive = i === activeIndex;
-                  return (
-                    <button
-                      key={q.id}
-                      onClick={() => setActiveIndex(i)}
-                      className="h-9 w-9 rounded-[var(--radius-md)] text-xs font-semibold flex items-center justify-center transition-colors"
-                      style={{
-                        background: isActive ? "var(--color-accent)" : answered ? "#F0FDF4" : "var(--color-surface)",
-                        color: isActive ? "#fff" : answered ? "#16A34A" : "var(--color-text-muted)",
-                        border: `1.5px solid ${isActive ? "var(--color-accent)" : answered ? "#BBF7D0" : "var(--color-border)"}`,
-                      }}
-                    >
-                      {q.question_number}
-                    </button>
-                  );
-                })}
-              </div>
+                  {statusLegend}
+                  <div className="grid grid-cols-[repeat(5,2.25rem)] gap-2 justify-center">
+                    {questions.map((q, i) => {
+                      const status = getQuestionStatus(q, i);
+                      const isActive = i === activeIndex;
+                      return (
+                        <button
+                          key={q.id}
+                          onClick={() => setActiveIndex(i)}
+                          className="h-9 w-9 rounded-[var(--radius-md)] text-xs font-semibold flex items-center justify-center transition-colors"
+                          style={{
+                            background: isActive ? "var(--color-accent)" : QUESTION_STATUS_STYLE[status].background,
+                            color: isActive ? "#fff" : QUESTION_STATUS_STYLE[status].color,
+                            border: `1.5px solid ${isActive ? "var(--color-accent)" : QUESTION_STATUS_STYLE[status].border}`,
+                          }}
+                        >
+                          {q.question_number}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <button
@@ -1060,13 +1329,37 @@ export default function StudentExamPage() {
             </button>
           )}
 
+          <MobileExamMenu>
+            <div className="flex items-center justify-center gap-2 flex-wrap pb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
+              {examRightContent}
+              <button
+                onClick={() => setConfirmExit(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--radius-md)] text-sm font-medium border transition-colors cursor-pointer"
+                style={{ color: "var(--color-danger)", borderColor: "var(--color-danger)" }}
+              >
+                <DoorOpen size={15} />
+                Exit Test
+              </button>
+            </div>
+            {mobileNumberGrid}
+          </MobileExamMenu>
+
           {/* ── Active question ───────────────────────────────────────────── */}
           {/* flex-grow of 60 vs. the side panels' 20 each (when they're at
-              their un-dragged default) — a 20/60/20 split rather than
-              equal thirds, per explicit request (2026-08-29). */}
-          <div className="min-w-0 lg:order-2" style={{ flex: "60 1 0%" }}>
+              their un-dragged default) — a 20/60/20 split, per explicit
+              request (2026-08-30). The two vertical dividing lines are
+              rendered separately above (fixed, full height below the
+              header, via dividerX) rather than as this box's own
+              border-l/border-r — a box-local border only spans this box's
+              own height, which starts below the answered-count/Submit bar,
+              not up at the header. */}
+          <div
+            ref={questionColumnRef}
+            className="min-w-0 lg:order-2 lg:px-6"
+            style={{ flex: "60 1 0%" }}
+          >
             <div className="rounded-[var(--radius-xl)] p-5 sm:p-6" style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)" }}>
-              <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
                 <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--color-text-subtle)" }}>
                   Question {activeQuestion.question_number} · {activeQuestion.marks} mark{activeQuestion.marks === 1 ? "" : "s"}
                 </p>
@@ -1079,6 +1372,22 @@ export default function StudentExamPage() {
                 {savingState[activeQuestion.id] === "queued" && (
                   <span className="text-xs" style={{ color: "#E8820C" }}>Saved locally - will sync</span>
                 )}
+                <button
+                  onClick={() => setFlaggedIds(prev => {
+                    const next = new Set(prev);
+                    if (next.has(activeQuestion.id)) next.delete(activeQuestion.id); else next.add(activeQuestion.id);
+                    return next;
+                  })}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-colors cursor-pointer"
+                  style={{
+                    background: flaggedIds.has(activeQuestion.id) ? "#F5F3FF" : "transparent",
+                    color: flaggedIds.has(activeQuestion.id) ? "#7C3AED" : "var(--color-text-subtle)",
+                    border: `1px solid ${flaggedIds.has(activeQuestion.id) ? "#DDD6FE" : "var(--color-border)"}`,
+                  }}
+                >
+                  <Flag size={12} fill={flaggedIds.has(activeQuestion.id) ? "#7C3AED" : "none"} />
+                  <span className="hidden lg:inline">{flaggedIds.has(activeQuestion.id) ? "Flagged" : "Flag for review"}</span>
+                </button>
               </div>
 
               {(activeQuestion.question_content_type === "text" || activeQuestion.question_content_type === "both") && (
@@ -1092,9 +1401,24 @@ export default function StudentExamPage() {
                 </div>
               )}
 
-              <p className="text-xs font-semibold uppercase tracking-widest mb-3" style={{ color: "var(--color-text-subtle)" }}>
-                {activeQuestion.mcq_type === "single" ? "Select one answer" : "Select all that apply"}
-              </p>
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--color-text-subtle)" }}>
+                  {activeQuestion.mcq_type === "single" ? "Select one answer" : "Select all that apply"}
+                </p>
+                {(answers[activeQuestion.id]?.length ?? 0) > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleClear(activeQuestion.id)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-colors cursor-pointer"
+                    style={{ color: "var(--color-text-subtle)", border: "1px solid var(--color-border)" }}
+                    onMouseEnter={e => { e.currentTarget.style.background = "var(--color-surface-hover)"; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}
+                  >
+                    <X size={12} />
+                    Clear response
+                  </button>
+                )}
+              </div>
 
               <div className="space-y-2">
                 {activeQuestion.options.map(opt => {
@@ -1106,13 +1430,13 @@ export default function StudentExamPage() {
                       onClick={() => handleSelect(activeQuestion.id, opt.id, activeQuestion.mcq_type)}
                       className="w-full flex items-start gap-3 px-4 py-3.5 rounded-[var(--radius-md)] text-left transition-all"
                       style={{
-                        background: selected ? "#EFF6FF" : "#fff",
-                        border: `1.5px solid ${selected ? "#93C5FD" : "var(--color-border)"}`,
-                        color: selected ? "#1D4ED8" : "var(--color-text-muted)",
+                        background: selected ? "var(--color-accent-light)" : "#fff",
+                        border: `1.5px solid ${selected ? "var(--color-accent)" : "var(--color-border)"}`,
+                        color: selected ? "var(--color-accent)" : "var(--color-text)",
                       }}
                     >
                       <span className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold mt-0.5"
-                        style={{ background: selected ? "#2563EB" : "var(--color-primary-light)", color: selected ? "#fff" : "var(--color-primary)" }}>
+                        style={{ background: selected ? "var(--color-accent)" : "var(--color-primary-light)", color: selected ? "#fff" : "var(--color-primary)" }}>
                         {opt.label}
                       </span>
                       <span className="text-sm leading-relaxed flex-1 pt-1">
