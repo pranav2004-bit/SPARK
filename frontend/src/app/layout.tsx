@@ -49,7 +49,7 @@ export default function RootLayout({
           <DepartmentsProvider>
             <SplashScreen />
             {children}
-            {/* <GlobalFooter /> */}{/* hidden for client presentation — restore after */}
+            <GlobalFooter />
             <ServiceWorkerRegistrar />
             <InstallPrompt />
           </DepartmentsProvider>

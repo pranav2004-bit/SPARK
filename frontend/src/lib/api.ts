@@ -215,6 +215,21 @@ export function getErrorMessage(error: unknown): string {
     if (error.response === undefined) {
       return "No internet connection. Please check your network and try again.";
     }
+    // 429 responses (nginx's rate-limit JSON: {"error": "...", "retry_after":
+    // "..."}) don't carry a `message`/`detail` field, so without this they
+    // fell through to axios's generic "Request failed with status code 429"
+    // — a raw, unhelpful string shown as-is on every login screen (and any
+    // other caller of this helper). Handled centrally here rather than in
+    // each form, since every screen that calls getErrorMessage benefits —
+    // most concretely, students/admins sharing one IP (an exam hall/lab)
+    // hitting the login rate limit at the same time now see a clear,
+    // actionable message instead of a technical-looking error.
+    if (error.response.status === 429) {
+      const retryAfter = Number(error.response.headers?.["retry-after"]);
+      return Number.isFinite(retryAfter) && retryAfter > 0
+        ? `Too many attempts. Please wait ${retryAfter} seconds and try again.`
+        : "Too many attempts. Please wait a moment and try again.";
+    }
     const data = error.response?.data;
     if (data?.message) return data.message;
     if (data?.detail) return data.detail;
@@ -226,6 +241,16 @@ export function getErrorMessage(error: unknown): string {
         return `${firstKey}: ${data[firstKey][0]}`;
       }
     }
+    // Nothing recognizable in the response body — a genuine server-side
+    // failure (500/502/503) or an unrecognized response shape, rather than
+    // a validation/auth rejection that already explains itself above.
+    // Return a clean, status-aware fallback instead of falling through to
+    // axios's own generic "Request failed with status code NNN" — no
+    // caller anywhere in the app (this is the one shared helper every
+    // screen uses) benefits from a raw HTTP-client string over this.
+    return error.response.status >= 500
+      ? "Something went wrong on our end. Please try again shortly."
+      : "Something went wrong. Please try again.";
   }
   if (error instanceof Error) return error.message;
   return "An unexpected error occurred.";
