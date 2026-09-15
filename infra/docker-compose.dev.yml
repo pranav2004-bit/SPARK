@@ -66,7 +66,10 @@ services:
   # migration record.
 
   clamav:
-    image: clamav/clamav:stable
+    # clamav/clamav:stable (Alpine-based) publishes amd64 only. Debian-based
+    # clamav-debian is the same official ClamAV image, multi-arch (amd64 +
+    # arm64), needed for arm64 hosts (Graviton EC2, Apple Silicon dev machines).
+    image: clamav/clamav-debian:stable
     restart: always
     # Root-cause fix for the OOM crash observed in dev: clamd's signature
     # database load is unbounded by default and can consume enough memory
