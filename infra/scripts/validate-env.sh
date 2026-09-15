@@ -65,18 +65,23 @@ validate_service_env "user-service" \
 # attached (spark-backend-ec2-role) and intentionally leaves both unset;
 # boto3 falls back to the instance role automatically (see each service's
 # core/storage.py::_get_client()). Requiring them here would have hard-
-# blocked exactly that deployment. AWS_STORAGE_BUCKET_NAME/AWS_S3_CDN_DOMAIN
-# are still required — those aren't credentials, storage genuinely can't
-# work without them regardless of auth method.
+# blocked exactly that deployment.
+#
+# AWS_STORAGE_BUCKET_NAME/AWS_S3_CDN_DOMAIN are ALSO not required here
+# (removed 2026-09-15, live first-deployment blocker) — both compose files
+# already set these directly in each service's own `environment:` block
+# (docker-compose.dev.yml and docker-compose.prod.yml), not sourced from
+# this .env file at all, so no real deployment's .env ever has them —
+# requiring them here just hard-blocked a correct deployment on a fact
+# that was never true. If that ever changes (moved into .env instead of
+# compose), add them back here to match.
 validate_service_env "resource-service" \
     "$REPO_ROOT/services/resource-service/.env" \
-    "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" \
-    "AWS_STORAGE_BUCKET_NAME" "AWS_S3_CDN_DOMAIN"
+    "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY"
 
 validate_service_env "practice-service" \
     "$REPO_ROOT/services/practice-service/.env" \
-    "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" \
-    "AWS_STORAGE_BUCKET_NAME" "AWS_S3_CDN_DOMAIN"
+    "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY"
 
 validate_service_env "notification-service" \
     "$REPO_ROOT/services/notification-service/.env" \
@@ -88,8 +93,7 @@ validate_service_env "analytics-service" \
 
 validate_service_env "assessment-service" \
     "$REPO_ROOT/services/assessment-service/.env" \
-    "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" \
-    "AWS_STORAGE_BUCKET_NAME" "AWS_S3_CDN_DOMAIN"
+    "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY"
 
 echo ""
 echo "─────────────────────────────────────────────────"
