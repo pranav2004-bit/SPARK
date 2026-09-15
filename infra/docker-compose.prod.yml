@@ -514,6 +514,16 @@ services:
     # was listening on.
     ports:
       - "80:80"
+      - "443:443"
+    volumes:
+      # Standard certbot host paths, bind-mounted straight through so the
+      # host's `certbot` CLI and this container always see the same files —
+      # no relative-path indirection to get wrong. /etc/letsencrypt holds
+      # the issued cert/key; /var/www/certbot is where certbot's webroot
+      # plugin drops the HTTP-01 challenge file for Let's Encrypt to fetch
+      # (initial issuance AND every renewal, no nginx downtime either time).
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/certbot:/var/www/certbot:ro
     depends_on:
       auth-service:
         condition: service_healthy
