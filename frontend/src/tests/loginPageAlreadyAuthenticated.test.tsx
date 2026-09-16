@@ -28,7 +28,11 @@ jest.mock("@/lib/auth-store", () => ({
   useAuthStore: () => ({ setTokens: jest.fn() }),
 }));
 
-let mockAuthState: { user: { role: string } | null; isAuthenticated: boolean; hasHydrated: boolean };
+let mockAuthState: {
+  user: { role: string; is_profile_completed?: boolean } | null;
+  isAuthenticated: boolean;
+  hasHydrated: boolean;
+};
 jest.mock("@/hooks/useAuth", () => ({
   useAuth: () => mockAuthState,
 }));
@@ -86,10 +90,24 @@ describe("Student login page — already authenticated redirect", () => {
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it("redirects an already-authenticated student session to /students/home", () => {
-    mockAuthState = { user: { role: "student" }, isAuthenticated: true, hasHydrated: true };
+  it("redirects an already-authenticated student session with a COMPLETED profile to /students/home", () => {
+    mockAuthState = {
+      user: { role: "student", is_profile_completed: true },
+      isAuthenticated: true,
+      hasHydrated: true,
+    };
     render(<StudentLoginPage />);
     expect(mockReplace).toHaveBeenCalledWith("/students/home");
+  });
+
+  it("redirects an already-authenticated student session with an INCOMPLETE profile to /students/my_profile, not home — this mount-time check used to skip the profile-completion check entirely, unlike the fresh-login-submit path", () => {
+    mockAuthState = {
+      user: { role: "student", is_profile_completed: false },
+      isAuthenticated: true,
+      hasHydrated: true,
+    };
+    render(<StudentLoginPage />);
+    expect(mockReplace).toHaveBeenCalledWith("/students/my_profile");
   });
 
   it("redirects a DIFFERENT role's session (the exact cross-tab scenario: an admin logged in on another tab) to that role's OWN home, not the student home — proves this tab's login page is no longer at the mercy of a different tab's more recent login", () => {
