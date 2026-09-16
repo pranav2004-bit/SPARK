@@ -67,7 +67,11 @@ export default function StudentLoginPage() {
   const { user, isAuthenticated, hasHydrated } = useAuth();
   useEffect(() => {
     if (hasHydrated && isAuthenticated && user) {
-      router.replace(PORTAL_HOME[user.role] ?? "/");
+      if (user.role === "student" && !user.is_profile_completed) {
+        router.replace("/students/my_profile");
+      } else {
+        router.replace(PORTAL_HOME[user.role] ?? "/");
+      }
     }
   }, [hasHydrated, isAuthenticated, user, router]);
 
