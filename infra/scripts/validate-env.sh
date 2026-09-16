@@ -54,11 +54,11 @@ echo ""
 
 validate_service_env "auth-service" \
     "$REPO_ROOT/services/auth-service/.env" \
-    "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY"
+    "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" "SERVICE_KEY"
 
 validate_service_env "user-service" \
     "$REPO_ROOT/services/user-service/.env" \
-    "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY"
+    "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY" "SERVICE_KEY"
 
 # AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY deliberately NOT required below
 # (2026-09-15) — production runs on an EC2 instance with an IAM role
