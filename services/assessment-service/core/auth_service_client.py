@@ -85,11 +85,18 @@ def _get(path: str, auth_header: str) -> dict:
                 return json.loads(resp.read().decode("utf-8"))
 
         except urllib.error.HTTPError as exc:
+            raw_body = exc.read().decode("utf-8", errors="replace")
             try:
-                payload = json.loads(exc.read().decode("utf-8"))
-                server_msg = payload.get("message", "")
+                server_msg = json.loads(raw_body).get("message", "")
             except Exception:
+                # Non-JSON body (e.g. Django's own HTML error page) — log it
+                # so the real cause is visible instead of only ever
+                # surfacing the generic per-status fallback message below.
                 server_msg = ""
+                logger.warning(
+                    "Auth service returned non-JSON body for HTTP %s on GET %s: %.500s",
+                    exc.code, path, raw_body,
+                )
             friendly = _STATUS_MESSAGES.get(exc.code, f"HTTP {exc.code}")
             detail = server_msg or friendly
             logger.warning("Auth service HTTP %s on GET %s: %s", exc.code, path, detail)
