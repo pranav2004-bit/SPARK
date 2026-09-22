@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import {
   Clock, WifiOff, CheckCircle2, Maximize, Minimize, ShieldAlert, AlertTriangle,
   Award, HelpCircle, CalendarClock, UserCircle2, FileText, ListChecks, AppWindow,
-  ChevronLeft, ChevronRight, Flag, X, DoorOpen,
+  ChevronLeft, ChevronRight, Flag, X, DoorOpen, Menu,
 } from "lucide-react";
 import { StudentLayout, useExamMobileMenu } from "@/components/layout/StudentLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -83,6 +83,64 @@ function MobileExamMenu({ children }: { children: React.ReactNode }) {
       />
       <div className="lg:hidden relative z-40 mb-5 flex flex-col gap-4 rounded-[var(--radius-lg)] bg-white p-4" style={{ border: "1px solid var(--color-border)" }}>
         {children}
+      </div>
+    </>
+  );
+}
+
+// Mobile footer (2026-09-22, explicit request) — a Navigator button
+// pinned to the screen's own footer on every question, opening the exact
+// same panel as the header hamburger (MobileExamMenu above), plus a
+// Submit Exam button stacked below it specifically on the last question
+// of the last section (activeIndex === questions.length - 1 — questions
+// is already the flat, all-sections-combined list, so this one condition
+// covers both). A separate component for the same reason MobileExamMenu
+// is one: it needs useExamMobileMenu(), which inline JSX in
+// StudentExamPage's own render can't read (see that component's own
+// docstring) — only an actual descendant component can, once mounted
+// under the <StudentLayout examMode> that provides it.
+function MobileExamFooter({ isLastQuestion, onSubmit }: { isLastQuestion: boolean; onSubmit: () => void }) {
+  const { open, setOpen } = useExamMobileMenu();
+  return (
+    <>
+      {/* Spacer — reserves the exact height the fixed footer below
+          occupies, so it never covers the Prev/Next row or question
+          content above it once scrolled to the bottom. Taller on the
+          last question (two stacked buttons) than every other question
+          (one). */}
+      <div
+        className="lg:hidden"
+        style={{ height: isLastQuestion ? "calc(7.5rem + env(safe-area-inset-bottom))" : "calc(4.5rem + env(safe-area-inset-bottom))" }}
+        aria-hidden="true"
+      />
+      <div
+        className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-white px-4 py-3 flex flex-col gap-2"
+        style={{
+          borderTop: "1px solid var(--color-border)",
+          boxShadow: "0 -1px 0 0 var(--color-border)",
+          paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))",
+        }}
+      >
+        {/* variant="secondary" is bg-white with just a border — against
+            this footer's own bg-white it disappeared into its own
+            container instead of reading as a tappable button (reported
+            live, 2026-09-22). A light accent tint makes it visually
+            distinct from both the footer behind it and the solid-primary
+            Submit Exam button below it. */}
+        <Button
+          variant="secondary"
+          fullWidth
+          leftIcon={<Menu size={16} />}
+          onClick={() => setOpen(!open)}
+          style={{ background: "var(--color-accent-light)", borderColor: "var(--color-accent)", color: "var(--color-accent)" }}
+        >
+          Navigator
+        </Button>
+        {isLastQuestion && (
+          <Button variant="primary" fullWidth onClick={onSubmit}>
+            Submit Exam
+          </Button>
+        )}
       </div>
     </>
   );
@@ -605,7 +663,7 @@ export default function StudentExamPage() {
             onClick={() => setMobileSectionsOpen(false)}
             aria-hidden="true"
           />
-          <div className="relative mt-2 p-2 rounded-[var(--radius-lg)] bg-white space-y-1" style={{ border: "1px solid var(--color-border)" }}>
+          <div className="relative z-40 mt-2 p-2 rounded-[var(--radius-lg)] bg-white space-y-1" style={{ border: "1px solid var(--color-border)" }}>
           {sections.map(section => {
             const answeredInSection = section.indices.filter(
               i => (answers[questions[i].id]?.length ?? 0) > 0
@@ -1470,6 +1528,17 @@ export default function StudentExamPage() {
                 Next
               </Button>
             </div>
+
+            {/* Mobile footer — Navigator on every question, plus Submit
+                Exam stacked below it on the last question specifically.
+                lg:hidden throughout (inside MobileExamFooter) keeps
+                desktop/laptop completely unchanged — it already has the
+                persistent Submit Exam button in the exam-mode header
+                (examRightContent) and the side Question-numbers panel. */}
+            <MobileExamFooter
+              isLastQuestion={activeIndex === questions.length - 1}
+              onSubmit={() => setConfirmSubmit(true)}
+            />
           </div>
         </div>
       </PageWrapper>

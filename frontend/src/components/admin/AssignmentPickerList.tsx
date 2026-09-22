@@ -85,7 +85,7 @@ export function AssignmentPickerList({ title, subtitle, basePath, icon: Icon, em
 
   return (
     <AdminLayout>
-      <PageWrapper className="max-w-5xl">
+      <PageWrapper>
         <PageHeader title={title} subtitle={subtitle} backHref="/admin/assessments" />
 
         {loading ? (
