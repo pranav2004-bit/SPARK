@@ -208,23 +208,30 @@ export default function StudentLoginPage() {
         {/* Centered content */}
         <div className="flex-1 flex flex-col items-center justify-center">
 
-        {/* Mobile logos — above card, desktop hidden */}
+        {/* Mobile logos — above card, desktop hidden. Sized 20% larger
+            than the original 44px/30px pair (52px/38px — a deliberate,
+            uniform proportional bump, not an eyeballed guess, so the two
+            logos' relative sizing to each other is preserved; reported
+            too small live, 2026-09-22). Desktop's own identical pair
+            (same 44/30 sizing, separate block above) deliberately left
+            unchanged — this request was scoped to mobile only. */}
         <div className="lg:hidden flex items-center gap-3 mb-7">
           <Image
             src="/institution-logo.png"
             alt="Institution"
-            width={44}
-            height={44}
-            className="h-11 w-auto object-contain"
+            width={52}
+            height={52}
+            style={{ height: 52, width: "auto" }}
+            className="object-contain"
             priority
           />
-          <div className="w-px h-8" style={{ backgroundColor: 'var(--color-border)' }} />
+          <div className="w-px h-9" style={{ backgroundColor: 'var(--color-border)' }} />
           <Image
             src="/spark-logo.svg"
             alt="SPARK"
             width={0}
             height={0}
-            style={{ height: 30, width: "auto" }}
+            style={{ height: 38, width: "auto" }}
             priority
           />
         </div>

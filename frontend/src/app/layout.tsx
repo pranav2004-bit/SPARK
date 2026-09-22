@@ -13,6 +13,12 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
+  // Without this, mobile browsers reserve the bottom safe-area/gesture-bar
+  // strip as native chrome and the page can't paint into it — that reserved
+  // strip is what showed as dead space below GlobalFooter. "cover" lets the
+  // page extend edge-to-edge; GlobalFooter's own safe-area padding then
+  // keeps its text clear of the gesture bar instead of leaving it blank.
+  viewportFit: "cover",
 };
 
 export const metadata: Metadata = {

@@ -4,14 +4,17 @@ import { usePathname } from "next/navigation";
 
 export function GlobalFooter() {
   const pathname = usePathname();
-  const isStudentRoute = pathname.startsWith("/students");
+  // Hidden on mobile for student routes in general (screen space is tight
+  // on data-dense student pages), except the login page, which is shown on
+  // mobile too since it's not a data-dense screen.
+  const hideOnMobile = pathname.startsWith("/students") && pathname !== "/students/login";
 
   return (
     <footer
       className={[
         "fixed bottom-0 inset-x-0 z-50",
-        "h-8 px-5",
-        isStudentRoute ? "hidden sm:grid" : "grid",
+        "px-5",
+        hideOnMobile ? "hidden sm:grid" : "grid",
       ].join(" ")}
       style={{
         background: "var(--color-surface-secondary)",
@@ -20,6 +23,12 @@ export function GlobalFooter() {
         color: "var(--color-text-subtle)",
         gridTemplateColumns: "1fr 1fr 1fr",
         alignItems: "center",
+        // Row itself stays the original ~32px tall; the safe-area inset is
+        // added as extra padding below it (same convention as
+        // StudentLayout's bottom nav) so the footer's own background fills
+        // the gesture-bar strip instead of leaving it blank.
+        paddingTop: "8px",
+        paddingBottom: "calc(8px + env(safe-area-inset-bottom))",
       }}
     >
       {/* Left — empty */}
