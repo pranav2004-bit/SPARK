@@ -49,7 +49,7 @@ validate_service_env() {
     esac
 }
 
-echo "Validating environment files for all 7 SPARK services..."
+echo "Validating environment files for all 8 SPARK services..."
 echo ""
 
 validate_service_env "auth-service" \
@@ -93,6 +93,18 @@ validate_service_env "analytics-service" \
 
 validate_service_env "assessment-service" \
     "$REPO_ROOT/services/assessment-service/.env" \
+    "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY"
+
+# SERVICE_KEY deliberately NOT required below (Phase 1) — nothing calls
+# into essay-service internally yet, unlike auth-service/user-service/
+# notification-service/analytics-service, which genuinely need it today.
+# The exact bug this platform already hit twice (SERVICE_KEY required here
+# but left undocumented in a service's own .env.example, or vice versa)
+# must not recur: the moment a later phase adds an internal caller, add
+# SERVICE_KEY to BOTH this list and services/essay-service/.env.example
+# in the same change, not as two separate "someone will remember" steps.
+validate_service_env "essay-service" \
+    "$REPO_ROOT/services/essay-service/.env" \
     "SECRET_KEY" "DB_NAME" "DB_USER" "DB_PASSWORD" "DB_HOST" "REDIS_URL" "JWT_SIGNING_KEY"
 
 echo ""

@@ -1,0 +1,30 @@
+{
+  "module": "content",
+  "metrics": ["content_request", "content_audit"],
+  "alerts": [
+    {
+      "name": "content_5xx_rate_high",
+      "condition": "rate of content_request with status>=500 > 1% over 5 minutes",
+      "severity": "page",
+      "runbook": "docs/content-bank-operations.md#5xx"
+    },
+    {
+      "name": "content_orphan_growth",
+      "condition": "content_media_orphan rows created in 24h > 100",
+      "severity": "ticket",
+      "runbook": "docs/content-bank-operations.md#orphans"
+    },
+    {
+      "name": "content_publish_latency_high",
+      "condition": "p95 latency of content_request for publish endpoints > 1 second over 15 minutes",
+      "severity": "ticket",
+      "runbook": "docs/content-bank-operations.md#latency"
+    },
+    {
+      "name": "content_health_dependency_down",
+      "condition": "content health db or cache = error for 5 minutes",
+      "severity": "page",
+      "runbook": "docs/content-bank-operations.md#health"
+    }
+  ]
+}

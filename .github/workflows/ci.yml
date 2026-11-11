@@ -45,6 +45,7 @@ jobs:
       notification-service: ${{ steps.filter.outputs.notification-service }}
       analytics-service: ${{ steps.filter.outputs.analytics-service }}
       assessment-service: ${{ steps.filter.outputs.assessment-service }}
+      essay-service: ${{ steps.filter.outputs.essay-service }}
     steps:
       # fetch-depth: 0 (full history) only matters for the `push` trigger —
       # on push, paths-filter diffs against the pre-push commit via git, and
@@ -78,6 +79,8 @@ jobs:
               - 'services/analytics-service/**'
             assessment-service:
               - 'services/assessment-service/**'
+            essay-service:
+              - 'services/essay-service/**'
 
   # ── Backend — one matrix job per service, each independently skippable.
   #
@@ -102,6 +105,7 @@ jobs:
           - notification-service
           - analytics-service
           - assessment-service
+          - essay-service
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
