@@ -10,7 +10,7 @@ psycopg2-binary==2.9.9
 # Async
 celery==5.4.0
 django-celery-beat==2.7.0
-redis==5.2.1
+redis==6.1.0
 
 # Storage
 boto3==1.35.0
