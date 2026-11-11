@@ -30,6 +30,7 @@ import time
 import uuid
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 import pytest
 from django.db import connection
@@ -118,7 +119,17 @@ class TestConcurrentAnswerUpsert:
     must collapse to exactly one AssessmentResponse row, never a duplicate
     and never a 500 from the update_or_create/IntegrityError race path."""
 
-    def test_ten_concurrent_puts_produce_exactly_one_response(self, concurrency_setup):
+    # AnswerSubmitRateThrottle is unrelated to the upsert-race property this
+    # test checks, but it's still live on this view, and the throttle check
+    # runs on every HTTP call — including ones _request_with_sqlite_lock_retry
+    # resends after a "database is locked" contention error. Under CI's
+    # heavier thread contention than local dev, 10 logical PUTs can expand
+    # into enough retried HTTP calls to burn through the per-student
+    # answer_submit budget on their own, producing a spurious 429 that has
+    # nothing to do with AT4. Disabled here so the test exercises exactly
+    # the upsert race it's named for.
+    @patch("assessments.throttling.AnswerSubmitRateThrottle.allow_request", return_value=True)
+    def test_ten_concurrent_puts_produce_exactly_one_response(self, _mock_throttle, concurrency_setup):
         session = concurrency_setup["session"]
         question = concurrency_setup["question"]
         opt_a, opt_b = concurrency_setup["opt_a"], concurrency_setup["opt_b"]
@@ -141,7 +152,10 @@ class TestConcurrentAnswerUpsert:
         assert all(s == 200 for s in statuses), statuses
         assert AssessmentResponse.objects.filter(session=session, question=question).count() == 1
 
-    def test_concurrent_puts_to_different_questions_both_survive(self, concurrency_setup):
+    # Same throttle-vs-lock-retry interaction as the test above — disabled
+    # for the same reason, not because this test exercises it as heavily.
+    @patch("assessments.throttling.AnswerSubmitRateThrottle.allow_request", return_value=True)
+    def test_concurrent_puts_to_different_questions_both_survive(self, _mock_throttle, concurrency_setup):
         # Sanity check the lock isn't over-broad: concurrent writes to
         # DIFFERENT questions in the same session must both land, not
         # collapse into one via an accidentally too-coarse guard.

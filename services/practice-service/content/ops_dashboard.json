@@ -1,0 +1,47 @@
+{
+  "module": "content",
+  "description": "Dashboard panels for the content bank (LIVETRACKER4 section 2.15). Each panel is a query over the log lines written by content.api (content_request) and content.audit (content_audit), or the health endpoint. Dashboards are defined here so they are reviewable and reproducible.",
+  "panels": [
+    {
+      "title": "Requests per minute by status",
+      "source": "content_request",
+      "query": "count by (status) of content_request over 1m",
+      "fields": ["method", "endpoint", "status", "latency_ms", "request_id"]
+    },
+    {
+      "title": "5xx rate",
+      "source": "content_request",
+      "query": "count(content_request status>=500) / count(content_request) over 5m",
+      "alert": "content_5xx_rate_high"
+    },
+    {
+      "title": "Publish latency p95",
+      "source": "content_request",
+      "query": "p95 of latency_ms where endpoint matches '*Question*Action*' or '*Node*Action*' and method=POST over 15m",
+      "alert": "content_publish_latency_high"
+    },
+    {
+      "title": "Content writes by action",
+      "source": "content_audit",
+      "query": "count by (action) of content_audit over 1h",
+      "fields": ["action", "entity_type", "request_id"]
+    },
+    {
+      "title": "Orphaned media created (24h)",
+      "source": "content_media_orphan table (read-only query)",
+      "query": "SELECT COUNT(*) FROM content_media_orphan WHERE created_at >= now() - interval '24 hours';",
+      "alert": "content_orphan_growth"
+    },
+    {
+      "title": "Dependency health",
+      "source": "GET /api/practice/content/health/",
+      "query": "db and cache fields, polled every 60s",
+      "alert": "content_health_dependency_down"
+    },
+    {
+      "title": "Rate-limit fail-open events",
+      "source": "core.throttling_resilience",
+      "query": "count of warning lines containing 'failing open' over 5m (non-zero means Redis is unavailable for throttling)"
+    }
+  ]
+}
