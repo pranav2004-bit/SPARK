@@ -5,7 +5,7 @@ import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard, Briefcase, LogOut, ChevronDown,
-  Radio, BookOpen, UserCircle, FileText,
+  Radio, BookOpen, UserCircle, FileText, PenLine, Layers,
 } from "lucide-react";
 import { ScrollingUpdates } from "@/components/ui/ScrollingUpdates";
 import { useAuth } from "@/hooks/useAuth";
@@ -32,7 +32,12 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/admin/resources", label: "Resources", icon: <Briefcase size={15} />,       matchPrefix: "/admin/resources", altMatchPrefix: "/admin/companies" },
   { href: "/admin/practice",  label: "Practice",  icon: <BookOpen size={15} />,        matchPrefix: "/admin/practice" },
   { href: "/admin/assessments", label: "Assessments", icon: <FileText size={15} />, matchPrefix: "/admin/assessments" },
+  { href: "/admin/essay-writing", label: "Essay Writing", icon: <PenLine size={15} />, matchPrefix: "/admin/essay-writing" },
   { href: "/admin/scroll",    label: "Scrollbar", icon: <Radio size={15} />,           matchPrefix: "/admin/scroll" },
+  // Content bank nav entry: hidden unless the flag is on (see LIVETRACKER4.md Phase I).
+  ...(process.env.NEXT_PUBLIC_CONTENT_BANK_ENABLED === "true"
+    ? [{ href: "/admin/content", label: "Content", icon: <Layers size={15} />, matchPrefix: "/admin/content" }]
+    : []),
 ];
 
 export function AdminLayout({ children }: { children: React.ReactNode }) {

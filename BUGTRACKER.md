@@ -122,3 +122,80 @@ etc.) needs an explicit `COPY` in `Dockerfile.dev` or a bind mount in
 `docker-compose.dev.yml` — don't assume it's covered by `src/`.
 
 ---
+
+## BUG-006 — Containers Can't Reach the Internet (RDS, or anywhere) After a Wi-Fi/Network Change
+
+**Symptoms:** Backend services (auth-service, user-service, practice-service,
+etc.) hang forever on startup — stuck on `python manage.py migrate` with
+**zero log output**, container status stays `health: starting` then flips to
+`unhealthy`, never recovers on its own. `docker logs` on PgBouncer shows
+`client_login_timeout (server down)` for every `*_db`. Looks exactly like an
+RDS security-group problem, but is usually NOT — see the two checks below
+before touching AWS.
+
+**Root Cause:** The host machine's Wi-Fi/network changed (new network, VPN
+toggled, router restart). The *Windows host* still has a fine network path,
+but Docker Desktop's WSL2 VM keeps using the old network route internally and
+never recovers on its own. Result: the host can reach the internet fine, but
+**every container's outbound connection hangs indefinitely** — not just to
+RDS, to anywhere (confirmed by testing a container against an unrelated
+HTTPS site). DNS resolution inside the container still works and is
+instant, which is what rules out a DNS problem and points at the network
+route instead.
+
+**How to tell this apart from an actual RDS security-group block (look-alike cause):**
+1. From the **host** (not a container): `curl -s --max-time 10 https://checkip.amazonaws.com`
+   — this is the IP that needs to be in the RDS security group's inbound
+   rule (`spark-rds-sg`, port 5432). If it changed since the rule was last
+   set, that alone can cause the same PgBouncer errors — fix the AWS rule
+   first (see RULE below) and retest.
+2. From **inside a container** on the stack's network, with generous
+   timeouts (cold containers can take 8–10s just to start, don't use a tight
+   timeout or you'll get a false positive):
+   ```bash
+   export MSYS_NO_PATHCONV=1
+   docker run --rm --network infra_spark-internal --entrypoint python \
+     infra-practice-service:latest -c "
+   import socket, time
+   t0=time.time()
+   try:
+       s = socket.create_connection(('checkip.amazonaws.com', 443), timeout=8)
+       print('OK', round(time.time()-t0,2)); s.close()
+   except Exception as e:
+       print('FAIL', round(time.time()-t0,2), type(e).__name__, e)
+   "
+   ```
+   If this hangs/times out against an **unrelated public site** (not RDS),
+   it's this bug, not an AWS rule — fixing the security group will not help
+   until this is fixed.
+
+**Fix:**
+```powershell
+wsl --shutdown
+```
+Then reopen Docker Desktop and wait for "Engine running". A plain
+"Restart" from the Docker Desktop UI is **not enough** — it did not fix
+this the first time; the full `wsl --shutdown` (which force-stops the VM
+completely) was required. After it comes back:
+```bash
+cd infra
+docker compose -f docker-compose.dev.yml -f docker-compose.content-live.yml up -d
+```
+Dependent services (anything `depends_on: condition: service_healthy` a
+service that was mid-recovery) may report
+`dependency failed to start: container X is unhealthy` on the first `up -d`
+even though X is actually fine by then — Docker's health status needs a
+few more passing check cycles to catch up after a run of earlier failures.
+Re-run `docker compose up -d` once those settle (check with
+`docker ps --format "{{.Names}}\t{{.Status}}"`), or verify a specific
+service directly:
+```bash
+docker exec <container> python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/api/<service>/health/', timeout=10).read())"
+```
+
+**Rule:** After *any* host network change (new Wi-Fi, VPN on/off, router
+restart), assume this bug before assuming an AWS problem. Run the
+container-level connectivity check above first — it takes 15 seconds and
+tells you which of the two problems (or both) you actually have.
+
+---

@@ -5,7 +5,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  Home, Briefcase, BookOpen, ClipboardList, Trophy,
+  Home, Briefcase, BookOpen, ClipboardList, Trophy, PenLine,
   LogOut, ChevronDown, UserCircle2, MessageSquare, DoorOpen, Menu, X,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
@@ -58,6 +58,14 @@ const NAV_ITEMS = [
     mobileLabel: "Assessments",
     icon: ClipboardList,
     match: "/students/assessments",
+    comingSoon: false,
+  },
+  {
+    href: "/students/essay-writing",
+    label: "Essay Writing",
+    mobileLabel: "Essays",
+    icon: PenLine,
+    match: "/students/essay-writing",
     comingSoon: false,
   },
   {

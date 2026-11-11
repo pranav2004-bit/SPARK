@@ -1,0 +1,9 @@
+# Local live check for the content bank (LIVETRACKER4 Phase J5).
+# Apply on top of docker-compose.dev.yml:
+#   docker compose -f docker-compose.dev.yml -f docker-compose.content-live.yml up -d practice-service
+# Turns the content bank on for practice-service only. The frontend flag is
+# NEXT_PUBLIC_CONTENT_BANK_ENABLED in frontend/.env.local.
+services:
+  practice-service:
+    environment:
+      CONTENT_BANK_ENABLED: "True"

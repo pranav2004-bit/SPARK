@@ -18,7 +18,48 @@ services:
   redis:
     image: redis:7-alpine
     restart: always
-    command: redis-server --maxmemory 200mb --maxmemory-policy allkeys-lru --save ""
+    # Three real gaps found and fixed together (2026-09-23), not guessed —
+    # this is the shared task queue (all 8 services' Celery brokers) AND
+    # cache AND rate-limiter, and the settings below were tuned only for
+    # the cache use case, silently putting the other two at risk:
+    #
+    # 1. --save "" (persistence fully disabled) — the serious one. A crash
+    #    or restart while real work is queued (e.g. a batch of students'
+    #    essay submissions waiting their turn for LLM grading) discarded
+    #    all of it instantly, with no error and no DLQ entry, since the
+    #    task message itself never reached the point where anything could
+    #    fail loudly. Fixed with AOF (--appendonly yes, fsync every
+    #    second) — the standard "don't lose queued work" durability
+    #    setting, logging writes continuously rather than only at
+    #    periodic snapshot intervals. The `redis_data` volume below was
+    #    already mounted for this; it just was never actually used.
+    # 2. --maxmemory-policy allkeys-lru — correct for a pure cache (an
+    #    evicted cache entry just gets recomputed), wrong here: under
+    #    memory pressure it would silently delete the OLDEST data
+    #    regardless of what it is, which could mean a still-queued
+    #    grading task, not just a stale cache entry. Fixed with
+    #    `noeviction` — once the ceiling is hit, new writes are refused
+    #    with a real, visible error instead of silently discarding
+    #    existing queued work. Every cache write in this codebase already
+    #    degrades gracefully on a Redis error (core/cache_utils.py's
+    #    safe_cache_* wrappers, live-verified in Task 17.1) — noeviction's
+    #    own failure mode is exactly what those wrappers already exist to
+    #    absorb, so this doesn't introduce a new class of failure.
+    # 3. --maxmemory 200mb — sized only as a rough cache guess, never
+    #    checked against what's actually stored. The real numbers: each
+    #    queued task message is a small reference (a submission's own id
+    #    plus a tracking id, not the essay text itself — the real essay
+    #    content lives in Postgres and is fetched by id when a worker
+    #    picks the task up), so even 2,000 simultaneous submissions is on
+    #    the order of a few MB in the queue, not something that scales
+    #    with essay length or word count. Raised to 1gb anyway — not to
+    #    accommodate large data that was never actually going to be here,
+    #    but as genuine safety headroom (AOF rewrite overhead, growth
+    #    across all 8 services sharing this one instance, and making sure
+    #    `noeviction` above never actually gets tested for real) — a
+    #    comfortable, proportionate 6% of this EC2 instance's own 16GB
+    #    (m6g.xlarge, PRODUCTION_CHECKLIST.md), not an arbitrary bump.
+    command: redis-server --maxmemory 1gb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec
     volumes:
       - redis_data:/data
     healthcheck:
@@ -481,6 +522,80 @@ services:
     # The auto-submit/auto-close sweep (ADR 001, Task 4.1) — must run in
     # prod exactly as it does in dev; a missing beat container here would
     # silently mean sessions past their deadline are never auto-finalized.
+    entrypoint: ["celery", "-A", "core", "beat", "--loglevel=info",
+                 "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  # ── Essay Service (8th microservice) ───────────────────────────────────────────
+  # LLM-evaluated essay-writing assessments. See LIVETRACKER3_V1.md +
+  # docs/adr/002-004. Phase 1 scaffolding only — no AWS/ClamAV overrides
+  # (docs/adr/002-essay-service-architecture.md Decision 5: plain text
+  # only, no file upload in scope) and no auth-service/user-service
+  # timeout overrides (nothing in Phase 1 calls either).
+  essay-service:
+    build:
+      context: ../services/essay-service
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/essay-service:${GIT_SHA:-latest}
+    restart: always
+    env_file: ../services/essay-service/.env
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/essay/health/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - spark-internal
+
+  essay-worker:
+    build:
+      context: ../services/essay-service
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/essay-service:${GIT_SHA:-latest}
+    restart: always
+    env_file: ../services/essay-service/.env
+    # Concurrency 20, not assessment-service's 4 — docs/adr/004-essay-
+    # service-capacity-plan.md Section 2's explicit sizing decision,
+    # derived from the LLM quota-tracker's own throughput ceiling, not
+    # copied from a sibling service's unrelated worker-sizing math.
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=20", "-Q", "essay-service"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - spark-internal
+
+  essay-beat:
+    build:
+      context: ../services/essay-service
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-spark}/essay-service:${GIT_SHA:-latest}
+    restart: always
+    env_file: ../services/essay-service/.env
+    # CELERY_BEAT_SCHEDULE (core/settings.py) carries, all in the one
+    # schedule dict, not a separate beat container: Phase 4's auto-submit/
+    # auto-close sweeps (sweep-expired-assignments, sweep-expired-attempts,
+    # both every 20s), Phase 5's DLQ sweeper (sweep-dlq-entries, every 5min),
+    # and Phase 13's daily pipeline-health summary email (send-daily-
+    # pipeline-summary, PIPELINE_DAILY_SUMMARY_HOUR_UTC). Stale since Phase
+    # 4 — found and corrected during Phase 13's own audit, the same class
+    # of staleness Phase 4's own final-audit round already caught once
+    # here before.
     entrypoint: ["celery", "-A", "core", "beat", "--loglevel=info",
                  "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
     depends_on:
