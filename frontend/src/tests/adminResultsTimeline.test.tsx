@@ -107,7 +107,7 @@ describe("Admin results — Logs/Tracking eye icon", () => {
   });
 
   it("clicking the eye icon opens the plain-English timeline with the retention notice", async () => {
-    const user = userEvent.setup({ delay: null });
+    const user = userEvent.setup();
     mockApiFor([SUBMITTED_ROW]);
     jest.spyOn(api, "get").mockImplementation((url: string) => {
       if (url === "/assessments/admin/sessions/sess-1/timeline/") {
@@ -148,7 +148,7 @@ describe("Admin results — Logs/Tracking eye icon", () => {
   });
 
   it("a writing (mid-exam) student's timeline has no closing event yet", async () => {
-    const user = userEvent.setup({ delay: null });
+    const user = userEvent.setup();
     jest.spyOn(api, "get").mockImplementation((url: string) => {
       if (url === "/assessments/admin/sessions/sess-2/timeline/") {
         return Promise.resolve({
@@ -182,7 +182,7 @@ describe("Admin results — Logs/Tracking eye icon", () => {
     // Rendering 2000 timeline rows in jsdom is slower than the default 5s
     // per-test budget — this is a jsdom rendering-cost artifact of the
     // fixture size, not a real slowdown in the app itself.
-    const user = userEvent.setup({ delay: null });
+    const user = userEvent.setup();
     mockApiFor([SUBMITTED_ROW]);
     jest.spyOn(api, "get").mockImplementation((url: string) => {
       if (url === "/assessments/admin/sessions/sess-1/timeline/") {
@@ -216,7 +216,7 @@ describe("Admin results — Logs/Tracking eye icon", () => {
   }, 20000);
 
   it("shows an error toast and does not open the modal if the timeline fetch fails", async () => {
-    const user = userEvent.setup({ delay: null });
+    const user = userEvent.setup();
     mockApiFor([SUBMITTED_ROW]);
 
     render(<AdminAssessmentResultsPage />);
@@ -254,7 +254,7 @@ describe("Admin results — Set filter (Analytics' Set Fairness drill-down targe
   });
 
   it("changing the Set filter re-fetches results scoped to that set", async () => {
-    const user = userEvent.setup({ delay: null });
+    const user = userEvent.setup();
     const getSpy = jest.spyOn(api, "get").mockImplementation((url: string) => {
       if (url.includes("/results/export/")) return Promise.resolve({ data: new Blob() } as any);
       if (url.includes("/results/")) return Promise.resolve(resultsResponse([SUBMITTED_ROW], ["Set A", "Set B"]) as any);

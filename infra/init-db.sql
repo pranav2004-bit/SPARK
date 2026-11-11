@@ -11,7 +11,6 @@ CREATE DATABASE practice_db;
 CREATE DATABASE notification_db;
 CREATE DATABASE analytics_db;
 CREATE DATABASE assessment_db;
-CREATE DATABASE essay_db;
 
 -- ── Per-service users ──────────────────────────────────────────────────────────
 
@@ -22,7 +21,6 @@ CREATE USER practice_db_user     WITH PASSWORD 'practice_dev_password_2024';
 CREATE USER notification_db_user WITH PASSWORD 'notification_dev_password_2024';
 CREATE USER analytics_db_user    WITH PASSWORD 'analytics_dev_password_2024';
 CREATE USER assessment_db_user   WITH PASSWORD 'assessment_dev_password_2024';
-CREATE USER essay_db_user        WITH PASSWORD 'essay_dev_password_2024';
 
 -- ── Lock down PUBLIC connect so cross-service access is impossible ─────────────
 -- PostgreSQL 15+ revokes CREATE on public schema from PUBLIC by default,
@@ -35,7 +33,6 @@ REVOKE CONNECT ON DATABASE practice_db     FROM PUBLIC;
 REVOKE CONNECT ON DATABASE notification_db FROM PUBLIC;
 REVOKE CONNECT ON DATABASE analytics_db    FROM PUBLIC;
 REVOKE CONNECT ON DATABASE assessment_db   FROM PUBLIC;
-REVOKE CONNECT ON DATABASE essay_db        FROM PUBLIC;
 
 -- Grant each user connect to ONLY its own database.
 
@@ -46,7 +43,6 @@ GRANT CONNECT ON DATABASE practice_db     TO practice_db_user;
 GRANT CONNECT ON DATABASE notification_db TO notification_db_user;
 GRANT CONNECT ON DATABASE analytics_db    TO analytics_db_user;
 GRANT CONNECT ON DATABASE assessment_db   TO assessment_db_user;
-GRANT CONNECT ON DATABASE essay_db        TO essay_db_user;
 
 -- ── auth_db — schema grants ────────────────────────────────────────────────────
 
@@ -121,13 +117,3 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO assessmen
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO assessment_db_user;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO assessment_db_user;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO assessment_db_user;
-
--- ── essay_db ───────────────────────────────────────────────────────────────────
-
-\connect essay_db
-
-GRANT USAGE, CREATE ON SCHEMA public TO essay_db_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO essay_db_user;
-GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO essay_db_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO essay_db_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO essay_db_user;

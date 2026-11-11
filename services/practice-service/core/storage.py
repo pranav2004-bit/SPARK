@@ -33,11 +33,8 @@ def get_cdn_url(file_key: str) -> str:
     return f"https://{cdn_domain}/{file_key}"
 
 
-def _get_client(timeout=None):
-    """timeout (seconds) applies to connect and read; None keeps botocore's defaults, so
-    existing callers are unchanged. The content bank passes a short value (section 2.14).
-
-    No explicit credentials: boto3.client("s3") already reads
+def _get_client():
+    """No explicit credentials: boto3.client("s3") already reads
     AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the environment when
     they're set, and falls back to an EC2 instance's attached IAM role
     automatically when they're not. Production (2026-09-12) runs on an EC2
@@ -59,20 +56,15 @@ def _get_client(timeout=None):
     import boto3
     from botocore.client import Config
     region = settings.AWS_DEFAULT_REGION
-    if timeout is None:
-        config = Config(s3={"addressing_style": "virtual"})
-    else:
-        config = Config(s3={"addressing_style": "virtual"}, connect_timeout=timeout, read_timeout=timeout,
-                        retries={"max_attempts": 2})
     return boto3.client(
         "s3",
         region_name=region,
         endpoint_url=f"https://s3.{region}.amazonaws.com",
-        config=config,
+        config=Config(s3={"addressing_style": "virtual"}),
     )
 
 
-def verify_uploaded_image(file_key: str, timeout=None):
+def verify_uploaded_image(file_key: str):
     """
     Ground-truth check against the object that actually landed in storage —
     never trust the client-declared content_type or an unverified file_key.
@@ -83,7 +75,7 @@ def verify_uploaded_image(file_key: str, timeout=None):
     from core.upload_constraints import MAX_IMAGE_SIZE, MAGIC_BYTES, MAGIC_BYTES_READ_LEN
     from botocore.exceptions import ClientError
 
-    client = _get_client(timeout=timeout)
+    client = _get_client()
     bucket = settings.AWS_STORAGE_BUCKET_NAME
 
     try:
@@ -118,14 +110,14 @@ def verify_uploaded_image(file_key: str, timeout=None):
     return real_size, None
 
 
-def get_object_stream(file_key: str, timeout=None):
+def get_object_stream(file_key: str):
     """Streaming body for an object — caller reads it (used by the malware scan)."""
-    client = _get_client(timeout=timeout)
+    client = _get_client()
     obj = client.get_object(Bucket=settings.AWS_STORAGE_BUCKET_NAME, Key=file_key)
     return obj["Body"]
 
 
-def scan_image_for_malware(file_key: str, timeout=None):
+def scan_image_for_malware(file_key: str):
     """
     Synchronous ClamAV scan (INSTREAM) — this service has no async worker,
     and images are small enough (<=5MB) that scanning inline at PATCH time
@@ -140,7 +132,7 @@ def scan_image_for_malware(file_key: str, timeout=None):
     import clamd
 
     try:
-        body = get_object_stream(file_key, timeout=timeout)
+        body = get_object_stream(file_key)
         cd = clamd.ClamdNetworkSocket(host=clamav_host, port=settings.CLAMAV_PORT, timeout=30)
         result = cd.instream(body)
     except (clamd.ConnectionError, OSError) as exc:

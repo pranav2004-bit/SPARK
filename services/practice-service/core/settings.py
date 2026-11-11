@@ -50,7 +50,6 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework_simplejwt",
     "practice",
-    "content",
 ]
 
 MIDDLEWARE = [
@@ -168,19 +167,3 @@ if SENTRY_DSN:
         )
     except ImportError:
         pass
-
-# ── Content bank (Part 1 of LIVETRACKER4.md) ─────────────────────────────────
-# Feature flag: when False, every /api/practice/content/ endpoint returns 404
-# and the content module behaves as if it were not installed. Off by default.
-CONTENT_BANK_ENABLED = os.environ.get("CONTENT_BANK_ENABLED", "False").lower() in ("1", "true", "yes")
-
-CONTENT_OPTION_MIN = int(os.environ.get("CONTENT_OPTION_MIN", "2"))
-CONTENT_OPTION_MAX = int(os.environ.get("CONTENT_OPTION_MAX", "6"))
-CONTENT_QUESTION_TEXT_MAX = int(os.environ.get("CONTENT_QUESTION_TEXT_MAX", "2000"))
-CONTENT_OPTION_TEXT_MAX = int(os.environ.get("CONTENT_OPTION_TEXT_MAX", "500"))
-CONTENT_EXPLANATION_MAX = int(os.environ.get("CONTENT_EXPLANATION_MAX", "2000"))
-CONTENT_NODE_NAME_MAX = int(os.environ.get("CONTENT_NODE_NAME_MAX", "200"))
-CONTENT_IMAGE_ALT_TEXT_MAX = int(os.environ.get("CONTENT_IMAGE_ALT_TEXT_MAX", "300"))
-CONTENT_CACHE_TTL_SECONDS = int(os.environ.get("CONTENT_CACHE_TTL_SECONDS", "60"))
-# Client timeout for content image S3 calls (section 2.14). Timeouts are treated as 503.
-CONTENT_S3_TIMEOUT_SECONDS = int(os.environ.get("CONTENT_S3_TIMEOUT_SECONDS", "5"))

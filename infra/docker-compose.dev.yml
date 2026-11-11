@@ -27,18 +27,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: always
-    # noeviction (not allkeys-lru, matching docker-compose.prod.yml's own
-    # 2026-09-23 fix) — this Redis is the shared Celery task queue for all
-    # 8 services, not just a cache; allkeys-lru would silently delete the
-    # OLDEST data under memory pressure regardless of whether it's a
-    # stale cache entry or a still-queued task. Mirrored here (unlike
-    # prod's AOF persistence / 1gb memory raise, deliberately NOT mirrored
-    # — dev data is disposable by design and reset often, so there's no
-    # real work worth persisting) specifically so a load/chaos test run
-    # in dev behaves the same way production does under memory pressure,
-    # instead of silently masking a real "queued work got dropped" bug
-    # behind an eviction policy that would never do that in production.
-    command: redis-server --maxmemory 256mb --maxmemory-policy noeviction --save ""
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save ""
     volumes:
       - redis_data:/data
     healthcheck:
@@ -586,132 +575,6 @@ services:
     networks:
       - spark-internal
 
-  # ── Essay Service (8th microservice) ───────────────────────────────────────────
-  # LLM-evaluated essay-writing assessments. See LIVETRACKER3_V1.md +
-  # docs/adr/002-004 for the full design. Phase 1 scaffolding only — no
-  # AWS/ClamAV env vars (docs/adr/002-essay-service-architecture.md
-  # Decision 5: this service handles plain text only, no file upload of
-  # any kind) and no user-service dependency yet (nothing in Phase 1 calls
-  # it — added in whichever later phase actually needs a roster/department
-  # lookup, not speculatively now).
-  #
-  # TEMPORARY, essay-service-only dev database (2026-09-19): essay_db/
-  # essay_db_user do not exist yet on the real RDS instance, and creating
-  # them there is a live-shared-infra action deferred to whoever owns that
-  # instance, not done unprompted mid-development. Rather than block all
-  # 21 phases of local development/testing on that step, essay-service
-  # (only this service — nothing else) points directly at a dedicated
-  # local-only Postgres container below instead of pgbouncer. This does
-  # NOT touch pgbouncer.ini/userlist.txt's already-written essay_db entry
-  # (still pointed at real RDS, ready and unused) and does NOT affect any
-  # of the other 7 services, which still go through pgbouncer to RDS
-  # exactly as before. Before this service goes anywhere near production,
-  # DB_HOST/DB_PORT below get switched back to pgbouncer, the real
-  # essay_db/essay_db_user get created on RDS, and one more live-boot
-  # test runs through the real pool — see LIVETRACKER3_V1.md Phase 1 notes.
-  essay-postgres:
-    image: postgres:15-alpine
-    restart: always
-    environment:
-      POSTGRES_DB: essay_db
-      POSTGRES_USER: essay_db_user
-      POSTGRES_PASSWORD: essay_dev_password_2024
-    volumes:
-      - essay_postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U essay_db_user -d essay_db"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    networks:
-      - spark-internal
-
-  essay-service:
-    build:
-      context: ../services/essay-service
-      dockerfile: Dockerfile
-    restart: always
-    environment:
-      <<: *shared-env
-      SECRET_KEY: dev-essay-service-secret-key-replace-before-production-xxxxxxxxxx
-      DB_HOST: essay-postgres
-      DB_NAME: essay_db
-      DB_USER: essay_db_user
-      DB_PASSWORD: essay_dev_password_2024
-      OPENAI_API_KEYS: ${OPENAI_API_KEYS:-}
-      OPENAI_MODEL: gpt-4o
-    depends_on:
-      essay-postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c",
-        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/essay/health/', timeout=5)"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 90s
-    networks:
-      - spark-internal
-
-  essay-worker:
-    build:
-      context: ../services/essay-service
-      dockerfile: Dockerfile
-    restart: always
-    environment:
-      <<: *shared-env
-      SECRET_KEY: dev-essay-service-secret-key-replace-before-production-xxxxxxxxxx
-      DB_HOST: essay-postgres
-      DB_NAME: essay_db
-      DB_USER: essay_db_user
-      DB_PASSWORD: essay_dev_password_2024
-      OPENAI_API_KEYS: ${OPENAI_API_KEYS:-}
-      OPENAI_MODEL: gpt-4o
-    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=2", "-Q", "essay-service"]
-    depends_on:
-      essay-postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - spark-internal
-
-  essay-beat:
-    build:
-      context: ../services/essay-service
-      dockerfile: Dockerfile
-    restart: always
-    environment:
-      <<: *shared-env
-      SECRET_KEY: dev-essay-service-secret-key-replace-before-production-xxxxxxxxxx
-      DB_HOST: essay-postgres
-      DB_NAME: essay_db
-      DB_USER: essay_db_user
-      DB_PASSWORD: essay_dev_password_2024
-      OPENAI_API_KEYS: ${OPENAI_API_KEYS:-}
-      OPENAI_MODEL: gpt-4o
-    # CELERY_BEAT_SCHEDULE (core/settings.py) carries, all in the one
-    # schedule dict, not a separate beat container: Phase 4's auto-submit/
-    # auto-close sweeps (sweep-expired-assignments, sweep-expired-attempts,
-    # both every 20s), Phase 5's DLQ sweeper (sweep-dlq-entries, every 5min),
-    # and Phase 13's daily pipeline-health summary email (send-daily-
-    # pipeline-summary, PIPELINE_DAILY_SUMMARY_HOUR_UTC). Stale since Phase
-    # 4 — found and corrected during Phase 13's own audit, the same class
-    # of staleness Phase 4's own final-audit round already caught once
-    # here before.
-    entrypoint: ["celery", "-A", "core", "beat", "--loglevel=info",
-                 "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
-    depends_on:
-      essay-postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - spark-internal
-
   # ── Frontend ─────────────────────────────────────────────────────────────────
 
   frontend:
@@ -744,18 +607,6 @@ services:
       - ../frontend/public:/app/public:ro
       - ../frontend/tsconfig.json:/app/tsconfig.json:ro
       - ../frontend/next.config.ts:/app/next.config.ts:ro
-      # Real, previously-undetected gap found during Phase 6's own frontend
-      # work (essay-service): jest.config.js was never mounted at all, so
-      # `docker exec ... npx jest` inside this container has been running
-      # with no config found — no ts-jest transform, no @/ path-alias
-      # resolution, no jsdom-environment docblock support wired the way the
-      # real config (frontend/AGENTS.md's own documented source of truth)
-      # specifies. Confirmed live: a new .tsx test file with a type-
-      # annotated arrow-function parameter inside a jest.mock() factory
-      # failed to parse at all without this mount, while ts-jest (already
-      # present in node_modules — package.json's own devDependency) handles
-      # that exact same syntax correctly once its config is actually loaded.
-      - ../frontend/jest.config.js:/app/jest.config.js:ro
       # Without this, @tailwindcss/postcss never gets registered in the PostCSS
       # pipeline: `@import "tailwindcss"` still resolves (Next's default CSS
       # loader can see the package), but Tailwind's JIT engine never runs, so
@@ -828,9 +679,6 @@ volumes:
   redis_data:
   frontend_next_cache:
   clamav_data:
-  # Temporary local-only essay_db data (see essay-postgres service comment
-  # above) — dropped once essay-service switches to the real RDS instance.
-  essay_postgres_data:
 
 networks:
   spark-internal:

@@ -1267,7 +1267,7 @@ All 13 identified threats must be resolved before V1 launch. Each threat is assi
 - Memory limits prevent one runaway service from starving others on the same host
 - `restart: always` ensures services recover from crashes without manual intervention
 - `healthcheck` startup ordering: prevents services starting before their dependencies are ready (eliminates "connection refused" race conditions)
-- Redis `maxmemory 1gb` + `maxmemory-policy noeviction` + AOF persistence (`--appendonly yes --appendfsync everysec`): prevents unbounded memory use, but **not** via silent eviction — this Redis is the shared Celery task queue for all 8 services, not just a cache, so `allkeys-lru` (the original choice here, corrected 2026-09-23 — see `PRODUCTION_CHECKLIST.md`'s "Items Added During Development") was never actually "graceful degradation": it would silently delete the *oldest* data under memory pressure regardless of whether that was a stale cache entry or a still-queued task, and `--save ""` meant a crash discarded all queued work with zero trace. `noeviction` fails loudly (a real, visible error) instead of losing queued work silently; AOF means queued work survives a restart.
+- Redis `maxmemory 200mb` + `maxmemory-policy allkeys-lru`: prevents Redis from using unbounded memory and evicts least-recently-used keys when full (graceful degradation, not crash)
 
 #### Test Suite
 

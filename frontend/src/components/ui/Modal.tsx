@@ -116,7 +116,7 @@ export function Modal({
             <button
               ref={firstFocusRef}
               onClick={onClose}
-              className="cursor-pointer p-1 rounded-[var(--radius-sm)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-hover)] transition-colors"
+              className="p-1 rounded-[var(--radius-sm)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-hover)] transition-colors"
               aria-label="Close modal"
             >
               <X size={16} />
