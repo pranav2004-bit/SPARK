@@ -194,13 +194,37 @@ export default function MyProfilePage() {
     setSetupError("");
 
     try {
-      // Step 1: change password if requested (optional but encouraged)
+      // Step 1: change password if requested (optional but encouraged).
+      // Changing the password bumps the user's token_version in auth-service
+      // (authentication/views.py's StudentChangePasswordView), which
+      // immediately invalidates every token issued before this call —
+      // including the one still sitting in this component's own axios/auth
+      // state from the original first-time login. Steps 2/3 below MUST use
+      // the fresh pair this call returns, not the now-stale one, or
+      // step 3's call to auth-service (the one that actually persists
+      // is_profile_completed=True there) gets rejected by auth-service's
+      // token_version check before its own view body ever runs — silently
+      // leaving is_profile_completed=False in auth-service's DB even
+      // though user-service's own copy (step 2) saved correctly. That
+      // mismatch is exactly what sent a student back to this same setup
+      // page on their very next login: a real, previously-shipped bug,
+      // not a hypothetical — fixed by applying these tokens immediately,
+      // the same way onPasswordSubmit (the returning-user flow) already
+      // does right below.
       if (wantsPasswordChange && data.new_password) {
-        await api.post("/auth/student/change-password/", {
-          current_password: data.current_password,
-          new_password: data.new_password,
-          repeat_new_password: data.confirm_password,
-        });
+        const pwRes = await api.post<ApiSuccess<{ access_token: string; refresh_token: string }>>(
+          "/auth/student/change-password/",
+          {
+            current_password: data.current_password,
+            new_password: data.new_password,
+            repeat_new_password: data.confirm_password,
+          }
+        );
+        const { access_token: freshAccessToken, refresh_token: freshRefreshToken } = pwRes.data.data;
+        if (studentUser) {
+          setTokens(freshAccessToken, freshRefreshToken, studentUser);
+          setAuthCookies("student", freshAccessToken);
+        }
       }
 
       // Step 2: update profile (mandatory — this is what marks is_profile_completed=true)
