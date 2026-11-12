@@ -42,6 +42,7 @@ from .serializers import (
     StudentQuestionSerializer,
 )
 from .validators import get_content_type_blocker, get_assignment_readiness_blockers
+from .shuffling import shuffle_questions_within_sections, shuffle_options
 from .allocation import snapshot_roster_and_allocate
 from .scoring import finalize_sessions
 from .enforcement import session_is_writable, strip_client_timestamps
@@ -1480,7 +1481,14 @@ class StudentSessionQuestionsView(APIView):
     (Task 5.4). Uses StudentQuestionSerializer, which never includes
     is_correct — leaking that would hand the student the answer key.
     Each question also carries the student's own previously-saved
-    selected_option_ids (if any), so resuming a session shows prior answers."""
+    selected_option_ids (if any), so resuming a session shows prior answers.
+
+    Question and option DISPLAY order is shuffled per session (deterministic,
+    keyed off this session's own id — assessments.shuffling) so successive
+    students don't see an identical, comparable order, while the admin's own
+    authored order/labels/numbering are untouched in storage and in every
+    admin-facing view. Scoring is entirely unaffected: it's keyed by option
+    id, never by position (verified against scoring.py)."""
     permission_classes = [IsStudentUser]
 
     def get(self, request, pk):
@@ -1492,10 +1500,17 @@ class StudentSessionQuestionsView(APIView):
         # question_number is a set-wide sequence that isn't guaranteed to
         # already fall in section order (e.g. after a section is added or
         # reordered later), so sorting only by it wouldn't be reliable.
+        # This is the canonical admin-authored order; shuffle_* below never
+        # mutates it, only what gets serialized out.
         questions = list(
             session.set.questions.select_related("section")
             .prefetch_related("options").order_by("section__order", "question_number")
         )
+        questions = shuffle_questions_within_sections(questions, session.id)
+        for i, q in enumerate(questions):
+            q.display_question_number = i + 1
+            q._shuffled_options = shuffle_options(list(q.options.all()), session.id, q.id)
+
         saved_answers = {
             str(qid): opts for qid, opts in
             AssessmentResponse.objects.filter(session=session).values_list("question_id", "selected_option_ids")
@@ -1600,7 +1615,13 @@ class AdminTrialSessionQuestionsView(APIView):
     shape as StudentSessionQuestionsView above, scoped to a trial session
     the requesting admin owns (assignment__isnull=True doubles as a
     defense-in-depth guard: this can never resolve to a real student's
-    session even under an id-guessing attempt)."""
+    session even under an id-guessing attempt).
+
+    Also shuffled, same as the real student view — the trial's whole
+    purpose is previewing the actual student-taking experience (this
+    file's own module docstring: "the taking experience... are provably
+    identical, not just similar"), so it must show what a real student
+    would see, shuffle included."""
     permission_classes = [IsAdminOrSuperAdmin]
 
     def get(self, request, pk):
@@ -1612,6 +1633,11 @@ class AdminTrialSessionQuestionsView(APIView):
             session.set.questions.select_related("section")
             .prefetch_related("options").order_by("section__order", "question_number")
         )
+        questions = shuffle_questions_within_sections(questions, session.id)
+        for i, q in enumerate(questions):
+            q.display_question_number = i + 1
+            q._shuffled_options = shuffle_options(list(q.options.all()), session.id, q.id)
+
         saved_answers = {
             str(qid): opts for qid, opts in
             AssessmentResponse.objects.filter(session=session).values_list("question_id", "selected_option_ids")

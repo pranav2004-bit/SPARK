@@ -107,13 +107,32 @@ class QuestionSerializer(serializers.ModelSerializer):
 class StudentQuestionOptionSerializer(serializers.ModelSerializer):
     """Same as QuestionOptionSerializer but WITHOUT is_correct — this is
     what's served to a student mid-exam (Task 5.4). Leaking is_correct here
-    would hand the student the answer key over the network."""
+    would hand the student the answer key over the network.
+
+    label/order are SerializerMethodFields, not direct model fields: when
+    the caller has shuffled this option's display position (assessments.
+    shuffling.shuffle_options), it stamps a transient display_label/
+    display_order attribute on the instance, and that — not the admin's
+    own stored label/order — is what gets sent here. Without this, a
+    shuffled option would still show its ORIGINAL letter out of sequence
+    (e.g. "C, A, D, B" top to bottom), which looks broken to a student
+    even though it's functionally harmless (submission is always by id).
+    Falls back to the stored value when nothing shuffled it (unused by
+    any current caller, but keeps this serializer correct standalone)."""
     image_url = serializers.SerializerMethodField()
+    label = serializers.SerializerMethodField()
+    order = serializers.SerializerMethodField()
 
     def get_image_url(self, obj):
         if obj.image_key:
             return get_cdn_url(obj.image_key)
         return None
+
+    def get_label(self, obj):
+        return getattr(obj, "display_label", obj.label)
+
+    def get_order(self, obj):
+        return getattr(obj, "display_order", obj.order)
 
     class Meta:
         model = QuestionOption
@@ -123,9 +142,24 @@ class StudentQuestionOptionSerializer(serializers.ModelSerializer):
 
 class StudentQuestionSerializer(serializers.ModelSerializer):
     """Same as QuestionSerializer but nests StudentQuestionOptionSerializer
-    (no is_correct) instead of the admin one."""
+    (no is_correct) instead of the admin one.
+
+    options/question_number are SerializerMethodFields rather than a plain
+    nested serializer/model field, for the same reason as
+    StudentQuestionOptionSerializer above: the caller shuffles each
+    question's options and the whole set's question order per student
+    (assessments.shuffling), stamping transient display_question_number /
+    _shuffled_options attributes on each instance. get_options reads the
+    shuffled list directly instead of the model's own .options.all()
+    (which would just return the admin's original order via Meta.ordering,
+    silently undoing the shuffle) — falling back to the real relation only
+    if nothing shuffled it. get_question_number renumbers 1..N over the
+    final (section-grouped, shuffled-within-section) display order, so the
+    navigator always shows a clean sequential count regardless of which
+    question the admin originally numbered what."""
     question_image_url = serializers.SerializerMethodField()
-    options = StudentQuestionOptionSerializer(many=True, read_only=True)
+    options = serializers.SerializerMethodField()
+    question_number = serializers.SerializerMethodField()
     # section_id comes straight off the model's own FK column (no explicit
     # field needed for that one); section_title needs one since it isn't a
     # direct column. Added so the exam-taking UI can group its question
@@ -136,6 +170,15 @@ class StudentQuestionSerializer(serializers.ModelSerializer):
         if obj.question_image_key:
             return get_cdn_url(obj.question_image_key)
         return None
+
+    def get_options(self, obj):
+        options = getattr(obj, "_shuffled_options", None)
+        if options is None:
+            options = list(obj.options.all())
+        return StudentQuestionOptionSerializer(options, many=True).data
+
+    def get_question_number(self, obj):
+        return getattr(obj, "display_question_number", obj.question_number)
 
     class Meta:
         model = Question
