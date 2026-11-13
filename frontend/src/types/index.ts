@@ -114,6 +114,11 @@ export interface Student {
   fullname: string;
   college_email_id: string;
   department: Department;
+  // A single letter A-Z, or "" (added 2026-11-13) — unlike `department`,
+  // a fixed hardcoded list (@/lib/constants's STUDENT_SECTIONS), not a
+  // backend-managed master table. Optional: students created before this
+  // field existed stay "" until an admin edits them.
+  section: string;
   batch_id: string;
   batch_name?: string;
   is_active: boolean;
@@ -170,6 +175,7 @@ export interface StudentProfile {
   fullname: string;
   college_email_id: string;
   department: Department;
+  section: string;
   batch_id: string;
   batch_name: string;
   is_profile_completed: boolean;
@@ -189,6 +195,7 @@ export interface Inquiry {
   fullname: string;
   college_email_id: string;
   department: string;
+  section: string;
   batch_name: string;
   message: string;
   is_read: boolean;

@@ -35,6 +35,15 @@ class Student(models.Model):
         related_name="students",
         db_index=True,
     )
+    # Added 2026-11-13 (user decision) — a single letter A-Z, free text like
+    # `department` rather than a managed master-data table like Department
+    # (auth-service) or a real FK like Batch: the user explicitly asked for
+    # a fixed A-Z dropdown, not something IT manages via its own CRUD page.
+    # Mandatory (changed same day, user decision) — every student now
+    # declares a section, same as department/batch. Pre-existing students
+    # were backfilled to "Z" by the migration that added this column; IT
+    # edits each one to its real section afterward.
+    section = models.CharField(max_length=1)
     is_active = models.BooleanField(default=True)
     is_profile_completed = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -46,6 +55,7 @@ class Student(models.Model):
             models.Index(fields=["student_id"], name="idx_students_student_id"),
             models.Index(fields=["batch"], name="idx_students_batch_id"),
             models.Index(fields=["department"], name="idx_students_department"),
+            models.Index(fields=["section"], name="idx_students_section"),
             models.Index(fields=["is_active"], name="idx_students_is_active"),
             models.Index(fields=["institution_id"], name="idx_students_institution_id"),
         ]

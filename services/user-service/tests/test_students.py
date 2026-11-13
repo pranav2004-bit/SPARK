@@ -150,6 +150,7 @@ class TestStudentListCreateIT:
         resp = it_client.post("/api/users/students/", {
             "student_id": "STU998",
             "department": "ECE",
+            "section": "A",
             "batch_id": str(batch.pk),
         }, format="json")
         assert resp.status_code == 201
@@ -159,6 +160,7 @@ class TestStudentListCreateIT:
         resp = it_client.post("/api/users/students/", {
             "student_id": "stu123",
             "department": "CSE",
+            "section": "A",
             "batch_id": str(batch.pk),
         }, format="json")
         assert resp.status_code == 201
@@ -168,6 +170,7 @@ class TestStudentListCreateIT:
         resp = it_client.post("/api/users/students/", {
             "student_id": "STU001",
             "department": "ECE",
+            "section": "A",
             "batch_id": str(batch.pk),
         }, format="json")
         assert resp.status_code == 400
@@ -176,6 +179,7 @@ class TestStudentListCreateIT:
         resp = it_client.post("/api/users/students/", {
             "student_id": "STU500",
             "department": "CSE",
+            "section": "A",
             "batch_id": str(batch_b.pk),
         }, format="json")
         assert resp.status_code == 400
@@ -197,6 +201,70 @@ class TestStudentListCreateIT:
         resp2 = it_client.get("/api/users/students/?department=MECH")
         assert resp2.json()["count"] == 0
 
+    # ── Section (added 2026-11-13, made mandatory same day — user decision)
+    # — a single letter A-Z, required just like department/batch, free
+    # text like department rather than an IT-managed master table.
+    # Pre-existing students are backfilled to "Z" by the migration that
+    # added this column (verified directly via `sqlmigrate` against a real
+    # Postgres connection, not re-tested here as a Python migration test).
+
+    def test_create_student_with_section(self, it_client, batch):
+        resp = it_client.post("/api/users/students/", {
+            "student_id": "STU900",
+            "department": "CSE",
+            "section": "b",
+            "batch_id": str(batch.pk),
+        }, format="json")
+        assert resp.status_code == 201
+        # Normalized to uppercase.
+        assert resp.json()["data"]["section"] == "B"
+
+    def test_create_student_without_section_rejected(self, it_client, batch):
+        resp = it_client.post("/api/users/students/", {
+            "student_id": "STU901",
+            "department": "CSE",
+            "batch_id": str(batch.pk),
+        }, format="json")
+        assert resp.status_code == 400
+        from users.models import Student
+        assert not Student.objects.filter(student_id="STU901").exists()
+
+    def test_create_student_section_must_be_single_letter(self, it_client, batch):
+        resp = it_client.post("/api/users/students/", {
+            "student_id": "STU902",
+            "department": "CSE",
+            "section": "AB",
+            "batch_id": str(batch.pk),
+        }, format="json")
+        assert resp.status_code == 400
+
+    def test_create_student_section_rejects_non_letter(self, it_client, batch):
+        resp = it_client.post("/api/users/students/", {
+            "student_id": "STU903",
+            "department": "CSE",
+            "section": "1",
+            "batch_id": str(batch.pk),
+        }, format="json")
+        assert resp.status_code == 400
+
+    def test_section_filter(self, it_client, batch):
+        from users.models import Student
+        import uuid as _uuid
+        Student.objects.create(
+            user_id=_uuid.uuid4(), student_id="SEC_A", department="CSE",
+            section="A", batch=batch, institution_id=INSTITUTION_A,
+        )
+        Student.objects.create(
+            user_id=_uuid.uuid4(), student_id="SEC_B", department="CSE",
+            section="B", batch=batch, institution_id=INSTITUTION_A,
+        )
+        resp = it_client.get("/api/users/students/?section=A")
+        assert resp.json()["count"] == 1
+        assert resp.json()["results"][0]["student_id"] == "SEC_A"
+        # Case-insensitive, same convention as the department filter.
+        resp2 = it_client.get("/api/users/students/?section=a")
+        assert resp2.json()["count"] == 1
+
 
 @pytest.mark.django_db
 class TestStudentDetailIT:
@@ -216,6 +284,32 @@ class TestStudentDetailIT:
         }, format="json")
         assert resp.status_code == 200
         assert resp.json()["data"]["fullname"] == "IT Edited Name"
+
+    def test_patch_student_section_as_it(self, it_client, student):
+        assert student.section == "A"
+        resp = it_client.patch(f"/api/users/students/{student.pk}/", {
+            "section": "c",
+        }, format="json")
+        assert resp.status_code == 200
+        assert resp.json()["data"]["section"] == "C"
+
+    def test_patch_student_invalid_section_rejected(self, it_client, student):
+        resp = it_client.patch(f"/api/users/students/{student.pk}/", {
+            "section": "ZZ",
+        }, format="json")
+        assert resp.status_code == 400
+        student.refresh_from_db()
+        assert student.section == "A"
+
+    def test_patch_student_section_cannot_be_cleared(self, it_client, student):
+        """Section is mandatory — a PATCH that explicitly blanks it out must
+        be rejected, same as an empty department would be."""
+        resp = it_client.patch(f"/api/users/students/{student.pk}/", {
+            "section": "",
+        }, format="json")
+        assert resp.status_code == 400
+        student.refresh_from_db()
+        assert student.section == "A"
 
     def test_hard_delete_student_as_it(self, it_client, student):
         pk = student.pk
@@ -244,6 +338,7 @@ class TestBulkStudentImportIT:
         resp = it_client.post("/api/users/students/import/", {
             "student_ids": ["IT001", "IT002"],
             "department": "CSE",
+            "section": "A",
             "batch_id": str(batch.pk),
         }, format="json")
         assert resp.status_code == 200
@@ -256,6 +351,7 @@ class TestBulkStudentImportIT:
         resp = it_client.post("/api/users/students/import/", {
             "student_ids": ids,
             "department": "CSE",
+            "section": "A",
             "batch_id": str(batch.pk),
         }, format="json")
         assert resp.status_code == 400
@@ -264,6 +360,7 @@ class TestBulkStudentImportIT:
         resp = it_client.post("/api/users/students/import/", {
             "student_ids": ["STU001", "NEW001"],
             "department": "CSE",
+            "section": "A",
             "batch_id": str(batch.pk),
         }, format="json")
         assert resp.status_code == 200
@@ -275,6 +372,7 @@ class TestBulkStudentImportIT:
         resp = it_client.post("/api/users/students/import/", {
             "student_ids": ["DUP001", "DUP001"],
             "department": "CSE",
+            "section": "A",
             "batch_id": str(batch.pk),
         }, format="json")
         data = resp.json()["data"]
@@ -284,6 +382,7 @@ class TestBulkStudentImportIT:
     def test_bulk_import_missing_department(self, it_client, batch):
         resp = it_client.post("/api/users/students/import/", {
             "student_ids": ["X001"],
+            "section": "A",
             "batch_id": str(batch.pk),
         }, format="json")
         assert resp.status_code == 400
@@ -292,6 +391,7 @@ class TestBulkStudentImportIT:
         resp = it_client.post("/api/users/students/import/", {
             "student_ids": ["X001"],
             "department": "CSE",
+            "section": "A",
             "batch_id": str(batch_b.pk),
         }, format="json")
         assert resp.status_code == 400
@@ -300,6 +400,7 @@ class TestBulkStudentImportIT:
         resp = it_client.post("/api/users/students/import/", {
             "student_ids": ["", "VALID001"],
             "department": "CSE",
+            "section": "A",
             "batch_id": str(batch.pk),
         }, format="json")
         data = resp.json()["data"]
@@ -313,6 +414,39 @@ class TestBulkStudentImportIT:
             "batch_id": str(batch.pk),
         }, format="json")
         assert resp.status_code == 400
+
+    def test_bulk_import_section_applies_to_every_row(self, it_client, batch):
+        resp = it_client.post("/api/users/students/import/", {
+            "student_ids": ["SEC001", "SEC002"],
+            "department": "CSE",
+            "section": "d",
+            "batch_id": str(batch.pk),
+        }, format="json")
+        assert resp.status_code == 200
+        from users.models import Student
+        assert Student.objects.get(student_id="SEC001").section == "D"
+        assert Student.objects.get(student_id="SEC002").section == "D"
+
+    def test_bulk_import_without_section_rejected(self, it_client, batch):
+        resp = it_client.post("/api/users/students/import/", {
+            "student_ids": ["NOSEC001"],
+            "department": "CSE",
+            "batch_id": str(batch.pk),
+        }, format="json")
+        assert resp.status_code == 400
+        from users.models import Student
+        assert not Student.objects.filter(student_id="NOSEC001").exists()
+
+    def test_bulk_import_invalid_section_rejected(self, it_client, batch):
+        resp = it_client.post("/api/users/students/import/", {
+            "student_ids": ["BADSEC001"],
+            "department": "CSE",
+            "section": "ZZ",
+            "batch_id": str(batch.pk),
+        }, format="json")
+        assert resp.status_code == 400
+        from users.models import Student
+        assert not Student.objects.filter(student_id="BADSEC001").exists()
 
 
 # ── Management command: cleanup_ghost_students ────────────────────────────────

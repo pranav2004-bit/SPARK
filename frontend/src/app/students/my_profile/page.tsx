@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
-import { Eye, EyeOff, User, Mail, Building2, GraduationCap, Info, KeyRound, ArrowLeft, Pencil, Check, X as XIcon, Loader2 } from "lucide-react";
+import { Eye, EyeOff, User, Mail, Building2, GraduationCap, Hash, Info, KeyRound, ArrowLeft, Pencil, Check, X as XIcon, Loader2 } from "lucide-react";
 import { StudentLayout } from "@/components/layout/StudentLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -649,6 +649,7 @@ export default function MyProfilePage() {
               )}
 
               <InfoField icon={Building2} label="Department" value={profile?.department} loading={profileLoading} />
+              <InfoField icon={Hash} label="Section" value={profile?.section} loading={profileLoading} />
               <InfoField icon={GraduationCap} label="Batch" value={profile?.batch_name} loading={profileLoading} />
             </div>
 

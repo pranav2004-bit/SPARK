@@ -11,6 +11,7 @@ import { StudentTable } from "@/components/admin/StudentTable";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
 import { useDepartments } from "@/lib/departmentsContext";
+import { STUDENT_SECTION_OPTIONS } from "@/lib/constants";
 import type { Batch, Student, PaginatedResponse, ApiSuccess } from "@/types";
 
 // IT-exclusive CRUD (2026-08-19) — Admin's version of this page
@@ -35,6 +36,7 @@ export default function ITBatchDetailPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [department, setDepartment] = useState("");
+  const [section, setSection] = useState("");
 
   const fetchStudents = useCallback(async () => {
     setLoading(true);
@@ -44,6 +46,7 @@ export default function ITBatchDetailPage() {
       params.set("page", String(page));
       if (search) params.set("search", search);
       if (department) params.set("department", department);
+      if (section) params.set("section", section);
 
       const { data } = await api.get<PaginatedResponse<Student>>(
         `/users/batches/${batch_id}/students/?${params}`
@@ -57,7 +60,7 @@ export default function ITBatchDetailPage() {
     } finally {
       setLoading(false);
     }
-  }, [batch_id, page, search, department, toastError]);
+  }, [batch_id, page, search, department, section, toastError]);
 
   // Fetch batch name once
   useEffect(() => {
@@ -78,6 +81,11 @@ export default function ITBatchDetailPage() {
 
   function handleDeptChange(e: React.ChangeEvent<HTMLSelectElement>) {
     setDepartment(e.target.value);
+    setPage(1);
+  }
+
+  function handleSectionChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    setSection(e.target.value);
     setPage(1);
   }
 
@@ -146,9 +154,36 @@ export default function ITBatchDetailPage() {
           </div>
 
           {/* Clear filters — only when active */}
-          {(search || department) && (
+          {/* Divider */}
+          <div className="hidden sm:block self-stretch w-px" style={{ background: "var(--color-border)" }} />
+
+          {/* Section filter */}
+          <div className="relative shrink-0">
+            <select
+              value={section}
+              onChange={handleSectionChange}
+              className="h-9 pl-3 pr-8 text-sm rounded-[var(--radius-md)] border bg-white appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
+              style={{
+                borderColor: "var(--color-border)",
+                color: "var(--color-text)",
+                width: 140,
+              }}
+            >
+              <option value="">All sections</option>
+              {STUDENT_SECTION_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <ChevronDown
+              size={14}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+              style={{ color: "var(--color-text-muted)" }}
+            />
+          </div>
+
+          {(search || department || section) && (
             <button
-              onClick={() => { setSearch(""); setDepartment(""); setPage(1); }}
+              onClick={() => { setSearch(""); setDepartment(""); setSection(""); setPage(1); }}
               className="ml-auto text-xs font-medium px-3 py-1.5 rounded-lg transition-colors"
               style={{
                 color: "var(--color-text-muted)",

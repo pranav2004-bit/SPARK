@@ -3,6 +3,17 @@ from rest_framework import serializers
 from .models import Batch, Student, Inquiry, ScrollConfig, ScrollUpdate, OutboxEvent
 
 
+def _validate_section_letter(value):
+    """Shared by every serializer that accepts `section` (added 2026-11-13,
+    made mandatory same day — user decision) — exactly one letter A-Z,
+    same required-ness as `department`. Normalized to uppercase so "a" and
+    "A" aren't treated as different sections."""
+    value = (value or "").strip().upper()
+    if len(value) != 1 or not value.isalpha():
+        raise serializers.ValidationError("Section must be a single letter A-Z.")
+    return value
+
+
 class BatchSerializer(serializers.ModelSerializer):
     student_count = serializers.IntegerField(read_only=True, default=0)
 
@@ -50,7 +61,7 @@ class StudentListSerializer(serializers.ModelSerializer):
             # purpose. Purely additive: existing consumers of this endpoint
             # are unaffected by one more key in each result object.
             "id", "user_id", "student_id", "fullname", "college_email_id",
-            "department", "batch_id", "batch_name",
+            "department", "section", "batch_id", "batch_name",
             "is_active", "is_profile_completed", "created_at",
         ]
 
@@ -65,7 +76,7 @@ class StudentDetailSerializer(serializers.ModelSerializer):
         model = Student
         fields = [
             "id", "student_id", "fullname", "college_email_id",
-            "department", "batch_id", "batch_name",
+            "department", "section", "batch_id", "batch_name",
             "is_active", "is_profile_completed", "created_at", "updated_at",
         ]
         read_only_fields = ["id", "student_id", "is_active", "is_profile_completed", "created_at", "updated_at"]
@@ -74,6 +85,7 @@ class StudentDetailSerializer(serializers.ModelSerializer):
 class StudentCreateSerializer(serializers.Serializer):
     student_id = serializers.CharField(max_length=100)
     department = serializers.CharField(max_length=255)
+    section = serializers.CharField(max_length=1)
     batch_id = serializers.UUIDField()
 
     def validate_student_id(self, value):
@@ -96,6 +108,9 @@ class StudentCreateSerializer(serializers.Serializer):
         if not value:
             raise serializers.ValidationError("Department cannot be empty.")
         return value
+
+    def validate_section(self, value):
+        return _validate_section_letter(value)
 
     def validate_batch_id(self, value):
         institution_id = self.context.get("institution_id")
@@ -134,6 +149,7 @@ class StudentCreateSerializer(serializers.Serializer):
                 user_id=user_id,
                 student_id=validated_data["student_id"],
                 department=validated_data["department"],
+                section=validated_data["section"],
                 batch=batch,
                 institution_id=institution_id,
             )
@@ -156,13 +172,16 @@ class StudentEditSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Student
-        fields = ["fullname", "college_email_id", "department", "batch_id"]
+        fields = ["fullname", "college_email_id", "department", "section", "batch_id"]
 
     def validate_department(self, value):
         value = value.strip() if value else value
         if not value:
             raise serializers.ValidationError("Department cannot be empty.")
         return value
+
+    def validate_section(self, value):
+        return _validate_section_letter(value)
 
 
 class StudentProfileSerializer(serializers.ModelSerializer):
@@ -172,9 +191,9 @@ class StudentProfileSerializer(serializers.ModelSerializer):
         model = Student
         fields = [
             "student_id", "fullname", "college_email_id",
-            "department", "batch_id", "batch_name", "is_profile_completed",
+            "department", "section", "batch_id", "batch_name", "is_profile_completed",
         ]
-        read_only_fields = ["student_id", "department", "batch_id", "batch_name", "is_profile_completed"]
+        read_only_fields = ["student_id", "department", "section", "batch_id", "batch_name", "is_profile_completed"]
 
     def validate_fullname(self, value):
         if not value or not value.strip():
@@ -192,17 +211,18 @@ class InquirySerializer(serializers.ModelSerializer):
     fullname = serializers.CharField(source="student.fullname", read_only=True, default="")
     college_email_id = serializers.EmailField(source="student.college_email_id", read_only=True, default="")
     department = serializers.CharField(source="student.department", read_only=True)
+    section = serializers.CharField(source="student.section", read_only=True)
     batch_name = serializers.CharField(source="student.batch.batch_name", read_only=True)
 
     class Meta:
         model = Inquiry
         fields = [
             "id", "student_id", "fullname", "college_email_id",
-            "department", "batch_name", "message", "is_read", "created_at",
+            "department", "section", "batch_name", "message", "is_read", "created_at",
         ]
         read_only_fields = [
             "id", "student_id", "fullname", "college_email_id",
-            "department", "batch_name", "is_read", "created_at",
+            "department", "section", "batch_name", "is_read", "created_at",
         ]
 
 
