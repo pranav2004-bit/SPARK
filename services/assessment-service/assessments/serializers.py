@@ -202,7 +202,8 @@ class BatchAssignmentSerializer(serializers.ModelSerializer):
         fields = [
             "id", "paper", "paper_title", "batch_id", "institution_id",
             "global_start_time", "global_expire_time", "exam_duration_minutes",
-            "pass_cutoff_percentage", "show_result_to_student", "departments", "status", "created_by",
+            "pass_cutoff_percentage", "show_result_to_student", "results_published_at",
+            "departments", "status", "created_by",
             "created_at", "updated_at",
         ]
         read_only_fields = [
@@ -213,6 +214,11 @@ class BatchAssignmentSerializer(serializers.ModelSerializer):
             # that view writes to the model directly rather than through
             # this serializer.
             "id", "institution_id", "status",
+            # results_published_at is only ever written by
+            # AdminAssignmentPublishResultsView, directly on the model —
+            # never client-settable (an admin can't pre-date when they
+            # "published" something).
+            "results_published_at",
             "created_by", "created_at", "updated_at",
         ]
 

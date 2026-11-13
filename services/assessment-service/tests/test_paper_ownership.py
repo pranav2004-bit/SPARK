@@ -224,6 +224,7 @@ class TestAssignOwnership:
         return {
             "paper": str(paper.id),
             "batch_id": str(uuid.uuid4()),
+            "global_start_time": (timezone.now() + timedelta(minutes=5)).isoformat(),
             "global_expire_time": (timezone.now() + timedelta(hours=3)).isoformat(),
             "exam_duration_minutes": 60,
         }
@@ -269,6 +270,7 @@ class TestResultsAnalyticsDashboardRemainUnrestricted:
     def _assignment(self, paper):
         return BatchAssignment.objects.create(
             paper=paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() - timedelta(minutes=1),
             global_expire_time=timezone.now() + timedelta(hours=3),
             exam_duration_minutes=60, created_by=ADMIN_USER_ID,
         )

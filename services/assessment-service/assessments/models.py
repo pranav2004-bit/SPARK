@@ -260,7 +260,17 @@ class BatchAssignment(models.Model):
     # on the admin results table (department__iexact).
     departments = models.JSONField(default=list, blank=True)
 
-    global_start_time  = models.DateTimeField(null=True, blank=True)  # set at creation or left null until start/ (Task 3.2)
+    # Mandatory (changed 2026-11-12, user decision) — every assignment now
+    # declares when it's meant to start, not just when it expires. Read by
+    # the new sweep_scheduled_assignments_to_live beat task (tasks.py),
+    # which flips SCHEDULED -> LIVE automatically once this passes, exactly
+    # mirroring how global_expire_time already drives sweep_expired_
+    # assignments' LIVE -> CLOSED transition. AdminAssignmentStartView no
+    # longer backfills this on manual start — it's always already set, and
+    # starting early (via the confirm_early_start override) deliberately
+    # leaves it untouched, so it keeps meaning "what the admin scheduled",
+    # not "whenever Start was actually clicked".
+    global_start_time  = models.DateTimeField()
     global_expire_time = models.DateTimeField()
     exam_duration_minutes = models.PositiveIntegerField()
     # Admin-editable per assignment — lives here (not on QuestionPaper)
@@ -274,6 +284,18 @@ class BatchAssignment(models.Model):
     # results list) — both null out score/total_marks/percentage/passed
     # when this is False, never just hide them client-side.
     show_result_to_student = models.BooleanField(default=True)
+    # Set once, by AdminAssignmentPublishResultsView, the moment an admin
+    # publishes results for an assignment that was created with
+    # show_result_to_student=False — never by anything else, never cleared.
+    # Null means "never explicitly published" — which covers both "created
+    # with results already visible" (show_result_to_student defaulted/was
+    # set True at creation, this stays null forever) and "still hidden,
+    # not published yet". Kept separate from show_result_to_student itself
+    # (rather than only using this field's nullness as the visibility gate)
+    # so the two distinct histories — "visible since creation" vs
+    # "explicitly published later" — stay distinguishable for the admin UI,
+    # at the cost of one nullable column.
+    results_published_at = models.DateTimeField(null=True, blank=True)
 
     status = models.CharField(
         max_length=10, choices=ASSIGNMENT_STATUS_CHOICES, default=ASSIGNMENT_STATUS_SCHEDULED, db_index=True,

@@ -378,11 +378,20 @@ export interface BatchAssignment {
   paper_title: string;
   batch_id: string;
   institution_id: string;
-  global_start_time: string | null;
+  // Mandatory since 2026-11-12 — every assignment declares its own start
+  // time, driving the auto-start sweep (assessment-service's
+  // sweep_scheduled_assignments_to_live). Still `string | null` in the
+  // StudentAssignmentListItem variant below, which isn't affected by that
+  // change.
+  global_start_time: string;
   global_expire_time: string;
   exam_duration_minutes: number;
   pass_cutoff_percentage: number;
   show_result_to_student: boolean;
+  // Set once, the moment an admin publishes results for an assignment
+  // created with show_result_to_student=false — null means either "still
+  // hidden" or "visible since creation" (never explicitly published).
+  results_published_at: string | null;
   // Empty array means every department in the batch — non-empty narrows
   // the roster snapshot to just those department(s).
   departments: string[];

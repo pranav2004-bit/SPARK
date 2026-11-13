@@ -27,6 +27,7 @@ def paper_with_set(db):
 def _assignment(paper, **overrides):
     defaults = dict(
         paper=paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+        global_start_time=timezone.now() - timedelta(minutes=1),
         global_expire_time=timezone.now() + timedelta(hours=3),
         exam_duration_minutes=60, created_by=ADMIN_USER_ID,
         status=ASSIGNMENT_STATUS_LIVE,

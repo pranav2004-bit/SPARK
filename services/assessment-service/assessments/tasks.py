@@ -1,8 +1,13 @@
 """
 tasks.py — the Celery beat sweep (Task 4.1, ADR 001).
 
-Two independent periodic tasks, both scheduled every 20s (within the ADR's
+Three independent periodic tasks, all scheduled every 20s (within the ADR's
 15-30s window — see core/settings.py's CELERY_BEAT_SCHEDULE):
+
+  sweep_scheduled_assignments_to_live — BatchAssignment SCHEDULED -> LIVE
+    once global_start_time passes, independent of any admin action (added
+    2026-11-12, user decision — global_start_time became mandatory at the
+    same time, specifically so this sweep always has a real value to read).
 
   sweep_expired_assignments — BatchAssignment LIVE -> CLOSED once
     global_expire_time passes, independent of any admin action.
@@ -67,6 +72,32 @@ class DeadLetteringTask(Task):
             # own failure-handling path.
             logger.exception("%s permanently failed AND could not be recorded in the FailedJob DLQ.", self.name)
         super().on_failure(exc, task_id, args, kwargs, einfo)
+
+
+@shared_task(bind=True, base=DeadLetteringTask, max_retries=_MAX_RETRIES, default_retry_delay=_RETRY_BACKOFF_SECONDS)
+def sweep_scheduled_assignments_to_live(self):
+    from .models import BatchAssignment, ASSIGNMENT_STATUS_SCHEDULED, ASSIGNMENT_STATUS_LIVE
+
+    with bind_request_id(self.request.id):
+        try:
+            # Single conditional UPDATE ... WHERE status='SCHEDULED' —
+            # race-safe against a concurrent admin Start click (including
+            # an early-override one): whichever write lands second simply
+            # matches 0 rows. Never touches global_start_time itself (see
+            # AdminAssignmentStartView's own comment on the same point) —
+            # it's already set, this sweep only acts on it.
+            started = BatchAssignment.objects.filter(
+                status=ASSIGNMENT_STATUS_SCHEDULED, global_start_time__lte=timezone.now(),
+            ).update(status=ASSIGNMENT_STATUS_LIVE)
+            if started:
+                logger.info("sweep_scheduled_assignments_to_live: started %d assignment(s).", started)
+            return {"started": started}
+        except Exception as exc:
+            logger.error(
+                "sweep_scheduled_assignments_to_live failed (attempt %d/%d): %s",
+                self.request.retries + 1, _MAX_RETRIES, exc,
+            )
+            raise self.retry(exc=exc, countdown=_RETRY_BACKOFF_SECONDS * (self.request.retries + 1))
 
 
 @shared_task(bind=True, base=DeadLetteringTask, max_retries=_MAX_RETRIES, default_retry_delay=_RETRY_BACKOFF_SECONDS)

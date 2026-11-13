@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
-  Download, FileText, ShieldAlert, CheckCircle2, XCircle, Clock, Hourglass, PenLine, Target, RefreshCw, AlertTriangle, Eye, Info, Loader2, FlaskConical,
+  Download, FileText, ShieldAlert, CheckCircle2, XCircle, Clock, Hourglass, PenLine, Target, RefreshCw, AlertTriangle, Eye, EyeOff, Info, Loader2, FlaskConical,
 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -117,6 +117,8 @@ export default function AdminAssessmentResultsPage() {
   const [extendTarget, setExtendTarget] = useState<{ sessionId: string; studentName: string } | null>(null);
   const [extendMinutes, setExtendMinutes] = useState("15");
   const [extending, setExtending] = useState(false);
+  const [confirmPublish, setConfirmPublish] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const [exporting, setExporting] = useState(false);
 
   const buildParams = useCallback(() => {
@@ -273,6 +275,22 @@ export default function AdminAssessmentResultsPage() {
     }
   }
 
+  async function handlePublishResults() {
+    setPublishing(true);
+    try {
+      const res = await api.patch<ApiSuccess<BatchAssignment>>(
+        `/assessments/admin/assignments/${assignment_id}/publish-results/`,
+      );
+      setAssignment(res.data.data);
+      toast.success("Results published — students can now see their scores.");
+      setConfirmPublish(false);
+    } catch (err) {
+      toast.error(getErrorMessage(err));
+    } finally {
+      setPublishing(false);
+    }
+  }
+
   async function handleExport() {
     setExporting(true);
     try {
@@ -335,6 +353,30 @@ export default function AdminAssessmentResultsPage() {
                 >
                   <Target size={12} /> Pass cutoff: {assignment.pass_cutoff_percentage}%
                 </span>
+              )}
+              {assignment && (
+                assignment.show_result_to_student ? (
+                  <span
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap"
+                    style={{ background: "#F0FDF4", color: "#16A34A" }}
+                    title={
+                      assignment.results_published_at
+                        ? `Published ${formatDateTime(assignment.results_published_at)}`
+                        : "Results were visible to students from the moment this assignment was created."
+                    }
+                  >
+                    <Eye size={12} /> Results visible to students
+                  </span>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    leftIcon={<EyeOff size={14} />}
+                    onClick={() => setConfirmPublish(true)}
+                    title="This assignment was created with results hidden from students. Publishing makes every student's score visible — immediately for anyone already finished, and automatically from now on for anyone still writing or yet to start."
+                  >
+                    Publish Results
+                  </Button>
+                )
               )}
               <Button variant="secondary" leftIcon={<Download size={14} />} loading={exporting} onClick={handleExport}>
                 Export CSV
@@ -761,6 +803,20 @@ export default function AdminAssessmentResultsPage() {
         <div className="flex justify-end gap-3 mt-5">
           <Button variant="secondary" onClick={() => setExtendTarget(null)}>Cancel</Button>
           <Button variant="primary" loading={extending} onClick={handleExtend}>Extend</Button>
+        </div>
+      </Modal>
+
+      {/* Publish results — one-directional (no "unpublish" once visible),
+          so this gets the same explicit confirm step as Start/Close exam. */}
+      <Modal isOpen={confirmPublish} onClose={() => setConfirmPublish(false)} title="Publish results to students?" maxWidth="sm">
+        <p className="text-sm mb-4 leading-relaxed" style={{ color: "var(--color-text-muted)" }}>
+          This assignment was created with results hidden from students. Publishing makes every
+          student&apos;s score visible — immediately for anyone already finished, and automatically
+          the moment anyone still writing or yet to start completes the exam. This can&apos;t be undone.
+        </p>
+        <div className="flex justify-end gap-3 mt-5">
+          <Button variant="secondary" onClick={() => setConfirmPublish(false)}>Cancel</Button>
+          <Button variant="primary" loading={publishing} onClick={handlePublishResults}>Publish Results</Button>
         </div>
       </Modal>
     </AdminLayout>

@@ -47,6 +47,7 @@ def _payload(paper, **overrides):
     data = {
         "paper": str(paper.id),
         "batch_id": str(uuid.uuid4()),
+        "global_start_time": (timezone.now() + timedelta(minutes=5)).isoformat(),
         "global_expire_time": (timezone.now() + timedelta(hours=3)).isoformat(),
         "exam_duration_minutes": 60,
     }
@@ -116,6 +117,20 @@ class TestCreateAssignment:
         resp = admin_client.post("/api/assessments/admin/assignments/", payload, format="json")
         assert resp.status_code == 400
         mock_snap.assert_not_called()
+
+    # global_start_time became mandatory 2026-11-12 (user decision) — every
+    # assignment now declares its own start time, which the auto-start sweep
+    # (sweep_scheduled_assignments_to_live, tasks.py) reads unconditionally.
+    def test_missing_start_time_rejected(self, admin_client, published_paper):
+        payload = _payload(published_paper)
+        del payload["global_start_time"]
+        resp = admin_client.post("/api/assessments/admin/assignments/", payload, format="json")
+        assert resp.status_code == 400
+
+    def test_null_start_time_rejected(self, admin_client, published_paper):
+        payload = _payload(published_paper, global_start_time=None)
+        resp = admin_client.post("/api/assessments/admin/assignments/", payload, format="json")
+        assert resp.status_code == 400
 
     def test_cross_institution_paper_404s(self, admin_b_client, published_paper):
         resp = admin_b_client.post("/api/assessments/admin/assignments/", _payload(published_paper), format="json")
@@ -233,11 +248,18 @@ class TestImmutabilityLock:
 
 class TestStartAssignment:
     def _create_direct(self, paper, **overrides):
-        return BatchAssignment.objects.create(
+        # defaults.update(overrides), not a trailing **overrides on the
+        # call — a couple of tests below override global_start_time
+        # itself (test_preexisting_start_time_preserved), which would
+        # collide with a hardcoded kwarg of the same name.
+        defaults = dict(
             paper=paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() - timedelta(minutes=1),
             global_expire_time=timezone.now() + timedelta(hours=3),
-            exam_duration_minutes=60, created_by=ADMIN_USER_ID, **overrides,
+            exam_duration_minutes=60, created_by=ADMIN_USER_ID,
         )
+        defaults.update(overrides)
+        return BatchAssignment.objects.create(**defaults)
 
     def test_start_transitions_scheduled_to_live(self, admin_client, published_paper):
         assignment = self._create_direct(published_paper)
@@ -294,12 +316,220 @@ class TestStartAssignment:
         assert abs((assignment.global_start_time - preset).total_seconds()) < 1
 
 
+# ── Start — early override (added 2026-11-12, user decision) ───────────────
+# global_start_time is now mandatory and drives the auto-start sweep. Start
+# Exam clicked before that moment is a deliberate override, requiring an
+# explicit confirm_early_start=true in the request body — see
+# AdminAssignmentStartView.patch's own comment for the full reasoning.
+
+class TestStartAssignmentEarlyOverride:
+    def _create_direct(self, paper, **overrides):
+        defaults = dict(
+            paper=paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() + timedelta(hours=1),
+            global_expire_time=timezone.now() + timedelta(hours=3),
+            exam_duration_minutes=60, created_by=ADMIN_USER_ID,
+        )
+        defaults.update(overrides)
+        return BatchAssignment.objects.create(**defaults)
+
+    def test_early_start_without_confirm_rejected_with_code(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        resp = admin_client.patch(f"/api/assessments/admin/assignments/{assignment.id}/start/")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["errors"]["code"] == "START_TIME_NOT_REACHED"
+        assert "scheduled_start_time" in body["errors"]
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_SCHEDULED
+
+    def test_early_start_with_confirm_succeeds(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        resp = admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/start/",
+            {"confirm_early_start": True}, format="json",
+        )
+        assert resp.status_code == 200
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_LIVE
+
+    def test_early_start_confirm_does_not_change_scheduled_start_time(self, admin_client, published_paper):
+        # Overriding the WHEN-it-goes-live decision must never silently
+        # rewrite the admin's own declared schedule — see
+        # AdminAssignmentStartView.patch's comment on this exact point.
+        original = timezone.now() + timedelta(hours=1)
+        assignment = self._create_direct(published_paper, global_start_time=original)
+        admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/start/",
+            {"confirm_early_start": True}, format="json",
+        )
+        assignment.refresh_from_db()
+        assert abs((assignment.global_start_time - original).total_seconds()) < 1
+
+    def test_start_after_scheduled_time_needs_no_confirm(self, admin_client, published_paper):
+        # Once the scheduled moment has genuinely passed, a plain Start
+        # click (no override flag) must succeed outright — the confirmation
+        # is only for jumping the queue, not a permanent extra step.
+        assignment = self._create_direct(published_paper, global_start_time=timezone.now() - timedelta(minutes=1))
+        resp = admin_client.patch(f"/api/assessments/admin/assignments/{assignment.id}/start/")
+        assert resp.status_code == 200
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_LIVE
+
+    def test_confirm_early_start_false_still_blocked(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        resp = admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/start/",
+            {"confirm_early_start": False}, format="json",
+        )
+        assert resp.status_code == 409
+
+
+# ── Edit (added 2026-11-12, user decision) ──────────────────────────────────
+# Editable only while SCHEDULED — AdminAssignmentDetailView.patch's own gate
+# matches the assignment's own lifecycle rather than "has any student
+# started writing": LIVE blocks editing even with zero students allocated
+# yet, since LIVE is the moment this assignment's terms became binding.
+
+class TestEditAssignment:
+    def _create_direct(self, paper, **overrides):
+        defaults = dict(
+            paper=paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() + timedelta(hours=1),
+            global_expire_time=timezone.now() + timedelta(hours=3),
+            exam_duration_minutes=60, created_by=ADMIN_USER_ID,
+        )
+        defaults.update(overrides)
+        return BatchAssignment.objects.create(**defaults)
+
+    def test_edit_scheduled_assignment_succeeds(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        new_start = timezone.now() + timedelta(hours=2)
+        new_expire = timezone.now() + timedelta(hours=5)
+        resp = admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/",
+            {
+                "global_start_time": new_start.isoformat(),
+                "global_expire_time": new_expire.isoformat(),
+                "exam_duration_minutes": 90,
+                "pass_cutoff_percentage": 50,
+                "show_result_to_student": False,
+            },
+            format="json",
+        )
+        assert resp.status_code == 200
+        assignment.refresh_from_db()
+        assert assignment.exam_duration_minutes == 90
+        assert assignment.pass_cutoff_percentage == 50
+        assert assignment.show_result_to_student is False
+        assert abs((assignment.global_start_time - new_start).total_seconds()) < 1
+        assert abs((assignment.global_expire_time - new_expire).total_seconds()) < 1
+
+    def test_paper_field_rejected(self, admin_client, published_paper, paper_no_sets):
+        assignment = self._create_direct(published_paper)
+        resp = admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/",
+            {"paper": str(paper_no_sets.id)}, format="json",
+        )
+        assert resp.status_code == 400
+        assignment.refresh_from_db()
+        assert assignment.paper_id == published_paper.id
+
+    def test_batch_id_field_rejected(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        original_batch = assignment.batch_id
+        resp = admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/",
+            {"batch_id": str(uuid.uuid4())}, format="json",
+        )
+        assert resp.status_code == 400
+        assignment.refresh_from_db()
+        assert assignment.batch_id == original_batch
+
+    def test_live_assignment_cannot_be_edited(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper, status=ASSIGNMENT_STATUS_LIVE)
+        resp = admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/",
+            {"exam_duration_minutes": 90}, format="json",
+        )
+        assert resp.status_code == 403
+        assignment.refresh_from_db()
+        assert assignment.exam_duration_minutes == 60
+
+    def test_closed_assignment_cannot_be_edited(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper, status=ASSIGNMENT_STATUS_CLOSED)
+        resp = admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/",
+            {"exam_duration_minutes": 90}, format="json",
+        )
+        assert resp.status_code == 403
+        assignment.refresh_from_db()
+        assert assignment.exam_duration_minutes == 60
+
+    @patch("assessments.views.snapshot_roster_and_allocate")
+    def test_departments_change_triggers_resync(self, mock_snap, admin_client, published_paper):
+        mock_snap.return_value = 4
+        assignment = self._create_direct(published_paper, departments=["CSE"])
+        resp = admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/",
+            {"departments": ["CSE", "ECE"]}, format="json",
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"]["new_allocations"] == 4
+        mock_snap.assert_called_once()
+        assignment.refresh_from_db()
+        assert assignment.departments == ["CSE", "ECE"]
+
+    @patch("assessments.views.snapshot_roster_and_allocate")
+    def test_departments_unchanged_does_not_resync(self, mock_snap, admin_client, published_paper):
+        assignment = self._create_direct(published_paper, departments=["CSE"])
+        resp = admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/",
+            {"exam_duration_minutes": 75}, format="json",
+        )
+        assert resp.status_code == 200
+        assert "new_allocations" not in resp.json()["data"]
+        mock_snap.assert_not_called()
+
+    @patch("assessments.views.snapshot_roster_and_allocate")
+    def test_departments_change_resync_failure_returns_502_but_keeps_other_edits(self, mock_snap, admin_client, published_paper):
+        mock_snap.side_effect = RuntimeError("user-service unreachable")
+        assignment = self._create_direct(published_paper, departments=["CSE"])
+        resp = admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/",
+            {"departments": ["CSE", "ECE"], "exam_duration_minutes": 75}, format="json",
+        )
+        assert resp.status_code == 502
+        assignment.refresh_from_db()
+        # The field edit itself already committed before the resync attempt
+        # — a roster-sync failure shouldn't roll back an otherwise-valid edit.
+        assert assignment.exam_duration_minutes == 75
+        assert assignment.departments == ["CSE", "ECE"]
+
+    def test_cross_institution_404(self, admin_b_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        resp = admin_b_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/",
+            {"exam_duration_minutes": 90}, format="json",
+        )
+        assert resp.status_code == 404
+
+    def test_non_admin_forbidden(self, student_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        resp = student_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/",
+            {"exam_duration_minutes": 90}, format="json",
+        )
+        assert resp.status_code == 403
+
+
 # ── Close ────────────────────────────────────────────────────────────────────
 
 class TestCloseAssignment:
     def _create_direct(self, paper, **overrides):
         return BatchAssignment.objects.create(
             paper=paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() - timedelta(minutes=1),
             global_expire_time=timezone.now() + timedelta(hours=3),
             exam_duration_minutes=60, created_by=ADMIN_USER_ID, **overrides,
         )
@@ -337,6 +567,7 @@ class TestResyncRoster:
     def _create_direct(self, paper):
         return BatchAssignment.objects.create(
             paper=paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() - timedelta(minutes=1),
             global_expire_time=timezone.now() + timedelta(hours=3),
             exam_duration_minutes=60, created_by=ADMIN_USER_ID,
         )
@@ -375,6 +606,7 @@ class TestExtendSessionStub:
     def _create_direct(self, paper):
         return BatchAssignment.objects.create(
             paper=paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() - timedelta(minutes=1),
             global_expire_time=timezone.now() + timedelta(hours=3),
             exam_duration_minutes=60, created_by=ADMIN_USER_ID,
         )
@@ -491,6 +723,7 @@ class TestAssignmentStatus:
     def test_cross_institution_404(self, admin_b_client, published_paper):
         assignment = BatchAssignment.objects.create(
             paper=published_paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() - timedelta(minutes=1),
             global_expire_time=timezone.now() + timedelta(hours=3),
             exam_duration_minutes=60, created_by=ADMIN_USER_ID,
         )
@@ -500,6 +733,7 @@ class TestAssignmentStatus:
     def test_non_admin_forbidden(self, student_client, published_paper):
         assignment = BatchAssignment.objects.create(
             paper=published_paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() - timedelta(minutes=1),
             global_expire_time=timezone.now() + timedelta(hours=3),
             exam_duration_minutes=60, created_by=ADMIN_USER_ID,
         )
@@ -513,6 +747,7 @@ class TestAssignmentListAndDetail:
     def _create_direct(self, paper, institution_id=INSTITUTION_A):
         return BatchAssignment.objects.create(
             paper=paper, batch_id=uuid.uuid4(), institution_id=institution_id,
+            global_start_time=timezone.now() - timedelta(minutes=1),
             global_expire_time=timezone.now() + timedelta(hours=3),
             exam_duration_minutes=60, created_by=ADMIN_USER_ID,
         )
