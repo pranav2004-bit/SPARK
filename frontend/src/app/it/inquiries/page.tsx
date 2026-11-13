@@ -219,6 +219,11 @@ export default function ITInquiriesPage() {
                           <BookOpen size={11} className="text-[var(--color-text-subtle)] shrink-0" />
                           <span className="text-xs text-[var(--color-text-muted)]">{inq.department}</span>
                         </div>
+                        {inq.section && (
+                          <div className="flex items-center gap-1">
+                            <span className="text-xs text-[var(--color-text-muted)]">Section {inq.section}</span>
+                          </div>
+                        )}
                         <div className="flex items-center gap-1">
                           <GraduationCap size={11} className="text-[var(--color-text-subtle)] shrink-0" />
                           <span className="text-xs text-[var(--color-text-muted)]">{inq.batch_name}</span>

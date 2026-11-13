@@ -163,6 +163,7 @@ def _apply_student_filters(qs, request):
     # with `department` (singular) only in that both narrow further if both
     # are somehow passed together; no existing caller does that.
     departments = request.query_params.get("departments", "").strip()
+    section = request.query_params.get("section", "").strip()
     batch_id = request.query_params.get("batch_id", "").strip()
     if search:
         qs = qs.filter(
@@ -177,6 +178,8 @@ def _apply_student_filters(qs, request):
             for d in wanted:
                 match |= Q(department__iexact=d)
             qs = qs.filter(match)
+    if section:
+        qs = qs.filter(section__iexact=section)
     if batch_id:
         qs = qs.filter(batch_id=batch_id)
     return qs
@@ -307,6 +310,11 @@ class AdminStudentBulkCreateView(APIView):
     def post(self, request):
         student_ids_raw = request.data.get("student_ids")
         department = str(request.data.get("department", "")).strip()
+        # Mandatory, same as department/batch_id (changed 2026-11-13, user
+        # decision) — one shared value applied to every imported row in
+        # this batch, same as department/batch_id already work here (not a
+        # per-row CSV column).
+        section = str(request.data.get("section", "") or "").strip().upper()
         batch_id = request.data.get("batch_id", "")
         institution_id = getattr(request.user, "institution_id", None)
 
@@ -314,6 +322,8 @@ class AdminStudentBulkCreateView(APIView):
             return error_response(message="student_ids must be a list of strings.", status_code=400)
         if not department:
             return error_response(message="department is required.", status_code=400)
+        if not section or not (len(section) == 1 and section.isalpha()):
+            return error_response(message="section is required and must be a single letter A-Z.", status_code=400)
 
         try:
             batch_qs = Batch.objects.filter(pk=batch_id)
@@ -385,6 +395,7 @@ class AdminStudentBulkCreateView(APIView):
                         user_id=user_id,
                         student_id=raw_id,
                         department=department,
+                        section=section,
                         batch=batch,
                         institution_id=institution_id,
                     )

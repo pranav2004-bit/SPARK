@@ -148,6 +148,7 @@ def student(db, batch):
         user_id=STUDENT_USER_ID,
         student_id="STU001",
         department="CSE",
+        section="A",
         batch=batch,
         institution_id=INSTITUTION_A,
     )

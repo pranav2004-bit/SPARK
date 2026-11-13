@@ -28,6 +28,7 @@ const STUDENT: Student = {
   fullname: "Jane Doe",
   college_email_id: "jane@college.edu",
   department: "CSE",
+  section: "A",
   batch_id: "b1",
   batch_name: "Batch 2024",
   is_active: true,

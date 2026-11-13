@@ -10,6 +10,7 @@ import { SearchInput } from "@/components/ui/SearchInput";
 import { Pagination } from "@/components/ui/Pagination";
 import api, { getErrorMessage } from "@/lib/api";
 import { useDepartments } from "@/lib/departmentsContext";
+import { STUDENT_SECTION_OPTIONS } from "@/lib/constants";
 import type { PaginatedResponse, Batch } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -20,6 +21,7 @@ interface StudentRecord {
   fullname: string;
   college_email_id: string;
   department: string;
+  section: string;
   batch_name?: string;
   batch_id?: string;
   created_at: string;
@@ -55,6 +57,7 @@ export default function SuperAdminStudentsPage() {
   const [totalPages, setTotalPages] = useState(1);
   const [search, setSearch] = useState("");
   const [department, setDepartment] = useState("");
+  const [section, setSection] = useState("");
   // Pre-filled when arriving from a Batches card's "View students" link
   // (/super-admin/students?batch_id=<id>) — read once on mount, same as
   // any other initial-state seed; the filter dropdown remains fully
@@ -77,6 +80,7 @@ export default function SuperAdminStudentsPage() {
       params.set("page", String(page));
       if (search) params.set("search", search);
       if (department) params.set("department", department);
+      if (section) params.set("section", section);
       if (batchFilter) params.set("batch_id", batchFilter);
 
       const res = await api.get<PaginatedResponse<StudentRecord>>(
@@ -90,7 +94,7 @@ export default function SuperAdminStudentsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, search, department, batchFilter]);
+  }, [page, search, department, section, batchFilter]);
 
   useEffect(() => { fetchStudents(); }, [fetchStudents]);
 
@@ -105,12 +109,17 @@ export default function SuperAdminStudentsPage() {
     setPage(1);
   }
 
+  function handleSectionChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    setSection(e.target.value);
+    setPage(1);
+  }
+
   function handleBatchChange(e: React.ChangeEvent<HTMLSelectElement>) {
     setBatchFilter(e.target.value);
     setPage(1);
   }
 
-  const hasFilters = !!(search || department || batchFilter);
+  const hasFilters = !!(search || department || section || batchFilter);
 
   return (
     <PageWrapper>
@@ -151,6 +160,24 @@ export default function SuperAdminStudentsPage() {
 
         <div className="hidden sm:block self-stretch w-px" style={{ background: "var(--color-border)" }} />
 
+        {/* Section filter */}
+        <div className="relative shrink-0">
+          <select
+            value={section}
+            onChange={handleSectionChange}
+            className="h-9 pl-3 pr-8 text-sm rounded-[var(--radius-md)] border bg-white appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
+            style={{ borderColor: "var(--color-border)", color: "var(--color-text)", width: 140 }}
+          >
+            <option value="">All sections</option>
+            {STUDENT_SECTION_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+          <ChevronDown size={14} className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--color-text-muted)" }} />
+        </div>
+
+        <div className="hidden sm:block self-stretch w-px" style={{ background: "var(--color-border)" }} />
+
         {/* Batch filter */}
         <div className="relative shrink-0">
           <select
@@ -169,7 +196,7 @@ export default function SuperAdminStudentsPage() {
 
         {/* Always rendered — visibility toggle prevents toolbar reflow */}
         <button
-          onClick={() => { setSearch(""); setDepartment(""); setBatchFilter(""); setPage(1); }}
+          onClick={() => { setSearch(""); setDepartment(""); setSection(""); setBatchFilter(""); setPage(1); }}
           className="ml-auto text-xs font-medium px-3 py-1.5 rounded-lg transition-colors"
           style={{
             color: "var(--color-text-muted)",
@@ -229,7 +256,7 @@ export default function SuperAdminStudentsPage() {
           <table className="w-full">
             <thead>
               <tr style={{ borderBottom: "1px solid var(--color-border)", background: "var(--color-surface-secondary)" }}>
-                {["Name", "Email", "Batch", "Department", "Enrolled"].map((h) => (
+                {["Name", "Email", "Batch", "Department", "Section", "Enrolled"].map((h) => (
                   <th
                     key={h}
                     className="px-5 py-3 text-left text-xs font-semibold tracking-wide"
@@ -284,6 +311,9 @@ export default function SuperAdminStudentsPage() {
                     >
                       {student.department || "—"}
                     </span>
+                  </td>
+                  <td className="px-5 py-4 text-sm" style={{ color: "var(--color-text-muted)" }}>
+                    {student.section || "—"}
                   </td>
                   <td className="px-5 py-4 text-sm" style={{ color: "var(--color-text-muted)" }}>
                     {student.created_at

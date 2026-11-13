@@ -17,6 +17,7 @@ import { BulkImportModal } from "@/components/admin/BulkImportModal";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
 import { useDepartments } from "@/lib/departmentsContext";
+import { STUDENT_SECTION_OPTIONS } from "@/lib/constants";
 import type { Student, Batch, PaginatedResponse, ApiSuccess } from "@/types";
 
 // IT-exclusive CRUD (2026-08-19) — Admin's version of this page
@@ -26,6 +27,7 @@ import type { Student, Batch, PaginatedResponse, ApiSuccess } from "@/types";
 interface AddStudentForm {
   student_id: string;
   department: string;
+  section: string;
   batch_id: string;
 }
 
@@ -46,6 +48,7 @@ export default function ITStudentsPage() {
   const [totalPages, setTotalPages] = useState(1);
   const [search, setSearch] = useState("");
   const [department, setDepartment] = useState("");
+  const [section, setSection] = useState("");
   const [batchFilter, setBatchFilter] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [addLoading, setAddLoading] = useState(false);
@@ -67,6 +70,7 @@ export default function ITStudentsPage() {
       params.set("page", String(page));
       if (search) params.set("search", search);
       if (department) params.set("department", department);
+      if (section) params.set("section", section);
       if (batchFilter) params.set("batch_id", batchFilter);
 
       const { data } = await api.get<PaginatedResponse<Student>>(
@@ -81,7 +85,7 @@ export default function ITStudentsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, search, department, batchFilter, toastError]);
+  }, [page, search, department, section, batchFilter, toastError]);
 
   useEffect(() => {
     fetchStudents();
@@ -102,6 +106,11 @@ export default function ITStudentsPage() {
 
   function handleDeptChange(e: React.ChangeEvent<HTMLSelectElement>) {
     setDepartment(e.target.value);
+    setPage(1);
+  }
+
+  function handleSectionChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    setSection(e.target.value);
     setPage(1);
   }
 
@@ -220,6 +229,25 @@ export default function ITStudentsPage() {
           {/* Divider */}
           <div className="hidden sm:block self-stretch w-px" style={{ background: "var(--color-border)" }} />
 
+          {/* Section filter */}
+          <div className="relative shrink-0">
+            <select
+              value={section}
+              onChange={handleSectionChange}
+              className="h-9 pl-3 pr-8 text-sm rounded-[var(--radius-md)] border bg-white appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
+              style={{ borderColor: "var(--color-border)", color: "var(--color-text)", width: 140 }}
+            >
+              <option value="">All sections</option>
+              {STUDENT_SECTION_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <ChevronDown size={14} className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--color-text-muted)" }} />
+          </div>
+
+          {/* Divider */}
+          <div className="hidden sm:block self-stretch w-px" style={{ background: "var(--color-border)" }} />
+
           {/* Batch filter */}
           <div className="relative shrink-0">
             <select
@@ -236,9 +264,9 @@ export default function ITStudentsPage() {
             <ChevronDown size={14} className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--color-text-muted)" }} />
           </div>
 
-          {(search || department || batchFilter) && (
+          {(search || department || section || batchFilter) && (
             <button
-              onClick={() => { setSearch(""); setDepartment(""); setBatchFilter(""); setPage(1); }}
+              onClick={() => { setSearch(""); setDepartment(""); setSection(""); setBatchFilter(""); setPage(1); }}
               className="ml-auto text-xs font-medium px-3 py-1.5 rounded-lg transition-colors"
               style={{ color: "var(--color-text-muted)", background: "var(--color-surface-secondary)", border: "1px solid var(--color-border)" }}
               onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = "var(--color-danger)"; (e.currentTarget as HTMLButtonElement).style.borderColor = "var(--color-danger)"; }}
@@ -256,7 +284,7 @@ export default function ITStudentsPage() {
             subtitle="Something went wrong fetching this data — it may be temporary. Try again in a moment."
             action={{ label: "Retry", onClick: fetchStudents }}
           />
-        ) : !loading && totalCount === 0 && !search && !department ? (
+        ) : !loading && totalCount === 0 && !search && !department && !section ? (
           <EmptyState
             icon={Users}
             title="No Students Yet"
@@ -317,6 +345,15 @@ export default function ITStudentsPage() {
               error={errors.department?.message}
               {...register("department", {
                 required: "Department is required.",
+              })}
+            />
+            <Select
+              label="Section"
+              placeholder="Select section"
+              options={STUDENT_SECTION_OPTIONS}
+              error={errors.section?.message}
+              {...register("section", {
+                required: "Section is required.",
               })}
             />
             <Select

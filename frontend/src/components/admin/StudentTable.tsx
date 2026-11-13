@@ -13,6 +13,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
 import { useDepartments } from "@/lib/departmentsContext";
+import { STUDENT_SECTION_OPTIONS } from "@/lib/constants";
 import type { Student, Batch, ApiSuccess } from "@/types";
 
 interface StudentTableProps {
@@ -40,6 +41,7 @@ interface StudentTableProps {
 
 interface EditForm {
   department: string;
+  section: string;
   batch_id: string;
 }
 
@@ -78,6 +80,7 @@ export function StudentTable({
   function openEdit(s: Student) {
     reset({
       department: s.department,
+      section: s.section,
       batch_id: s.batch_id,
     });
     setEditStudent(s);
@@ -158,7 +161,7 @@ export function StudentTable({
     label: b.batch_name,
   }));
 
-  const totalCols = (showBatchColumn ? 7 : 6) - (readOnly ? 1 : 0);
+  const totalCols = (showBatchColumn ? 8 : 7) - (readOnly ? 1 : 0);
 
   return (
     <>
@@ -194,6 +197,10 @@ export function StudentTable({
                 <th className="text-left px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.07em]"
                   style={{ color: "var(--color-text-subtle)", width: 90 }}>
                   Dept
+                </th>
+                <th className="text-left px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.07em]"
+                  style={{ color: "var(--color-text-subtle)", width: 70 }}>
+                  Section
                 </th>
                 {showBatchColumn && (
                   <th className="text-left px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.07em]"
@@ -325,6 +332,25 @@ export function StudentTable({
                       </span>
                     </td>
 
+                    {/* Section — optional, "—" for students created before
+                        this field existed and never since edited */}
+                    <td className="px-5 py-3.5">
+                      {student.section ? (
+                        <span
+                          className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium"
+                          style={{
+                            background: "var(--color-surface-secondary)",
+                            color: "var(--color-text-muted)",
+                            border: "1px solid var(--color-border)",
+                          }}
+                        >
+                          {student.section}
+                        </span>
+                      ) : (
+                        <span style={{ color: "var(--color-text-subtle)" }}>—</span>
+                      )}
+                    </td>
+
                     {/* Batch column (optional) */}
                     {showBatchColumn && (
                       <td className="px-5 py-3.5 text-sm" style={{ color: "var(--color-text-muted)" }}>
@@ -454,6 +480,14 @@ export function StudentTable({
               options={deptOptions}
               error={errors.department?.message}
               {...register("department", { required: "Department is required." })}
+            />
+            {/* Editable: section */}
+            <Select
+              label="Section"
+              placeholder="Select section"
+              options={STUDENT_SECTION_OPTIONS}
+              error={errors.section?.message}
+              {...register("section", { required: "Section is required." })}
             />
             {/* Editable: batch */}
             {showBatchColumn && (

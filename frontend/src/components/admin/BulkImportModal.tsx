@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import api, { getErrorMessage } from "@/lib/api";
 import { useDepartments } from "@/lib/departmentsContext";
+import { STUDENT_SECTION_OPTIONS } from "@/lib/constants";
 import type { Batch } from "@/types";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -218,6 +219,7 @@ export function BulkImportModal({
   const [file, setFile] = useState<File | null>(null);
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
   const [department, setDepartment] = useState("");
+  const [section, setSection] = useState("");
   const [batchId, setBatchId] = useState("");
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -235,6 +237,7 @@ export function BulkImportModal({
         setFile(null);
         setParseResult(null);
         setDepartment("");
+        setSection("");
         setBatchId("");
         setIsDragOver(false);
         setImportResult(null);
@@ -324,6 +327,7 @@ export function BulkImportModal({
         {
           student_ids: parseResult.validIds,
           department,
+          section,
           batch_id: batchId,
         }
       );
@@ -351,6 +355,7 @@ export function BulkImportModal({
     !!parseResult &&
     parseResult.validIds.length > 0 &&
     !!department &&
+    !!section &&
     !!batchId;
 
   const rejectedRows = importResult?.results.filter((r) => r.status === "rejected") ?? [];
@@ -610,8 +615,8 @@ export function BulkImportModal({
                 />
               </div>
 
-              {/* Department + Batch row */}
-              <div className="grid grid-cols-2 gap-3">
+              {/* Department + Section + Batch row */}
+              <div className="grid grid-cols-3 gap-3">
                 {/* Department */}
                 <div>
                   <label
@@ -633,6 +638,39 @@ export function BulkImportModal({
                       <option value="" disabled>Select department</option>
                       {activeDepartments.map((d) => (
                         <option key={d.id} value={d.code}>{d.name || d.code}</option>
+                      ))}
+                    </select>
+                    <ChevronDown
+                      size={14}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                      style={{ color: "var(--color-text-muted)" }}
+                    />
+                  </div>
+                </div>
+
+                {/* Section — mandatory, same as Department/Batch: applies
+                    the same letter to every row in this import, exactly
+                    like Department/Batch already do. */}
+                <div>
+                  <label
+                    className="block text-sm font-semibold mb-1.5"
+                    style={{ color: "var(--color-text)" }}
+                  >
+                    Section <span style={{ color: "var(--color-danger)" }}>*</span>
+                  </label>
+                  <div className="relative">
+                    <select
+                      value={section}
+                      onChange={(e) => setSection(e.target.value)}
+                      className="w-full h-9 pl-3 pr-8 text-sm rounded-[var(--radius-md)] border bg-white appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
+                      style={{
+                        borderColor: "var(--color-border)",
+                        color: "var(--color-text)",
+                      }}
+                    >
+                      <option value="" disabled>Select section</option>
+                      {STUDENT_SECTION_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
                       ))}
                     </select>
                     <ChevronDown

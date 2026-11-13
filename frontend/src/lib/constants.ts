@@ -2,6 +2,16 @@
 // now (2026-08-20, IT's Departments module) — use useDepartments() from
 // @/lib/departmentsContext instead.
 
+// Student `section` (added 2026-11-13, made mandatory same day — user
+// decision) — unlike Department, deliberately a fixed A-Z list, not an
+// IT-managed master table: there's no backend CRUD for it and never will
+// be, so this hardcoded list is the actual source of truth (mirrors how
+// DEPARTMENTS used to work, before that became backend-managed). Required
+// on every student, same as department/batch — pre-existing students were
+// backfilled to "Z" by the migration that added this field.
+export const STUDENT_SECTIONS = Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i));
+export const STUDENT_SECTION_OPTIONS = STUDENT_SECTIONS.map(s => ({ value: s, label: s }));
+
 export const UPLOAD_TYPE_LABELS: Record<string, string> = {
   pdf: "PDF",
   audio: "Audio",
