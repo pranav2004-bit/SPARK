@@ -213,6 +213,12 @@ CELERY_TASK_DEFAULT_QUEUE = "assessment-service"
 # assessment-beat's startup — no manual DB seeding needed. 20s sits inside
 # the ADR's 15-30s window.
 CELERY_BEAT_SCHEDULE = {
+    # Added 2026-11-12 alongside global_start_time becoming mandatory —
+    # SCHEDULED -> LIVE, the mirror image of sweep-expired-assignments below.
+    "sweep-scheduled-assignments-to-live": {
+        "task": "assessments.tasks.sweep_scheduled_assignments_to_live",
+        "schedule": 20.0,
+    },
     "sweep-expired-assignments": {
         "task": "assessments.tasks.sweep_expired_assignments",
         "schedule": 20.0,

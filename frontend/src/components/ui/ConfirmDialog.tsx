@@ -38,6 +38,11 @@ interface ConfirmDialogProps {
    * actually closing it. Off by default for every other call site. */
   secondaryActionLabel?: string;
   onSecondaryAction?: () => void;
+  /** Opt-in — extra content rendered between the message and the action
+   * buttons, e.g. the assignment Start-Exam early-override's "I understand
+   * this overrides the scheduled start time" checkbox. Most call sites
+   * don't need anything beyond the plain message string. */
+  children?: React.ReactNode;
 }
 
 export function ConfirmDialog({
@@ -53,6 +58,7 @@ export function ConfirmDialog({
   confirmDisabled = false,
   secondaryActionLabel,
   onSecondaryAction,
+  children,
 }: ConfirmDialogProps) {
   const [typedValue, setTypedValue] = useState("");
 
@@ -84,6 +90,7 @@ export function ConfirmDialog({
           />
         </div>
       )}
+      {children}
       <div className="flex items-center justify-end gap-3 mt-6">
         <Button variant="secondary" onClick={onClose} disabled={loading}>
           Cancel

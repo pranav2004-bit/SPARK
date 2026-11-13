@@ -108,7 +108,7 @@ This is the thundering-herd scenario (AT2/AT13) — many students hitting the da
 
 ## 5. Stuck / failed jobs (Task 13.1's DLQ)
 
-The only real background jobs in this service are the two periodic sweeps. A permanently-failed run (retries exhausted) lands in the `FailedJob` table, never silently dropped.
+The only real background jobs in this service are the three periodic sweeps (a third, `sweep_scheduled_assignments_to_live`, added 2026-11-12 alongside `global_start_time` becoming mandatory — SCHEDULED → LIVE once that time passes, independent of any admin action). A permanently-failed run (retries exhausted) lands in the `FailedJob` table, never silently dropped.
 
 ```bash
 docker exec infra-assessment-service-1 python manage.py shell -c "

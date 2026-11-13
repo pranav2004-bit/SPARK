@@ -106,6 +106,7 @@ describe("Admin Assign page — Final Review checklist", () => {
     render(<AdminAssessmentAssignPage />);
 
     await selectPaperAndBatch(user);
+    await user.type(screen.getByLabelText("Global start time"), "2026-09-01T09:00");
     await user.type(screen.getByLabelText("Global expire time"), "2026-09-01T10:00");
 
     expect(await screen.findByText("Final Review")).toBeInTheDocument();
@@ -124,8 +125,12 @@ describe("Admin Assign page — Final Review checklist", () => {
     expect(line(/Exam duration:/)).toHaveTextContent("60 minutes");
     // Global timer must use the same "·" separator as the per-set rows
     // above it, not a different style (was "|" — a visual inconsistency
-    // flagged in review).
-    expect(line(/Global timer:/)).toHaveTextContent("not set — begins immediately once you start the exam · Expire:");
+    // flagged in review). Start is mandatory (2026-11-12) so it's always a
+    // real formatted value here, not a "not set" fallback — the exact
+    // formatted string is locale/timezone-dependent, so this only checks
+    // the shape, same reasoning as why the Expire half was never asserted
+    // beyond "Expire:" either.
+    expect(line(/Global timer:/)).toHaveTextContent(/Start: .+ · Expire:/);
     expect(line(/Pass cutoff:/)).toHaveTextContent("40%");
     expect(line(/Results visibility:/)).toHaveTextContent("Visible to students after submission");
 
@@ -141,6 +146,7 @@ describe("Admin Assign page — Final Review checklist", () => {
     render(<AdminAssessmentAssignPage />);
 
     await selectPaperAndBatch(user);
+    await user.type(screen.getByLabelText("Global start time"), "2026-09-01T09:00");
     await user.type(screen.getByLabelText("Global expire time"), "2026-09-01T10:00");
     await screen.findByText("Final Review");
 
@@ -168,6 +174,7 @@ describe("Admin Assign page — Final Review checklist", () => {
     render(<AdminAssessmentAssignPage />);
 
     await selectPaperAndBatch(user);
+    await user.type(screen.getByLabelText("Global start time"), "2026-09-01T09:00");
     await user.type(screen.getByLabelText("Global expire time"), "2026-09-01T10:00");
     await screen.findByText("Final Review");
 
@@ -301,6 +308,7 @@ describe("Admin Assign page — Final Review checklist", () => {
     render(<AdminAssessmentAssignPage />);
 
     await selectPaperAndBatch(user);
+    await user.type(screen.getByLabelText("Global start time"), "2026-09-01T09:00");
     await user.type(screen.getByLabelText("Global expire time"), "2026-09-01T10:00");
     await screen.findByText("Final Review");
     for (const box of screen.getAllByRole("checkbox")) await user.click(box);
@@ -328,6 +336,7 @@ describe("Admin Assign page — Final Review checklist", () => {
     render(<AdminAssessmentAssignPage />);
 
     await selectPaperAndBatch(user);
+    await user.type(screen.getByLabelText("Global start time"), "2026-09-01T09:00");
     await user.type(screen.getByLabelText("Global expire time"), "2026-09-01T10:00");
     await screen.findByText("Final Review");
 
@@ -351,7 +360,7 @@ describe("Admin Assign page — Final Review checklist", () => {
   it("an existing assignment's Mock Test toolbar button starts a trial for that assignment's paper", async () => {
     const ASSIGNMENT = {
       id: "assign-9", paper: "paper-1", paper_title: "MOCK TEST 2", batch_id: "batch-1", institution_id: "inst-1",
-      global_start_time: null, global_expire_time: "2026-09-01T10:00:00Z",
+      global_start_time: "2026-09-01T09:00:00Z", global_expire_time: "2026-09-01T10:00:00Z",
       exam_duration_minutes: 45, pass_cutoff_percentage: 40, show_result_to_student: true,
       departments: [], status: "CLOSED", created_by: "admin-1",
       created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",

@@ -2,7 +2,8 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { PlayCircle, StopCircle, RefreshCcw, Users, Clock, CheckCircle2, FileText, TrendingUp, LayoutDashboard, ChevronDown, AlertTriangle, FlaskConical } from "lucide-react";
+import axios from "axios";
+import { PlayCircle, StopCircle, RefreshCcw, Users, Clock, CheckCircle2, FileText, TrendingUp, LayoutDashboard, ChevronDown, AlertTriangle, FlaskConical, Pencil } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -10,6 +11,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { Modal } from "@/components/ui/Modal";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toast";
 import { useAuth } from "@/hooks/useAuth";
@@ -27,6 +29,18 @@ interface PaperReviewDetail {
 function formatReviewDateTime(value: string): string {
   const d = new Date(value);
   return isNaN(d.getTime()) ? value : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+// `<input type="datetime-local">` wants "YYYY-MM-DDTHH:mm" in the browser's
+// own local time, with no timezone suffix — not the ISO string the API
+// returns. Used only to pre-populate the Edit form from an existing
+// assignment's current values; the reverse (local -> ISO) already happens
+// at submit time via `new Date(value).toISOString()`, same as the create form.
+function toDatetimeLocalValue(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 const STATUS_STYLES: Record<string, { bg: string; color: string; label: string }> = {
@@ -181,9 +195,31 @@ export default function AdminAssessmentAssignPage() {
   }, [batchId, selectedDepartments]);
 
   const [confirmStart, setConfirmStart] = useState<BatchAssignment | null>(null);
+  // Set only when a Start-Exam attempt comes back with the backend's 409
+  // START_TIME_NOT_REACHED — swaps the confirmStart dialog's content into
+  // the early-override warning (checkbox + "scheduled for ..." detail)
+  // instead of opening a second dialog. Cleared whenever confirmStart
+  // closes or a fresh Start click is made.
+  const [startBlocked, setStartBlocked] = useState<{ scheduledStartTime: string } | null>(null);
+  const [earlyStartAck, setEarlyStartAck] = useState(false);
   const [confirmClose, setConfirmClose] = useState<BatchAssignment | null>(null);
   const [actingOn, setActingOn] = useState<string | null>(null);
   const [resyncingId, setResyncingId] = useState<string | null>(null);
+
+  // Edit (Task — mandatory start time / auto-start / edit panel, added
+  // 2026-11-12) — only reachable while an assignment is still SCHEDULED
+  // (enforced again server-side by AdminAssignmentDetailView.patch, this is
+  // just the UI gate). paper/batch_id are intentionally not editable here —
+  // they're locked at creation (AdminAssignmentDetailView._LOCKED_EDIT_FIELDS).
+  const [editingAssignment, setEditingAssignment] = useState<BatchAssignment | null>(null);
+  const [editDepartments, setEditDepartments] = useState<string[]>([]);
+  const [editDuration, setEditDuration] = useState("");
+  const [editStartTime, setEditStartTime] = useState("");
+  const [editExpireTime, setEditExpireTime] = useState("");
+  const [editPassCutoff, setEditPassCutoff] = useState("");
+  const [editShowResult, setEditShowResult] = useState(true);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState("");
 
   // Papers + batches — the two dropdown sources — loaded once. Papers is
   // filtered to ones this admin can actually assign (faculty-privacy
@@ -268,6 +304,7 @@ export default function AdminAssessmentAssignPage() {
     setFormError("");
     if (!paperId) { setFormError("Select a question paper."); return; }
     if (!batchId) { setFormError("Select a batch."); return; }
+    if (!startTime) { setFormError("Global start time is required."); return; }
     if (!expireTime) { setFormError("Global expire time is required."); return; }
     const durationNum = Number(duration);
     if (!durationNum || durationNum <= 0) { setFormError("Exam duration must be a positive number of minutes."); return; }
@@ -275,13 +312,13 @@ export default function AdminAssessmentAssignPage() {
     const payload: Record<string, unknown> = {
       paper: paperId,
       batch_id: batchId,
+      global_start_time: new Date(startTime).toISOString(),
       global_expire_time: new Date(expireTime).toISOString(),
       exam_duration_minutes: durationNum,
       pass_cutoff_percentage: Number(passCutoff) || 40,
       show_result_to_student: showResult,
       departments: selectedDepartments,
     };
-    if (startTime) payload.global_start_time = new Date(startTime).toISOString();
 
     setCreating(true);
     try {
@@ -297,17 +334,33 @@ export default function AdminAssessmentAssignPage() {
     }
   }
 
-  async function handleStart(assignment: BatchAssignment) {
+  async function handleStart(assignment: BatchAssignment, confirmEarly = false) {
     setActingOn(assignment.id);
     try {
-      const res = await api.patch<ApiSuccess<BatchAssignment>>(`/assessments/admin/assignments/${assignment.id}/start/`);
+      const res = await api.patch<ApiSuccess<BatchAssignment>>(
+        `/assessments/admin/assignments/${assignment.id}/start/`,
+        confirmEarly ? { confirm_early_start: true } : undefined,
+      );
       setAssignments(prev => prev.map(a => a.id === assignment.id ? res.data.data : a));
       toast.success("Exam started — the global timer is now live.");
+      setConfirmStart(null);
+      setStartBlocked(null);
+      setEarlyStartAck(false);
     } catch (err) {
-      toast.error(getErrorMessage(err));
+      // The backend's one deliberate "this isn't a hard failure, it's a
+      // required second confirmation" response (AdminAssignmentStartView,
+      // views.py) — swap the same dialog into its early-override variant
+      // instead of toasting a generic error. Any other error (network,
+      // already closed, etc.) falls through to the normal toast below.
+      const errors = axios.isAxiosError(err) ? err.response?.data?.errors : undefined;
+      if (errors?.code === "START_TIME_NOT_REACHED" && errors?.scheduled_start_time) {
+        setStartBlocked({ scheduledStartTime: errors.scheduled_start_time });
+        setEarlyStartAck(false);
+      } else {
+        toast.error(getErrorMessage(err));
+      }
     } finally {
       setActingOn(null);
-      setConfirmStart(null);
     }
   }
 
@@ -350,6 +403,69 @@ export default function AdminAssessmentAssignPage() {
     setSelectedDepartments(prev =>
       prev.includes(dept) ? prev.filter(d => d !== dept) : [...prev, dept]
     );
+  }
+
+  function toggleEditDepartment(dept: string) {
+    setEditDepartments(prev =>
+      prev.includes(dept) ? prev.filter(d => d !== dept) : [...prev, dept]
+    );
+  }
+
+  // Opens the Edit panel pre-populated from the assignment's current
+  // values. Only ever called for a SCHEDULED assignment (the Edit button
+  // itself is hidden otherwise) — AdminAssignmentDetailView.patch enforces
+  // the same gate server-side regardless.
+  function openEditModal(assignment: BatchAssignment) {
+    setEditingAssignment(assignment);
+    setEditDepartments(assignment.departments);
+    setEditDuration(String(assignment.exam_duration_minutes));
+    setEditStartTime(toDatetimeLocalValue(assignment.global_start_time));
+    setEditExpireTime(toDatetimeLocalValue(assignment.global_expire_time));
+    setEditPassCutoff(String(assignment.pass_cutoff_percentage));
+    setEditShowResult(assignment.show_result_to_student);
+    setEditError("");
+  }
+
+  function closeEditModal() {
+    setEditingAssignment(null);
+    setEditError("");
+  }
+
+  async function handleSaveEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editingAssignment) return;
+    setEditError("");
+    if (!editStartTime) { setEditError("Global start time is required."); return; }
+    if (!editExpireTime) { setEditError("Global expire time is required."); return; }
+    const durationNum = Number(editDuration);
+    if (!durationNum || durationNum <= 0) { setEditError("Exam duration must be a positive number of minutes."); return; }
+
+    setEditSaving(true);
+    try {
+      const res = await api.patch<ApiSuccess<BatchAssignment & { new_allocations?: number }>>(
+        `/assessments/admin/assignments/${editingAssignment.id}/`,
+        {
+          global_start_time: new Date(editStartTime).toISOString(),
+          global_expire_time: new Date(editExpireTime).toISOString(),
+          exam_duration_minutes: durationNum,
+          pass_cutoff_percentage: Number(editPassCutoff) || 40,
+          show_result_to_student: editShowResult,
+          departments: editDepartments,
+        },
+      );
+      setAssignments(prev => prev.map(a => a.id === editingAssignment.id ? res.data.data : a));
+      const newAllocations = res.data.data.new_allocations;
+      toast.success(
+        newAllocations !== undefined
+          ? `Assignment updated — ${newAllocations} new student(s) allocated.`
+          : "Assignment updated."
+      );
+      closeEditModal();
+    } catch (err) {
+      setEditError(getErrorMessage(err));
+    } finally {
+      setEditSaving(false);
+    }
   }
 
   // The 10-item Final Review checklist — order follows the data's own
@@ -403,7 +519,10 @@ export default function AdminAssessmentAssignPage() {
       id: "timer", label: "Global timer",
       // Same "  ·  " separator as the per-set rows above — was "|" here,
       // which read as an inconsistent second style in the same checklist.
-      value: `Start: ${startTime ? formatReviewDateTime(startTime) : "not set — begins immediately once you start the exam"}  ·  Expire: ${expireTime ? formatReviewDateTime(expireTime) : "not set"}`,
+      // Start is mandatory (2026-11-12) so it's always set by the time this
+      // checklist renders — no "not set" fallback needed for it anymore,
+      // unlike expire which theoretically could still be empty mid-typing.
+      value: `Start: ${startTime ? formatReviewDateTime(startTime) : "Not set"}  ·  Expire: ${expireTime ? formatReviewDateTime(expireTime) : "Not set"}`,
     },
     {
       id: "cutoff", label: "Pass cutoff",
@@ -415,7 +534,7 @@ export default function AdminAssessmentAssignPage() {
     },
   ] : [];
   const allReviewed = reviewItems.length > 0 && reviewItems.every(item => reviewed[item.id]);
-  const canSubmit = !!paperId && !!batchId && !!expireTime && Number(duration) > 0 && allReviewed;
+  const canSubmit = !!paperId && !!batchId && !!startTime && !!expireTime && Number(duration) > 0 && allReviewed;
 
   return (
     <AdminLayout>
@@ -565,7 +684,7 @@ export default function AdminAssessmentAssignPage() {
                 onChange={e => setDuration(e.target.value)}
               />
               <Input
-                label="Global start time (optional)"
+                label="Global start time"
                 type="datetime-local"
                 value={startTime}
                 onChange={e => setStartTime(e.target.value)}
@@ -794,9 +913,18 @@ export default function AdminAssessmentAssignPage() {
                       </Button>
                       {a.status === "SCHEDULED" && (
                         <Button
+                          variant="secondary" size="sm"
+                          leftIcon={<Pencil size={13} />}
+                          onClick={() => openEditModal(a)}
+                        >
+                          Edit
+                        </Button>
+                      )}
+                      {a.status === "SCHEDULED" && (
+                        <Button
                           variant="success" size="sm"
                           leftIcon={<PlayCircle size={13} />}
-                          onClick={() => setConfirmStart(a)}
+                          onClick={() => { setStartBlocked(null); setEarlyStartAck(false); setConfirmStart(a); }}
                         >
                           Start Exam
                         </Button>
@@ -819,16 +947,41 @@ export default function AdminAssessmentAssignPage() {
         )}
       </PageWrapper>
 
+      {/* Two different dialogs sharing one open/close lifecycle (confirmStart):
+          the plain "start now" confirm, or — once a first attempt comes back
+          409 START_TIME_NOT_REACHED (handleStart, above) — the early-override
+          warning with its required checkbox. Swapping content in place here
+          (rather than a second dialog) means the admin never sees the dialog
+          flicker closed and reopen between the two. */}
       <ConfirmDialog
         isOpen={!!confirmStart}
-        onClose={() => setConfirmStart(null)}
-        onConfirm={() => confirmStart && handleStart(confirmStart)}
-        title="Start exam now?"
-        message={`This manually starts the global timer for ${confirmStart ? batchName(confirmStart.batch_id) : ""} right now. Students will be able to begin the exam immediately. This cannot be undone.`}
-        confirmLabel="Start Exam"
+        onClose={() => { setConfirmStart(null); setStartBlocked(null); setEarlyStartAck(false); }}
+        onConfirm={() => confirmStart && handleStart(confirmStart, !!startBlocked)}
+        title={startBlocked ? "Start time not reached yet" : "Start exam now?"}
+        message={
+          startBlocked
+            ? `${confirmStart ? batchName(confirmStart.batch_id) : ""} is scheduled to start at ${formatReviewDateTime(startBlocked.scheduledStartTime)}, which hasn't arrived yet. Starting now overrides the scheduled start time — it has no effect on the expire time, but the exam will go live immediately for students. This cannot be undone.`
+            : `This manually starts the global timer for ${confirmStart ? batchName(confirmStart.batch_id) : ""} right now. Students will be able to begin the exam immediately. This cannot be undone.`
+        }
+        confirmLabel={startBlocked ? "Confirm Early Start" : "Start Exam"}
         confirmVariant="warning"
+        confirmDisabled={!!startBlocked && !earlyStartAck}
         loading={actingOn === confirmStart?.id}
-      />
+      >
+        {startBlocked && (
+          <label className="flex items-start gap-2.5 mt-4 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={earlyStartAck}
+              onChange={e => setEarlyStartAck(e.target.checked)}
+              className="mt-0.5 cursor-pointer"
+            />
+            <span className="text-sm" style={{ color: "var(--color-text)" }}>
+              I understand this overrides the scheduled start time and will make the exam immediately live for students.
+            </span>
+          </label>
+        )}
+      </ConfirmDialog>
 
       <ConfirmDialog
         isOpen={!!confirmClose}
@@ -840,6 +993,133 @@ export default function AdminAssessmentAssignPage() {
         confirmVariant="danger"
         loading={actingOn === confirmClose?.id}
       />
+
+      <Modal
+        isOpen={!!editingAssignment}
+        onClose={closeEditModal}
+        title={editingAssignment ? `Edit — ${batchName(editingAssignment.batch_id)}` : "Edit assignment"}
+        maxWidth="lg"
+        disableBackdropClose
+      >
+        {editingAssignment && (
+          <form onSubmit={handleSaveEdit} className="space-y-4">
+            <p className="text-xs" style={{ color: "var(--color-text-subtle)" }}>
+              {editingAssignment.paper_title} — question paper and batch can't be changed here; this assignment would need to be closed and a new one created for that.
+            </p>
+
+            <div>
+              <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--color-text-muted)" }}>
+                Departments (leave all unchecked to include every department in the batch)
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {activeDepartments.map(d => {
+                  const active = editDepartments.includes(d.code);
+                  return (
+                    <button
+                      key={d.id}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => toggleEditDepartment(d.code)}
+                      className="px-3 py-1.5 rounded-full text-xs font-semibold transition-colors cursor-pointer"
+                      style={active
+                        ? { background: "var(--color-accent)", color: "#fff", border: "1px solid var(--color-accent)" }
+                        : { background: "var(--color-surface)", color: "var(--color-text-muted)", border: "1px solid var(--color-border)" }
+                      }
+                    >
+                      {d.name || d.code}
+                    </button>
+                  );
+                })}
+              </div>
+              {editDepartments.length > 0 && (
+                <p className="text-xs mt-1.5" style={{ color: "var(--color-text-subtle)" }}>
+                  Changing departments re-runs the roster snapshot — newly-matching students are added; students already allocated are never removed.
+                </p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              {/* Explicit ids — the create form above (collapsed, but still
+                  mounted) uses the same labels, and Input auto-derives an id
+                  from the label text when none is given, which would
+                  otherwise collide with it. */}
+              <Input
+                id="edit-exam-duration"
+                label="Exam duration (minutes)"
+                type="number"
+                min={1}
+                value={editDuration}
+                onChange={e => setEditDuration(e.target.value)}
+              />
+              <Input
+                id="edit-global-start-time"
+                label="Global start time"
+                type="datetime-local"
+                value={editStartTime}
+                onChange={e => setEditStartTime(e.target.value)}
+              />
+              <Input
+                id="edit-global-expire-time"
+                label="Global expire time"
+                type="datetime-local"
+                value={editExpireTime}
+                onChange={e => setEditExpireTime(e.target.value)}
+              />
+            </div>
+
+            <div className="flex items-end gap-6 flex-wrap">
+              <Input
+                id="edit-pass-cutoff"
+                label="Pass cutoff (%)"
+                type="number"
+                min={0}
+                max={100}
+                value={editPassCutoff}
+                onChange={e => setEditPassCutoff(e.target.value)}
+                className="max-w-[160px]"
+              />
+              <div>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--color-text-muted)" }}>
+                  Show result to student after submission
+                </label>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={editShowResult}
+                  onClick={() => setEditShowResult(v => !v)}
+                  className="h-9 inline-flex items-center gap-2.5 cursor-pointer"
+                >
+                  <span
+                    className="relative inline-flex h-5 w-10 shrink-0 items-center rounded-full transition-colors"
+                    style={{ background: editShowResult ? "#16A34A" : "var(--color-border-strong)" }}
+                  >
+                    <span
+                      className="inline-block h-4 w-4 rounded-full bg-white shadow transition-transform"
+                      style={{ transform: editShowResult ? "translateX(21px)" : "translateX(3px)" }}
+                    />
+                  </span>
+                  <span className="text-sm font-semibold" style={{ color: editShowResult ? "#16A34A" : "var(--color-text-muted)" }}>
+                    {editShowResult ? "On" : "Off"}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {editError && (
+              <p className="text-xs" style={{ color: "var(--color-danger)" }}>{editError}</p>
+            )}
+
+            <div className="flex justify-end gap-3 pt-2">
+              <Button type="button" variant="secondary" onClick={closeEditModal} disabled={editSaving}>
+                Cancel
+              </Button>
+              <Button type="submit" loading={editSaving}>
+                Save changes
+              </Button>
+            </div>
+          </form>
+        )}
+      </Modal>
     </AdminLayout>
   );
 }

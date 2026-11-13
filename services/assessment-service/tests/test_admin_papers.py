@@ -310,6 +310,7 @@ class TestLockedPaperBlocksEveryMutation:
         payload = {
             "paper": str(paper_chain["paper"].id),
             "batch_id": str(_uuid.uuid4()),
+            "global_start_time": (timezone.now() + timedelta(minutes=5)).isoformat(),
             "global_expire_time": (timezone.now() + timedelta(hours=3)).isoformat(),
             "exam_duration_minutes": 60,
         }

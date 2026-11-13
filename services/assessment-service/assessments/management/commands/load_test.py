@@ -241,6 +241,7 @@ class Command(BaseCommand):
 
         assignment = BatchAssignment.objects.create(
             paper=paper, batch_id=LOAD_TEST_BATCH_ID, institution_id=LOAD_TEST_INSTITUTION_ID,
+            global_start_time=timezone.now() - timedelta(minutes=1),
             global_expire_time=timezone.now() + timedelta(hours=3),
             exam_duration_minutes=60, created_by=LOAD_TEST_ADMIN_ID, status=ASSIGNMENT_STATUS_LIVE,
         )

@@ -10,7 +10,10 @@ from assessments.models import (
     ASSIGNMENT_STATUS_SCHEDULED, SESSION_STATUS_IN_PROGRESS,
     SESSION_STATUS_AUTO_SUBMITTED, SESSION_STATUS_SUBMITTED,
 )
-from assessments.tasks import sweep_expired_assignments, sweep_expired_sessions, purge_old_activity_logs
+from assessments.tasks import (
+    sweep_scheduled_assignments_to_live, sweep_expired_assignments, sweep_expired_sessions,
+    purge_old_activity_logs,
+)
 
 from .conftest import INSTITUTION_A, ADMIN_USER_ID
 
@@ -29,12 +32,76 @@ def paper_with_set(db):
 def _assignment(paper, **overrides):
     defaults = dict(
         paper=paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+        global_start_time=timezone.now() - timedelta(minutes=1),
         global_expire_time=timezone.now() + timedelta(hours=3),
         exam_duration_minutes=60, created_by=ADMIN_USER_ID,
         status=ASSIGNMENT_STATUS_LIVE,
     )
     defaults.update(overrides)
     return BatchAssignment.objects.create(**defaults)
+
+
+class TestSweepScheduledAssignmentsToLive:
+    def test_starts_scheduled_assignment_past_its_start_time(self, paper_with_set):
+        paper, _ = paper_with_set
+        assignment = _assignment(
+            paper, status=ASSIGNMENT_STATUS_SCHEDULED,
+            global_start_time=timezone.now() - timedelta(minutes=1),
+        )
+
+        result = sweep_scheduled_assignments_to_live()
+
+        assert result["started"] == 1
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_LIVE
+
+    def test_does_not_touch_assignment_before_its_start_time(self, paper_with_set):
+        paper, _ = paper_with_set
+        assignment = _assignment(
+            paper, status=ASSIGNMENT_STATUS_SCHEDULED,
+            global_start_time=timezone.now() + timedelta(hours=1),
+        )
+
+        sweep_scheduled_assignments_to_live()
+
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_SCHEDULED
+
+    def test_does_not_touch_already_live_assignment(self, paper_with_set):
+        paper, _ = paper_with_set
+        assignment = _assignment(
+            paper, status=ASSIGNMENT_STATUS_LIVE,
+            global_start_time=timezone.now() - timedelta(minutes=1),
+        )
+
+        result = sweep_scheduled_assignments_to_live()
+
+        assert result["started"] == 0
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_LIVE
+
+    def test_idempotent_second_sweep_is_noop(self, paper_with_set):
+        paper, _ = paper_with_set
+        _assignment(
+            paper, status=ASSIGNMENT_STATUS_SCHEDULED,
+            global_start_time=timezone.now() - timedelta(minutes=1),
+        )
+
+        first = sweep_scheduled_assignments_to_live()
+        second = sweep_scheduled_assignments_to_live()
+
+        assert first["started"] == 1
+        assert second["started"] == 0
+
+    def test_never_touches_global_start_time_itself(self, paper_with_set):
+        paper, _ = paper_with_set
+        original = timezone.now() - timedelta(minutes=1)
+        assignment = _assignment(paper, status=ASSIGNMENT_STATUS_SCHEDULED, global_start_time=original)
+
+        sweep_scheduled_assignments_to_live()
+
+        assignment.refresh_from_db()
+        assert abs((assignment.global_start_time - original).total_seconds()) < 1
 
 
 class TestSweepExpiredAssignments:
@@ -240,10 +307,12 @@ class TestDeadLetteringTaskOnFailure:
         with patch("assessments.models.FailedJob.objects.create", side_effect=RuntimeError("DB also down")):
             task.on_failure(RuntimeError("original failure"), "tid", [], {}, "tb")  # must not raise
 
-    def test_both_sweep_tasks_use_dead_lettering_base_with_matching_max_retries(self, db):
+    def test_all_sweep_tasks_use_dead_lettering_base_with_matching_max_retries(self, db):
         from assessments.tasks import DeadLetteringTask, _MAX_RETRIES
+        assert isinstance(sweep_scheduled_assignments_to_live, DeadLetteringTask)
         assert isinstance(sweep_expired_assignments, DeadLetteringTask)
         assert isinstance(sweep_expired_sessions, DeadLetteringTask)
+        assert sweep_scheduled_assignments_to_live.max_retries == _MAX_RETRIES
         assert sweep_expired_assignments.max_retries == _MAX_RETRIES
         assert sweep_expired_sessions.max_retries == _MAX_RETRIES
 

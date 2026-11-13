@@ -1020,6 +1020,73 @@ class AdminAssignmentDetailView(APIView):
         assignment = get_object_or_404(BatchAssignment, pk=pk, institution_id=institution_id)
         return success_response(data=BatchAssignmentSerializer(assignment).data)
 
+    # Fields from BatchAssignmentSerializer that identify WHICH paper/batch
+    # this assignment is, rather than configuring how/when it runs. Never
+    # editable here: swapping either post-creation isn't a field edit, it's
+    # structurally a different assignment — the paper's own readiness
+    # checks, the batch's roster snapshot, and every already-allocated
+    # StudentSetAllocation row are all keyed off whichever paper/batch were
+    # locked in at creation. Rejected explicitly (400, named in the error)
+    # rather than silently dropped, so a client sending them finds out why
+    # nothing happened instead of being quietly ignored.
+    _LOCKED_EDIT_FIELDS = ("paper", "batch_id")
+
+    def patch(self, request, pk):
+        institution_id = _get_institution_id(request)
+        assignment = get_object_or_404(BatchAssignment, pk=pk, institution_id=institution_id)
+
+        # Editable only while SCHEDULED — not yet live, by either path (a
+        # manual Start click or the auto-start sweep), and not yet closed.
+        # Matches this exact assignment's own lifecycle rather than "has
+        # any student started writing": the user's own requirement is that
+        # LIVE blocks editing even with zero students in it yet, since LIVE
+        # is the moment this assignment's terms became binding, not the
+        # moment someone first acted on them.
+        if assignment.status != ASSIGNMENT_STATUS_SCHEDULED:
+            return error_response(
+                "This assignment is already live or closed and can no longer be edited.",
+                status_code=403,
+            )
+
+        locked_fields_sent = [f for f in self._LOCKED_EDIT_FIELDS if f in request.data]
+        if locked_fields_sent:
+            return error_response(
+                f"{' and '.join(locked_fields_sent)} cannot be changed after an assignment is created.",
+                status_code=400,
+            )
+
+        departments_before = list(assignment.departments)
+        s = BatchAssignmentSerializer(assignment, data=request.data, partial=True)
+        if not s.is_valid():
+            return error_response("Validation failed", errors=s.errors, status_code=400)
+        s.save()
+
+        # departments changing is only a real, effective edit if the
+        # roster snapshot is re-run against the new filter — otherwise an
+        # admin narrowing/widening departments here would see the field
+        # value change with no actual effect on who's allocated, which is
+        # a worse outcome than refusing the edit outright. Reuses the exact
+        # same primitive AdminAssignmentResyncRosterView already calls for
+        # the equivalent "re-check the roster" action — additive only
+        # (matches that view's own established, already-shipped behavior):
+        # newly-matching students are allocated, students already
+        # allocated under the old filter are not retroactively removed.
+        new_allocations = None
+        if list(assignment.departments) != departments_before:
+            auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+            try:
+                new_allocations = snapshot_roster_and_allocate(assignment, auth_header)
+            except RuntimeError as exc:
+                return error_response(
+                    f"Assignment updated, but could not resync the roster for the new departments: {exc}",
+                    status_code=502,
+                )
+
+        data = BatchAssignmentSerializer(assignment).data
+        if new_allocations is not None:
+            data["new_allocations"] = new_allocations
+        return success_response(data=data, message="Assignment updated")
+
 
 class AdminAssignmentStartView(APIView):
     permission_classes = [IsAdminUser]
@@ -1036,15 +1103,40 @@ class AdminAssignmentStartView(APIView):
         # moment that assignment exists, so nothing can have regressed by
         # the time Start Exam is clicked. No separate is_published gate here.
 
+        # Early-start confirmation (added 2026-11-12, user decision):
+        # global_start_time is now mandatory and drives the auto-start
+        # sweep (sweep_scheduled_assignments_to_live, tasks.py) — clicking
+        # Start before that moment arrives is a deliberate override, not
+        # the normal path, so it requires an explicit second confirmation
+        # from the client rather than silently honoring it. Checked BEFORE
+        # the conditional UPDATE below so a request that fails this check
+        # never touches the row at all. Only relevant while still
+        # SCHEDULED — if another request already moved it past that
+        # (closed, or started by someone else between page-load and this
+        # click), the usual `updated=0` handling below reports the real
+        # current state instead of this early/not-early question.
+        if (
+            assignment.status == ASSIGNMENT_STATUS_SCHEDULED
+            and timezone.now() < assignment.global_start_time
+            and not request.data.get("confirm_early_start")
+        ):
+            return error_response(
+                "This assignment's scheduled start time hasn't been reached yet.",
+                errors={"code": "START_TIME_NOT_REACHED", "scheduled_start_time": assignment.global_start_time},
+                status_code=409,
+            )
+
         # Conditional UPDATE ... WHERE status=SCHEDULED — race-safe against
         # concurrent Start clicks: only the request that actually flips the
         # row wins, the other sees updated=0 and reports the resulting state.
+        # global_start_time itself is never touched here (changed
+        # 2026-11-12) — it's the admin's own declared schedule, not a log
+        # of when Start was actually clicked; starting early via the
+        # override above, or late after the scheduled moment already
+        # passed, both leave it exactly as defined.
         updated = BatchAssignment.objects.filter(
             pk=assignment.pk, status=ASSIGNMENT_STATUS_SCHEDULED,
-        ).update(
-            status=ASSIGNMENT_STATUS_LIVE,
-            global_start_time=assignment.global_start_time or timezone.now(),
-        )
+        ).update(status=ASSIGNMENT_STATUS_LIVE)
         assignment.refresh_from_db()
 
         if not updated:
@@ -1081,6 +1173,55 @@ class AdminAssignmentCloseView(APIView):
         return success_response(
             data={**BatchAssignmentSerializer(assignment).data, "sessions_auto_submitted": auto_submitted},
             message="Assignment closed",
+        )
+
+
+class AdminAssignmentPublishResultsView(APIView):
+    """PATCH /api/assessments/admin/assignments/<pk>/publish-results/ — for
+    an assignment created with show_result_to_student=False, makes results
+    visible to students from this point on. One-directional by design (no
+    un-publish here) — same institution-wide admin access as every other
+    assignment-lifecycle action on this model (start/close/status/extend),
+    not owner-gated like paper-content edits (see _require_paper_owner's
+    own docstring: "Results/Analytics/Dashboard stay institution-wide").
+
+    Deliberately does nothing beyond flipping these two fields. Every place
+    that decides whether a student can see their own score already reads
+    show_result_to_student fresh from the DB on every request — never a
+    value frozen at submission time (StudentSubmitView.post) or cached
+    anywhere (StudentResultsView.get, both confirmed by reading those views
+    before writing this) — so this one write is already correct for every
+    timing case a real classroom produces without any further code: a
+    student who already finished sees it next time they open their results;
+    one mid-exam right now sees it the moment they finish, same as if the
+    assignment had been created this way from the start; one who hasn't
+    started yet is no different from either of those. No per-student/per-
+    session state to create, migrate, or keep in sync — the existing reads
+    already do the right thing once this one row changes."""
+    permission_classes = [IsAdminUser]
+
+    def patch(self, request, pk):
+        institution_id = _get_institution_id(request)
+        assignment = get_object_or_404(BatchAssignment, pk=pk, institution_id=institution_id)
+
+        if assignment.show_result_to_student:
+            # Idempotent: already visible, either published earlier (don't
+            # clobber the original results_published_at with a new click's
+            # timestamp) or visible since creation (results_published_at
+            # correctly stays null — "never explicitly published" is still
+            # true even though results have always been visible).
+            return success_response(
+                data=BatchAssignmentSerializer(assignment).data,
+                message="Results are already visible to students.",
+            )
+
+        BatchAssignment.objects.filter(pk=assignment.pk).update(
+            show_result_to_student=True, results_published_at=timezone.now(),
+        )
+        assignment.refresh_from_db()
+        return success_response(
+            data=BatchAssignmentSerializer(assignment).data,
+            message="Results published — visible to students now.",
         )
 
 

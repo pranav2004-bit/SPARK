@@ -205,6 +205,7 @@ class TestTrialIsolationFromRealData:
     def _payload(self, paper):
         return {
             "paper": str(paper.id), "batch_id": str(uuid.uuid4()),
+            "global_start_time": (timezone.now() + timedelta(minutes=5)).isoformat(),
             "global_expire_time": (timezone.now() + timedelta(hours=3)).isoformat(),
             "exam_duration_minutes": 60,
         }
@@ -227,6 +228,7 @@ class TestTrialIsolationFromRealData:
         p = paper_with_question
         assignment = BatchAssignment.objects.create(
             paper=p["paper"], batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() - timedelta(minutes=1),
             global_expire_time=timezone.now() + timedelta(hours=3),
             exam_duration_minutes=60, created_by=ADMIN_USER_ID, status=ASSIGNMENT_STATUS_LIVE,
         )
