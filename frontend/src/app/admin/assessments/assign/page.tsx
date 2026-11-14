@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import axios from "axios";
-import { PlayCircle, StopCircle, RefreshCcw, Users, Clock, CheckCircle2, FileText, TrendingUp, LayoutDashboard, ChevronDown, AlertTriangle, FlaskConical, Pencil, Trash2 } from "lucide-react";
+import { PlayCircle, StopCircle, RefreshCcw, RotateCcw, Users, Clock, User, FileText, TrendingUp, LayoutDashboard, ChevronDown, AlertTriangle, FlaskConical, Pencil, Trash2 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -300,6 +300,20 @@ export default function AdminAssessmentAssignPage() {
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState("");
 
+  // Reopen (added 2026-11-14, user decision) — brings a CLOSED assignment
+  // back online with a new start/expire window, for students who were
+  // absent the first time. Reuses the SAME assignment row (never creates
+  // a second one) — students who already have a session under it (the
+  // ones who already attempted) are naturally blocked from a second try
+  // by the backend's existing resume-first logic, no extra UI needed for
+  // that. Only ever reachable while status is CLOSED, mirroring
+  // AdminAssignmentReopenView's own server-side gate.
+  const [reopeningAssignment, setReopeningAssignment] = useState<BatchAssignment | null>(null);
+  const [reopenStartTime, setReopenStartTime] = useState("");
+  const [reopenExpireTime, setReopenExpireTime] = useState("");
+  const [reopenSaving, setReopenSaving] = useState(false);
+  const [reopenError, setReopenError] = useState("");
+
   // Papers + batches — the two dropdown sources — loaded once. Papers is
   // filtered to ones this admin can actually assign (faculty-privacy
   // restriction: assigning is creator-only, same as opening/editing a
@@ -594,6 +608,47 @@ export default function AdminAssessmentAssignPage() {
       setEditError(getErrorMessage(err));
     } finally {
       setEditSaving(false);
+    }
+  }
+
+  // Opens with blank times — the old ones already passed (that's why this
+  // is CLOSED), so there's no sensible "current value" to pre-fill, unlike
+  // the Edit modal above.
+  function openReopenModal(assignment: BatchAssignment) {
+    setReopeningAssignment(assignment);
+    setReopenStartTime("");
+    setReopenExpireTime("");
+    setReopenError("");
+  }
+
+  function closeReopenModal() {
+    setReopeningAssignment(null);
+    setReopenError("");
+  }
+
+  async function handleReopen(e: React.FormEvent) {
+    e.preventDefault();
+    if (!reopeningAssignment) return;
+    setReopenError("");
+    if (!reopenStartTime) { setReopenError("New global start time is required."); return; }
+    if (!reopenExpireTime) { setReopenError("New global expire time is required."); return; }
+
+    setReopenSaving(true);
+    try {
+      const res = await api.patch<ApiSuccess<BatchAssignment>>(
+        `/assessments/admin/assignments/${reopeningAssignment.id}/reopen/`,
+        {
+          global_start_time: new Date(reopenStartTime).toISOString(),
+          global_expire_time: new Date(reopenExpireTime).toISOString(),
+        },
+      );
+      setAssignments(prev => prev.map(a => a.id === reopeningAssignment.id ? res.data.data : a));
+      toast.success("Assignment reopened — students who haven't attempted it yet can access it again.");
+      closeReopenModal();
+    } catch (err) {
+      setReopenError(getErrorMessage(err));
+    } finally {
+      setReopenSaving(false);
     }
   }
 
@@ -989,7 +1044,7 @@ export default function AdminAssessmentAssignPage() {
                     <div>
                       <div className="flex items-center gap-2 mb-1">
                         <StatusBadge status={poll?.status ?? a.status} />
-                        <span className="text-sm font-medium" style={{ color: "var(--color-text)" }}>{batchName(a.batch_id)}</span>
+                        <span className="text-sm font-medium" style={{ color: "var(--color-text)" }}>{a.paper_title}</span>
                       </div>
                       <p className="text-xs flex items-center gap-3 flex-wrap" style={{ color: "var(--color-text-subtle)" }}>
                         <span className="flex items-center gap-1"><Clock size={11} /> {a.exam_duration_minutes} min</span>
@@ -1001,7 +1056,7 @@ export default function AdminAssessmentAssignPage() {
                               : `${poll.student_count_total} allocated`
                           ) : "…"}
                         </span>
-                        <span className="flex items-center gap-1"><CheckCircle2 size={11} /> cutoff {a.pass_cutoff_percentage}%</span>
+                        <span className="flex items-center gap-1"><User size={11} /> {a.created_by_name || a.created_by_email || a.created_by}</span>
                         <span>{a.show_result_to_student ? "Results visible to students" : "Results hidden from students"}</span>
                         {a.department_sections.length > 0 && (
                           <span>Departments: {formatDepartmentSections(a.department_sections)}</span>
@@ -1072,6 +1127,15 @@ export default function AdminAssessmentAssignPage() {
                           onClick={() => setConfirmClose(a)}
                         >
                           Close Exam
+                        </Button>
+                      )}
+                      {a.status === "CLOSED" && (
+                        <Button
+                          variant="secondary" size="sm"
+                          leftIcon={<RotateCcw size={13} />}
+                          onClick={() => openReopenModal(a)}
+                        >
+                          Reopen
                         </Button>
                       )}
                       {a.status !== "LIVE" && (
@@ -1281,6 +1345,54 @@ export default function AdminAssessmentAssignPage() {
               </Button>
               <Button type="submit" loading={editSaving}>
                 Save changes
+              </Button>
+            </div>
+          </form>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={!!reopeningAssignment}
+        onClose={closeReopenModal}
+        title={reopeningAssignment ? `Reopen — ${reopeningAssignment.paper_title}` : "Reopen assignment"}
+        maxWidth="sm"
+        disableBackdropClose
+      >
+        {reopeningAssignment && (
+          <form onSubmit={handleReopen} className="space-y-4">
+            <p className="text-xs" style={{ color: "var(--color-text-subtle)" }}>
+              Sets a new start and expire time and brings this exam back online. Students who already took it
+              (completed or auto-submitted) stay blocked from a second attempt — only students who never started
+              it will be able to begin.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Input
+                id="reopen-global-start-time"
+                label="New global start time"
+                type="datetime-local"
+                value={reopenStartTime}
+                onChange={e => setReopenStartTime(e.target.value)}
+              />
+              <Input
+                id="reopen-global-expire-time"
+                label="New global expire time"
+                type="datetime-local"
+                value={reopenExpireTime}
+                onChange={e => setReopenExpireTime(e.target.value)}
+              />
+            </div>
+
+            {reopenError && (
+              <p className="text-xs" style={{ color: "var(--color-danger)" }}>{reopenError}</p>
+            )}
+
+            <div className="flex justify-end gap-3 pt-2">
+              <Button type="button" variant="secondary" onClick={closeReopenModal} disabled={reopenSaving}>
+                Cancel
+              </Button>
+              <Button type="submit" loading={reopenSaving}>
+                Reopen
               </Button>
             </div>
           </form>

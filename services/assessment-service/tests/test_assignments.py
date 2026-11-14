@@ -7,7 +7,9 @@ from django.utils import timezone
 
 from assessments.models import (
     QuestionPaper, QuestionSet, Question, QuestionOption, BatchAssignment, AssessmentSession,
+    StudentSetAllocation,
     ASSIGNMENT_STATUS_SCHEDULED, ASSIGNMENT_STATUS_LIVE, ASSIGNMENT_STATUS_CLOSED,
+    SESSION_STATUS_AUTO_SUBMITTED,
 )
 
 from .conftest import INSTITUTION_A, INSTITUTION_B, ADMIN_USER_ID, STUDENT_USER_ID
@@ -572,6 +574,196 @@ class TestCloseAssignment:
         assert resp.status_code == 403
 
 
+# ── Reopen (added 2026-11-14, user decision) ────────────────────────────────
+# Brings a CLOSED assignment back online with a new start/expire window —
+# for the "N students were absent" case — WITHOUT creating a second
+# assignment row. The key guarantee this whole feature rests on:
+# AssessmentSession's unique_together = ("assignment", "student_id") plus
+# StudentAssignmentStartSessionView's resume-first branch already means a
+# student who attempted under this assignment gets their own terminal
+# session back, never a fresh attempt, the moment they hit Start again —
+# proven directly in test_student_with_existing_terminal_session_is_
+# resumed_not_given_a_fresh_attempt_after_reopen below. A no-show's
+# original StudentSetAllocation is untouched by Close, so they fall
+# straight through to ordinary session creation once reopened — that path
+# is the same one test_student_assignments.py's
+# test_starts_session_when_live already covers for any LIVE assignment,
+# reopened or freshly created; not re-tested here.
+
+class TestReopenAssignment:
+    def _create_direct(self, paper, **overrides):
+        defaults = dict(
+            paper=paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() - timedelta(hours=4),
+            global_expire_time=timezone.now() - timedelta(hours=1),
+            exam_duration_minutes=60, created_by=ADMIN_USER_ID,
+            status=ASSIGNMENT_STATUS_CLOSED,
+        )
+        defaults.update(overrides)
+        return BatchAssignment.objects.create(**defaults)
+
+    def _reopen(self, client, assignment, **time_overrides):
+        payload = {
+            "global_start_time": (timezone.now() + timedelta(minutes=5)).isoformat(),
+            "global_expire_time": (timezone.now() + timedelta(hours=2)).isoformat(),
+        }
+        payload.update(time_overrides)
+        return client.patch(f"/api/assessments/admin/assignments/{assignment.id}/reopen/", payload, format="json")
+
+    def test_reopen_closed_assignment_succeeds_and_sets_scheduled(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        new_start = timezone.now() + timedelta(minutes=10)
+        new_expire = timezone.now() + timedelta(hours=3)
+        resp = self._reopen(
+            admin_client, assignment,
+            global_start_time=new_start.isoformat(), global_expire_time=new_expire.isoformat(),
+        )
+        assert resp.status_code == 200
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_SCHEDULED
+        assert abs((assignment.global_start_time - new_start).total_seconds()) < 1
+        assert abs((assignment.global_expire_time - new_expire).total_seconds()) < 1
+
+    def test_reopen_rejects_scheduled_assignment(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper, status=ASSIGNMENT_STATUS_SCHEDULED)
+        resp = self._reopen(admin_client, assignment)
+        assert resp.status_code == 409
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_SCHEDULED
+
+    def test_reopen_rejects_live_assignment(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper, status=ASSIGNMENT_STATUS_LIVE)
+        resp = self._reopen(admin_client, assignment)
+        assert resp.status_code == 409
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_LIVE
+
+    def test_reopen_rejects_deleted_assignment(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper, is_deleted=True)
+        resp = self._reopen(admin_client, assignment)
+        assert resp.status_code == 403
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_CLOSED
+
+    def test_reopen_requires_both_start_and_expire_time(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        resp = admin_client.patch(
+            f"/api/assessments/admin/assignments/{assignment.id}/reopen/",
+            {"global_start_time": (timezone.now() + timedelta(minutes=5)).isoformat()},
+            format="json",
+        )
+        assert resp.status_code == 400
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_CLOSED
+
+    def test_reopen_rejects_expire_before_start(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        start = timezone.now() + timedelta(hours=2)
+        expire = timezone.now() + timedelta(minutes=5)
+        resp = self._reopen(admin_client, assignment, global_start_time=start.isoformat(), global_expire_time=expire.isoformat())
+        assert resp.status_code == 400
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_CLOSED
+
+    def test_reopen_rejects_expire_in_the_past(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        start = timezone.now() - timedelta(hours=2)
+        expire = timezone.now() - timedelta(minutes=5)
+        resp = self._reopen(admin_client, assignment, global_start_time=start.isoformat(), global_expire_time=expire.isoformat())
+        assert resp.status_code == 400
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_CLOSED
+
+    def test_reopen_rejects_unexpected_fields(self, admin_client, published_paper):
+        # Reopen only ever touches timing — department_sections, duration,
+        # cutoff etc. are the generic edit endpoint's job (SCHEDULED-only),
+        # not this one's.
+        assignment = self._create_direct(published_paper)
+        resp = self._reopen(admin_client, assignment, pass_cutoff_percentage=90)
+        assert resp.status_code == 400
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_CLOSED
+
+    def test_reopen_rejects_when_another_live_assignment_exists_for_same_paper_and_batch(
+        self, admin_client, published_paper,
+    ):
+        batch_id = uuid.uuid4()
+        assignment = self._create_direct(published_paper, batch_id=batch_id)
+        BatchAssignment.objects.create(
+            paper=published_paper, batch_id=batch_id, institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() - timedelta(minutes=1),
+            global_expire_time=timezone.now() + timedelta(hours=3),
+            exam_duration_minutes=60, created_by=ADMIN_USER_ID, status=ASSIGNMENT_STATUS_LIVE,
+        )
+        resp = self._reopen(admin_client, assignment)
+        assert resp.status_code == 409
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_CLOSED
+
+    def test_reopen_does_not_rerun_readiness_blockers(self, admin_client, paper_with_empty_set):
+        # Readiness is checked once at creation time — this directly
+        # created CLOSED assignment bypasses that check (as _create_direct
+        # always does), using a paper whose set has no questions, to prove
+        # reopen doesn't care about paper content at all (it can't have
+        # regressed: QuestionPaper.is_locked() already locks on SCHEDULED,
+        # LIVE, *or* CLOSED).
+        assignment = self._create_direct(paper_with_empty_set)
+        resp = self._reopen(admin_client, assignment)
+        assert resp.status_code == 200
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_SCHEDULED
+
+    def test_non_admin_forbidden(self, student_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        resp = self._reopen(student_client, assignment)
+        assert resp.status_code == 403
+
+    def test_cross_institution_404(self, admin_b_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        resp = self._reopen(admin_b_client, assignment)
+        assert resp.status_code == 404
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_CLOSED
+
+    def test_student_with_existing_terminal_session_is_resumed_not_given_a_fresh_attempt_after_reopen(
+        self, admin_client, student_client, published_paper,
+    ):
+        # The actual point of this feature: a student who already finished
+        # (auto-submitted or submitted) under THIS assignment must never
+        # get a second attempt just because the admin reopened it for the
+        # no-shows. No new "already attempted" check was written for
+        # this — StudentAssignmentStartSessionView's existing resume-first
+        # lookup (by assignment+student_id) already guarantees it.
+        qset = published_paper.sets.first()
+        assignment = self._create_direct(published_paper)
+        StudentSetAllocation.objects.create(assignment=assignment, student_id=STUDENT_USER_ID, set=qset)
+        old_session = AssessmentSession.objects.create(
+            assignment=assignment, student_id=STUDENT_USER_ID, set=qset,
+            paper=published_paper, ends_at=timezone.now() - timedelta(hours=1),
+            status=SESSION_STATUS_AUTO_SUBMITTED,
+        )
+
+        reopen_resp = self._reopen(admin_client, assignment)
+        assert reopen_resp.status_code == 200
+        assignment.refresh_from_db()
+        assert assignment.status == ASSIGNMENT_STATUS_SCHEDULED
+
+        # Flip LIVE the same way the auto-start sweep would, then try to
+        # start again as the same student.
+        BatchAssignment.objects.filter(pk=assignment.pk).update(status=ASSIGNMENT_STATUS_LIVE)
+        resp = student_client.post(f"/api/assessments/student/assignments/{assignment.id}/start-session/")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["message"] == "Session resumed"
+        assert body["data"]["session_id"] == str(old_session.id)
+        assert body["data"]["status"] == SESSION_STATUS_AUTO_SUBMITTED
+        # Still exactly one session for this student under this
+        # assignment — the unique_together constraint was never even
+        # tested, because resume returned before any create was attempted.
+        assert AssessmentSession.objects.filter(assignment=assignment, student_id=STUDENT_USER_ID).count() == 1
+
+
 # ── Resync roster ────────────────────────────────────────────────────────────
 
 class TestResyncRoster:
@@ -789,3 +981,53 @@ class TestAssignmentListAndDetail:
         resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/")
         assert resp.status_code == 200
         assert resp.json()["data"]["id"] == str(assignment.id)
+
+
+class TestAssignmentListCreatorEnrichment:
+    """"Created by <name>" on each assignment card (frontend/admin/
+    assessments/assign/page.tsx) — created_by_name/created_by_email
+    resolved via core.auth_service_client.resolve_user_names, same
+    enrichment pattern as the papers list (TestPaperListCreatorEnrichment,
+    test_admin_papers.py). This is the ASSIGNMENT's own creator, not
+    necessarily the paper's. conftest.py's autouse _mock_resolve_user_names
+    fixture stubs this to {} for every other test in the suite; these tests
+    override it locally to verify the enrichment wiring itself."""
+
+    def _create_direct(self, paper, institution_id=INSTITUTION_A):
+        return BatchAssignment.objects.create(
+            paper=paper, batch_id=uuid.uuid4(), institution_id=institution_id,
+            global_start_time=timezone.now() - timedelta(minutes=1),
+            global_expire_time=timezone.now() + timedelta(hours=3),
+            exam_duration_minutes=60, created_by=ADMIN_USER_ID,
+        )
+
+    @patch("assessments.views.resolve_user_names")
+    def test_resolved_name_and_email_attached_to_each_row(self, mock_resolve, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        mock_resolve.return_value = {
+            str(ADMIN_USER_ID): {"name": "Dr. Author", "email": "author@test.com"},
+        }
+        resp = admin_client.get("/api/assessments/admin/assignments/")
+        assert resp.status_code == 200
+        row = next(a for a in resp.json()["results"] if a["id"] == str(assignment.id))
+        assert row["created_by_name"] == "Dr. Author"
+        assert row["created_by_email"] == "author@test.com"
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args[0][0] == [str(ADMIN_USER_ID)]
+
+    @patch("assessments.views.resolve_user_names")
+    def test_unresolved_creator_gets_empty_strings_not_an_error(self, mock_resolve, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        mock_resolve.return_value = {}
+        resp = admin_client.get("/api/assessments/admin/assignments/")
+        assert resp.status_code == 200
+        row = next(a for a in resp.json()["results"] if a["id"] == str(assignment.id))
+        assert row["created_by_name"] == ""
+        assert row["created_by_email"] == ""
+
+    @patch("assessments.views.resolve_user_names")
+    def test_empty_assignments_list_never_calls_resolve(self, mock_resolve, admin_b_client):
+        resp = admin_b_client.get("/api/assessments/admin/assignments/")
+        assert resp.status_code == 200
+        assert resp.json()["results"] == []
+        mock_resolve.assert_not_called()

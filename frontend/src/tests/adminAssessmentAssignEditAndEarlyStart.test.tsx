@@ -203,3 +203,75 @@ describe("Admin Assign page — Edit assignment", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 });
+
+describe("Admin Assign page — Reopen assignment", () => {
+  it("shows the Reopen button only for a CLOSED assignment", async () => {
+    mockApiGet([scheduledAssignment({ status: "LIVE" })]);
+    render(<AdminAssessmentAssignPage />);
+
+    await screen.findByRole("button", { name: "Mock Test" });
+    expect(screen.queryByRole("button", { name: "Reopen" })).not.toBeInTheDocument();
+  });
+
+  it("opens blank (no pre-filled times) and reopens with the newly entered times", async () => {
+    mockApiGet([scheduledAssignment({ status: "CLOSED" })]);
+    const patchSpy = jest.spyOn(api, "patch").mockResolvedValueOnce({
+      data: { data: scheduledAssignment({ status: "SCHEDULED" }) },
+    } as any);
+    const user = userEvent.setup();
+    render(<AdminAssessmentAssignPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Reopen" }));
+    const modal = await screen.findByRole("dialog");
+    const startInput = within(modal).getByLabelText("New global start time") as HTMLInputElement;
+    const expireInput = within(modal).getByLabelText("New global expire time") as HTMLInputElement;
+    expect(startInput.value).toBe("");
+    expect(expireInput.value).toBe("");
+
+    await user.type(startInput, "2027-01-01T09:00");
+    await user.type(expireInput, "2027-01-01T12:00");
+    await user.click(within(modal).getByRole("button", { name: "Reopen" }));
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledWith(
+      "/assessments/admin/assignments/assign-1/reopen/",
+      {
+        global_start_time: new Date("2027-01-01T09:00").toISOString(),
+        global_expire_time: new Date("2027-01-01T12:00").toISOString(),
+      },
+    ));
+    await waitFor(() => expect(mockToastSuccess).toHaveBeenCalledWith(
+      "Assignment reopened — students who haven't attempted it yet can access it again.",
+    ));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("requires both times before submitting", async () => {
+    mockApiGet([scheduledAssignment({ status: "CLOSED" })]);
+    const patchSpy = jest.spyOn(api, "patch");
+    const user = userEvent.setup();
+    render(<AdminAssessmentAssignPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Reopen" }));
+    const modal = await screen.findByRole("dialog");
+    await user.click(within(modal).getByRole("button", { name: "Reopen" }));
+
+    expect(await within(modal).findByText("New global start time is required.")).toBeInTheDocument();
+    expect(patchSpy).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a server error and keeps the modal open for retry", async () => {
+    mockApiGet([scheduledAssignment({ status: "CLOSED" })]);
+    jest.spyOn(api, "patch").mockRejectedValueOnce(new Error("already live elsewhere"));
+    const user = userEvent.setup();
+    render(<AdminAssessmentAssignPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Reopen" }));
+    const modal = await screen.findByRole("dialog");
+    await user.type(within(modal).getByLabelText("New global start time"), "2027-01-01T09:00");
+    await user.type(within(modal).getByLabelText("New global expire time"), "2027-01-01T12:00");
+    await user.click(within(modal).getByRole("button", { name: "Reopen" }));
+
+    expect(await within(modal).findByText("already live elsewhere")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+});
