@@ -1031,7 +1031,20 @@ class AdminAssignmentListCreateView(APIView):
             qs = qs.filter(paper_id=paper_id)
         paginator = StandardResultsPagination()
         page = paginator.paginate_queryset(qs, request)
-        return paginator.get_paginated_response(BatchAssignmentSerializer(page, many=True).data)
+        data = BatchAssignmentSerializer(page, many=True).data
+
+        # "Created by <name>" per card, same resolution pattern as
+        # AdminPaperListCreateView above — one batch call for the whole
+        # page. This is the ASSIGNMENT's own creator (whoever ran "assign"),
+        # not necessarily the paper's creator.
+        creator_ids = sorted({row["created_by"] for row in data if row.get("created_by")})
+        creators = resolve_user_names(creator_ids, request.META.get("HTTP_AUTHORIZATION", "")) if creator_ids else {}
+        for row in data:
+            info = creators.get(row["created_by"], {})
+            row["created_by_name"] = info.get("name", "")
+            row["created_by_email"] = info.get("email", "")
+
+        return paginator.get_paginated_response(data)
 
     def post(self, request):
         institution_id = _get_institution_id(request)
@@ -1323,6 +1336,119 @@ class AdminAssignmentCloseView(APIView):
             data={**BatchAssignmentSerializer(assignment).data, "sessions_auto_submitted": auto_submitted},
             message="Assignment closed",
         )
+
+
+class AdminAssignmentReopenView(APIView):
+    """PATCH /api/assessments/admin/assignments/<pk>/reopen/ — brings a
+    CLOSED assignment back online with a new start/expire window, for the
+    common "some students were absent" case, reusing this SAME row rather
+    than requiring a second assignment to be created for the same paper +
+    batch. User decision, 2026-11-14.
+
+    Why reusing the same row is enough, with no new "already attempted"
+    logic needed anywhere: AssessmentSession has unique_together =
+    ("assignment", "student_id") (Decision #3 — no retake, ever, under one
+    assignment), and StudentAssignmentStartSessionView's own resume-first
+    branch already looks up an existing session by (assignment,
+    student_id) and returns it — terminal state and all — before it ever
+    checks LIVE/expiry. So a student who already completed/auto-submitted
+    under this assignment gets their old result back the moment they hit
+    Start again, live window or not; a student with no session yet (a
+    no-show) falls straight through to ordinary session creation once
+    this is LIVE. Their original StudentSetAllocation row is untouched by
+    Close/the expire sweep (see that model's own comment), so no roster
+    resync is needed either — reopening is purely a timing change.
+
+    Readiness (content completeness, cross-set uniformity) is NOT
+    re-checked here, deliberately: QuestionPaper.is_locked() already locks
+    on SCHEDULED, *LIVE, or CLOSED* — this assignment being CLOSED has
+    kept the paper locked continuously since it was first assigned, so
+    its content cannot have regressed in the meantime.
+    """
+    permission_classes = [IsAdminUser]
+
+    _ALLOWED_FIELDS = {"global_start_time", "global_expire_time"}
+
+    def patch(self, request, pk):
+        institution_id = _get_institution_id(request)
+        assignment = get_object_or_404(BatchAssignment, pk=pk, institution_id=institution_id)
+
+        if assignment.is_deleted:
+            return error_response("This assignment has been deleted and cannot be reopened.", status_code=403)
+
+        if assignment.status != ASSIGNMENT_STATUS_CLOSED:
+            return error_response(
+                f"Only a closed assignment can be reopened — this one is currently {assignment.status.lower()}.",
+                status_code=409,
+            )
+
+        unexpected_fields = [f for f in request.data if f not in self._ALLOWED_FIELDS]
+        if unexpected_fields:
+            return error_response(
+                f"Only global_start_time and global_expire_time can be set when reopening: "
+                f"unexpected field(s) {', '.join(unexpected_fields)}.",
+                status_code=400,
+            )
+        if not request.data.get("global_start_time") or not request.data.get("global_expire_time"):
+            return error_response(
+                "Both global_start_time and global_expire_time are required to reopen an assignment.",
+                status_code=400,
+            )
+
+        # Validation only here (expire > start, parseable datetimes) — the
+        # actual write happens below via a conditional UPDATE, same
+        # race-safety pattern as every other lifecycle mutation on this
+        # model, not through this serializer's own .save().
+        s = BatchAssignmentSerializer(
+            assignment,
+            data={
+                "global_start_time": request.data.get("global_start_time"),
+                "global_expire_time": request.data.get("global_expire_time"),
+            },
+            partial=True,
+        )
+        if not s.is_valid():
+            return error_response("Validation failed", errors=s.errors, status_code=400)
+
+        new_start = s.validated_data["global_start_time"]
+        new_expire = s.validated_data["global_expire_time"]
+        if new_expire <= timezone.now():
+            return error_response(
+                {"global_expire_time": "Must be in the future — this is what actually reopens the exam."},
+                status_code=400,
+            )
+
+        # Same paper+batch must not already have another scheduled/live
+        # assignment running concurrently — same invariant
+        # AdminAssignmentListCreateView.post enforces at creation time,
+        # excluding this row itself.
+        if BatchAssignment.objects.filter(
+            paper_id=assignment.paper_id, batch_id=assignment.batch_id, institution_id=institution_id,
+            status__in=[ASSIGNMENT_STATUS_SCHEDULED, ASSIGNMENT_STATUS_LIVE],
+        ).exclude(pk=assignment.pk).exists():
+            return error_response(
+                "This paper already has another scheduled or live assignment for this batch — "
+                "close that one before reopening this one.",
+                status_code=409,
+            )
+
+        # Conditional UPDATE ... WHERE status=CLOSED — race-safe against a
+        # concurrent reopen/delete landing between the read above and here.
+        updated = BatchAssignment.objects.filter(
+            pk=assignment.pk, status=ASSIGNMENT_STATUS_CLOSED,
+        ).update(
+            status=ASSIGNMENT_STATUS_SCHEDULED,
+            global_start_time=new_start,
+            global_expire_time=new_expire,
+        )
+        if not updated:
+            assignment.refresh_from_db()
+            return error_response(
+                f"Cannot reopen — this assignment is now {assignment.status.lower()}.", status_code=409,
+            )
+        assignment.refresh_from_db()
+
+        return success_response(data=BatchAssignmentSerializer(assignment).data, message="Assignment reopened")
 
 
 class AdminAssignmentPublishResultsView(APIView):

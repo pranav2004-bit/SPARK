@@ -406,6 +406,12 @@ export interface BatchAssignment {
   department_sections: { department: string; sections: string[] }[];
   status: BatchAssignmentStatus;
   created_by: string;
+  // Resolved from auth-service, same best-effort pattern as QuestionPaper's
+  // own created_by_name/created_by_email — empty strings when the lookup
+  // doesn't resolve. This is the ASSIGNMENT's own creator, not necessarily
+  // the paper's.
+  created_by_name: string;
+  created_by_email: string;
   created_at: string;
   updated_at: string;
 }

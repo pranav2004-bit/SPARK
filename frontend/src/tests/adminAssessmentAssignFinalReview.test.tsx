@@ -330,7 +330,11 @@ describe("Admin Assign page — Final Review checklist", () => {
   it("creates the assignment once every item is reviewed and required fields are filled", async () => {
     mockApiGet();
     jest.spyOn(api, "post").mockResolvedValue({
-      data: { data: { id: "assign-1", paper: "paper-1", batch_id: "batch-1", status: "SCHEDULED", exam_duration_minutes: 60, pass_cutoff_percentage: 40, show_result_to_student: true, department_sections: [] } },
+      data: { data: {
+        id: "assign-1", paper: "paper-1", paper_title: "MOCK TEST 2", batch_id: "batch-1", status: "SCHEDULED",
+        exam_duration_minutes: 60, pass_cutoff_percentage: 40, show_result_to_student: true, department_sections: [],
+        created_by: "admin-1", created_by_name: "", created_by_email: "",
+      } },
     } as any);
     const user = userEvent.setup();
     render(<AdminAssessmentAssignPage />);
@@ -349,12 +353,10 @@ describe("Admin Assign page — Final Review checklist", () => {
       expect.objectContaining({ paper: "paper-1", batch_id: "batch-1" }),
     ));
     await waitFor(() => expect(mockToastSuccess).toHaveBeenCalledWith("Assignment created."));
-    // Optimistically prepended to the assignment history below the form.
-    // "2023-27" alone now matches twice (the still-present Batch <option>
-    // AND the new history card), since the option no longer carries an
-    // inline "(N students)" suffix to disambiguate it — cutoff% is unique
-    // to the history card.
-    expect(await screen.findByText("cutoff 40%")).toBeInTheDocument();
+    // Optimistically prepended to the assignment history below the form —
+    // the card shows the creator (falls back to the raw id when name/email
+    // don't resolve, as here), which is unique to that card.
+    expect(await screen.findByText("admin-1")).toBeInTheDocument();
   }, 20000);
 
   it("an existing assignment's Mock Test toolbar button starts a trial for that assignment's paper", async () => {
