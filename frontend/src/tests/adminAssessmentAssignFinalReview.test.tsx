@@ -330,7 +330,7 @@ describe("Admin Assign page — Final Review checklist", () => {
   it("creates the assignment once every item is reviewed and required fields are filled", async () => {
     mockApiGet();
     jest.spyOn(api, "post").mockResolvedValue({
-      data: { data: { id: "assign-1", paper: "paper-1", batch_id: "batch-1", status: "SCHEDULED", exam_duration_minutes: 60, pass_cutoff_percentage: 40, show_result_to_student: true, departments: [] } },
+      data: { data: { id: "assign-1", paper: "paper-1", batch_id: "batch-1", status: "SCHEDULED", exam_duration_minutes: 60, pass_cutoff_percentage: 40, show_result_to_student: true, department_sections: [] } },
     } as any);
     const user = userEvent.setup();
     render(<AdminAssessmentAssignPage />);
@@ -362,7 +362,7 @@ describe("Admin Assign page — Final Review checklist", () => {
       id: "assign-9", paper: "paper-1", paper_title: "MOCK TEST 2", batch_id: "batch-1", institution_id: "inst-1",
       global_start_time: "2026-09-01T09:00:00Z", global_expire_time: "2026-09-01T10:00:00Z",
       exam_duration_minutes: 45, pass_cutoff_percentage: 40, show_result_to_student: true,
-      departments: [], status: "CLOSED", created_by: "admin-1",
+      department_sections: [], status: "CLOSED", created_by: "admin-1",
       created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
     };
     jest.spyOn(api, "get").mockImplementation((url: string) => {

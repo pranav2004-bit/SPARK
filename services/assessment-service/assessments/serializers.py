@@ -211,7 +211,7 @@ class BatchAssignmentSerializer(serializers.ModelSerializer):
             "id", "paper", "paper_title", "batch_id", "institution_id",
             "global_start_time", "global_expire_time", "exam_duration_minutes",
             "pass_cutoff_percentage", "show_result_to_student", "results_published_at",
-            "departments", "status", "created_by",
+            "department_sections", "status", "created_by",
             "created_at", "updated_at",
         ]
         read_only_fields = [
@@ -230,10 +230,25 @@ class BatchAssignmentSerializer(serializers.ModelSerializer):
             "created_by", "created_at", "updated_at",
         ]
 
-    def validate_departments(self, value):
-        if not isinstance(value, list) or not all(isinstance(d, str) and d.strip() for d in value):
-            raise serializers.ValidationError("departments must be a list of department names.")
-        return [d.strip() for d in value]
+    def validate_department_sections(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError(
+                "department_sections must be a list of {department, sections} objects."
+            )
+        cleaned = []
+        for entry in value:
+            if not isinstance(entry, dict):
+                raise serializers.ValidationError(
+                    "Each department_sections entry must be an object with 'department' and optional 'sections'."
+                )
+            department = entry.get("department")
+            if not isinstance(department, str) or not department.strip():
+                raise serializers.ValidationError("Each department_sections entry needs a non-empty 'department'.")
+            sections = entry.get("sections") or []
+            if not isinstance(sections, list) or not all(isinstance(s, str) and s.strip() for s in sections):
+                raise serializers.ValidationError("'sections' must be a list of section names.")
+            cleaned.append({"department": department.strip(), "sections": [s.strip() for s in sections]})
+        return cleaned
 
     def validate(self, attrs):
         expire = attrs.get("global_expire_time")

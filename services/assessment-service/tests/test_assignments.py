@@ -69,29 +69,40 @@ class TestCreateAssignment:
         mock_snap.assert_called_once()
 
     @patch("assessments.views.snapshot_roster_and_allocate")
-    def test_departments_defaults_to_empty_list_when_omitted(self, mock_snap, admin_client, published_paper):
+    def test_department_sections_defaults_to_empty_list_when_omitted(self, mock_snap, admin_client, published_paper):
         mock_snap.return_value = 0
         resp = admin_client.post("/api/assessments/admin/assignments/", _payload(published_paper), format="json")
         assert resp.status_code == 201
-        assert resp.json()["data"]["departments"] == []
+        assert resp.json()["data"]["department_sections"] == []
 
     @patch("assessments.views.snapshot_roster_and_allocate")
-    def test_departments_accepted_and_stored(self, mock_snap, admin_client, published_paper):
+    def test_department_sections_accepted_and_stored(self, mock_snap, admin_client, published_paper):
         mock_snap.return_value = 0
-        payload = _payload(published_paper, departments=["CSE", "CSD"])
+        payload = _payload(published_paper, department_sections=[
+            {"department": "CSE", "sections": ["A", "B"]}, {"department": "CSD", "sections": []},
+        ])
         resp = admin_client.post("/api/assessments/admin/assignments/", payload, format="json")
         assert resp.status_code == 201
-        assert resp.json()["data"]["departments"] == ["CSE", "CSD"]
+        assert resp.json()["data"]["department_sections"] == [
+            {"department": "CSE", "sections": ["A", "B"]}, {"department": "CSD", "sections": []},
+        ]
         assignment = BatchAssignment.objects.get(pk=resp.json()["data"]["id"])
-        assert assignment.departments == ["CSE", "CSD"]
+        assert assignment.department_sections == [
+            {"department": "CSE", "sections": ["A", "B"]}, {"department": "CSD", "sections": []},
+        ]
 
-    def test_departments_rejects_non_list(self, admin_client, published_paper):
-        payload = _payload(published_paper, departments="CSE")  # string, not a list
+    def test_department_sections_rejects_non_list(self, admin_client, published_paper):
+        payload = _payload(published_paper, department_sections="CSE")  # string, not a list
         resp = admin_client.post("/api/assessments/admin/assignments/", payload, format="json")
         assert resp.status_code == 400
 
-    def test_departments_rejects_non_string_entries(self, admin_client, published_paper):
-        payload = _payload(published_paper, departments=[123])
+    def test_department_sections_rejects_entry_without_department(self, admin_client, published_paper):
+        payload = _payload(published_paper, department_sections=[{"sections": ["A"]}])
+        resp = admin_client.post("/api/assessments/admin/assignments/", payload, format="json")
+        assert resp.status_code == 400
+
+    def test_department_sections_rejects_non_string_section(self, admin_client, published_paper):
+        payload = _payload(published_paper, department_sections=[{"department": "CSE", "sections": [123]}])
         resp = admin_client.post("/api/assessments/admin/assignments/", payload, format="json")
         assert resp.status_code == 400
 
@@ -467,22 +478,22 @@ class TestEditAssignment:
         assert assignment.exam_duration_minutes == 60
 
     @patch("assessments.views.snapshot_roster_and_allocate")
-    def test_departments_change_triggers_resync(self, mock_snap, admin_client, published_paper):
+    def test_department_sections_change_triggers_resync(self, mock_snap, admin_client, published_paper):
         mock_snap.return_value = 4
-        assignment = self._create_direct(published_paper, departments=["CSE"])
+        assignment = self._create_direct(published_paper, department_sections=[{"department": "CSE", "sections": []}])
         resp = admin_client.patch(
             f"/api/assessments/admin/assignments/{assignment.id}/",
-            {"departments": ["CSE", "ECE"]}, format="json",
+            {"department_sections": [{"department": "CSE", "sections": []}, {"department": "ECE", "sections": []}]}, format="json",
         )
         assert resp.status_code == 200
         assert resp.json()["data"]["new_allocations"] == 4
         mock_snap.assert_called_once()
         assignment.refresh_from_db()
-        assert assignment.departments == ["CSE", "ECE"]
+        assert assignment.department_sections == [{"department": "CSE", "sections": []}, {"department": "ECE", "sections": []}]
 
     @patch("assessments.views.snapshot_roster_and_allocate")
-    def test_departments_unchanged_does_not_resync(self, mock_snap, admin_client, published_paper):
-        assignment = self._create_direct(published_paper, departments=["CSE"])
+    def test_department_sections_unchanged_does_not_resync(self, mock_snap, admin_client, published_paper):
+        assignment = self._create_direct(published_paper, department_sections=[{"department": "CSE", "sections": []}])
         resp = admin_client.patch(
             f"/api/assessments/admin/assignments/{assignment.id}/",
             {"exam_duration_minutes": 75}, format="json",
@@ -492,19 +503,19 @@ class TestEditAssignment:
         mock_snap.assert_not_called()
 
     @patch("assessments.views.snapshot_roster_and_allocate")
-    def test_departments_change_resync_failure_returns_502_but_keeps_other_edits(self, mock_snap, admin_client, published_paper):
+    def test_department_sections_change_resync_failure_returns_502_but_keeps_other_edits(self, mock_snap, admin_client, published_paper):
         mock_snap.side_effect = RuntimeError("user-service unreachable")
-        assignment = self._create_direct(published_paper, departments=["CSE"])
+        assignment = self._create_direct(published_paper, department_sections=[{"department": "CSE", "sections": []}])
         resp = admin_client.patch(
             f"/api/assessments/admin/assignments/{assignment.id}/",
-            {"departments": ["CSE", "ECE"], "exam_duration_minutes": 75}, format="json",
+            {"department_sections": [{"department": "CSE", "sections": []}, {"department": "ECE", "sections": []}], "exam_duration_minutes": 75}, format="json",
         )
         assert resp.status_code == 502
         assignment.refresh_from_db()
         # The field edit itself already committed before the resync attempt
         # — a roster-sync failure shouldn't roll back an otherwise-valid edit.
         assert assignment.exam_duration_minutes == 75
-        assert assignment.departments == ["CSE", "ECE"]
+        assert assignment.department_sections == [{"department": "CSE", "sections": []}, {"department": "ECE", "sections": []}]
 
     def test_cross_institution_404(self, admin_b_client, published_paper):
         assignment = self._create_direct(published_paper)

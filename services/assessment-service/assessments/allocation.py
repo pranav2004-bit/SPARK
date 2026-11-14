@@ -55,15 +55,46 @@ def snapshot_roster_and_allocate(assignment, auth_header: str) -> int:
         .values_list("student_id", flat=True)
     )
 
-    # Empty departments list (the default) means every department in the
-    # batch — narrow the roster only when the admin scoped this assignment
-    # to specific department(s) (live request, 2026-08-15). department is
-    # free-text on Student (user-service), no fixed enum — matched
-    # case-insensitively, same convention as the admin results table's
-    # existing department filter (department__iexact).
-    if assignment.departments:
-        wanted = {d.strip().lower() for d in assignment.departments}
-        matched = [s for s in students if (s.get("department") or "").strip().lower() in wanted]
+    # Empty department_sections (the default) means every department/
+    # section in the batch — narrow the roster only when the admin scoped
+    # this assignment to specific department+section combination(s)
+    # (originally department-only, 2026-08-15; extended to pair with
+    # section, 2026-11-14, user decision). Each entry's `sections: []`
+    # means "every section in that department" — a department with no
+    # section narrowing at all. department/section are both free-text on
+    # Student (user-service) — department has no fixed enum, section is a
+    # mandatory single A-Z letter — both matched case-insensitively, same
+    # convention as the admin results table's existing department filter
+    # (department__iexact).
+    if assignment.department_sections:
+        # {department_lower: {section_lower, ...} | None} — None means
+        # "every section in this department" (an empty `sections` list on
+        # that entry), distinguished from an empty set (which would
+        # wrongly match nothing).
+        wanted: dict = {}
+        for entry in assignment.department_sections:
+            dept = (entry.get("department") or "").strip().lower()
+            if not dept:
+                continue
+            entry_sections = entry.get("sections") or []
+            sections = {s.strip().lower() for s in entry_sections if s.strip()} or None
+            # A department named twice (e.g. once whole, once narrowed) —
+            # None (whole department) always wins over a narrower set,
+            # since that's clearly the admin's broader intent.
+            if dept in wanted and wanted[dept] is None:
+                continue
+            wanted[dept] = sections
+
+        def _matches(student: dict) -> bool:
+            dept = (student.get("department") or "").strip().lower()
+            if dept not in wanted:
+                return False
+            sections = wanted[dept]
+            if sections is None:
+                return True
+            return (student.get("section") or "").strip().lower() in sections
+
+        matched = [s for s in students if _matches(s)]
         if not matched and students and not existing_ids:
             # Only the FIRST snapshot (nothing allocated yet) can leave this
             # assignment permanently dead — a resync legitimately finding
@@ -71,8 +102,8 @@ def snapshot_roster_and_allocate(assignment, auth_header: str) -> int:
             # isn't an error, just nothing new to do, so this only fires
             # pre-creation.
             raise RuntimeError(
-                "No students in the selected batch match the selected department(s). "
-                "Double-check the department names and try again."
+                "No students in the selected batch match the selected department(s)/section(s). "
+                "Double-check the department and section names and try again."
             )
         students = matched
 

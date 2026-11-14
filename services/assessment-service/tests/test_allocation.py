@@ -41,9 +41,9 @@ def assignment(paper, two_sets):
     )
 
 
-def _roster(n, prefix="S", department=None):
+def _roster(n, prefix="S", department=None, section=None):
     return [
-        {"user_id": str(uuid.uuid4()), "student_id": f"{prefix}-{i:04d}", "department": department}
+        {"user_id": str(uuid.uuid4()), "student_id": f"{prefix}-{i:04d}", "department": department, "section": section}
         for i in range(n)
     ]
 
@@ -151,8 +151,8 @@ class TestSnapshotRosterAndAllocate:
 
 class TestSnapshotRosterAndAllocateDepartmentFilter:
     @patch("assessments.allocation.fetch_batch_roster")
-    def test_empty_departments_allocates_every_department(self, mock_fetch, assignment, two_sets):
-        assert assignment.departments == []
+    def test_empty_department_sections_allocates_every_department(self, mock_fetch, assignment, two_sets):
+        assert assignment.department_sections == []
         roster = _roster(5, prefix="CSE", department="CSE") + _roster(5, prefix="ECE", department="ECE")
         mock_fetch.return_value = roster
         created = snapshot_roster_and_allocate(assignment, "Bearer fake")
@@ -160,8 +160,8 @@ class TestSnapshotRosterAndAllocateDepartmentFilter:
 
     @patch("assessments.allocation.fetch_batch_roster")
     def test_narrows_to_selected_departments_only(self, mock_fetch, assignment, two_sets):
-        assignment.departments = ["CSE", "CSD"]
-        assignment.save(update_fields=["departments"])
+        assignment.department_sections = [{"department": "CSE", "sections": []}, {"department": "CSD", "sections": []}]
+        assignment.save(update_fields=["department_sections"])
         roster = (
             _roster(4, prefix="CSE", department="CSE")
             + _roster(3, prefix="CSD", department="CSD")
@@ -173,16 +173,16 @@ class TestSnapshotRosterAndAllocateDepartmentFilter:
 
     @patch("assessments.allocation.fetch_batch_roster")
     def test_department_match_is_case_insensitive(self, mock_fetch, assignment, two_sets):
-        assignment.departments = ["cse"]
-        assignment.save(update_fields=["departments"])
+        assignment.department_sections = [{"department": "cse", "sections": []}]
+        assignment.save(update_fields=["department_sections"])
         mock_fetch.return_value = _roster(4, department="CSE")  # roster has upper, filter has lower
         created = snapshot_roster_and_allocate(assignment, "Bearer fake")
         assert created == 4
 
     @patch("assessments.allocation.fetch_batch_roster")
     def test_no_matching_department_on_first_snapshot_raises_and_creates_nothing(self, mock_fetch, assignment, two_sets):
-        assignment.departments = ["MECH"]
-        assignment.save(update_fields=["departments"])
+        assignment.department_sections = [{"department": "MECH", "sections": []}]
+        assignment.save(update_fields=["department_sections"])
         mock_fetch.return_value = _roster(10, department="CSE")  # batch has students, none in MECH
         with pytest.raises(RuntimeError):
             snapshot_roster_and_allocate(assignment, "Bearer fake")
@@ -191,8 +191,8 @@ class TestSnapshotRosterAndAllocateDepartmentFilter:
     @patch("assessments.allocation.fetch_batch_roster")
     def test_resync_with_zero_new_matches_is_not_an_error(self, mock_fetch, assignment, two_sets):
         # First snapshot allocates the CSE students that exist today.
-        assignment.departments = ["CSE"]
-        assignment.save(update_fields=["departments"])
+        assignment.department_sections = [{"department": "CSE", "sections": []}]
+        assignment.save(update_fields=["department_sections"])
         cse_roster = _roster(3, prefix="CSE", department="CSE")
         mock_fetch.return_value = cse_roster
         snapshot_roster_and_allocate(assignment, "Bearer fake")
@@ -209,8 +209,8 @@ class TestSnapshotRosterAndAllocateDepartmentFilter:
         # Same cse_roster reused across both calls — a fresh _roster() call
         # generates new random UUIDs each time, which would make the "same"
         # 3 CSE students look like 3 brand-new ones on the second call.
-        assignment.departments = ["CSE"]
-        assignment.save(update_fields=["departments"])
+        assignment.department_sections = [{"department": "CSE", "sections": []}]
+        assignment.save(update_fields=["department_sections"])
         cse_roster = _roster(3, prefix="CSE", department="CSE")
         mock_fetch.return_value = cse_roster
         snapshot_roster_and_allocate(assignment, "Bearer fake")
@@ -219,3 +219,91 @@ class TestSnapshotRosterAndAllocateDepartmentFilter:
         added = snapshot_roster_and_allocate(assignment, "Bearer fake")
         assert added == 0  # the 4 new ECE students are correctly never allocated
         assert StudentSetAllocation.objects.filter(assignment=assignment).count() == 3
+
+
+# ── Section scoping within a department (2026-11-14, user decision) ────────
+
+class TestSnapshotRosterAndAllocateSectionFilter:
+    @patch("assessments.allocation.fetch_batch_roster")
+    def test_narrows_to_selected_sections_within_a_department(self, mock_fetch, assignment, two_sets):
+        assignment.department_sections = [{"department": "CSE", "sections": ["A", "B"]}]
+        assignment.save(update_fields=["department_sections"])
+        roster = (
+            _roster(2, prefix="A", department="CSE", section="A")
+            + _roster(2, prefix="B", department="CSE", section="B")
+            + _roster(2, prefix="C", department="CSE", section="C")
+        )
+        mock_fetch.return_value = roster
+        created = snapshot_roster_and_allocate(assignment, "Bearer fake")
+        assert created == 4  # section C excluded, even though same department
+
+    @patch("assessments.allocation.fetch_batch_roster")
+    def test_section_match_is_case_insensitive(self, mock_fetch, assignment, two_sets):
+        assignment.department_sections = [{"department": "CSE", "sections": ["a"]}]
+        assignment.save(update_fields=["department_sections"])
+        mock_fetch.return_value = _roster(3, department="CSE", section="A")
+        created = snapshot_roster_and_allocate(assignment, "Bearer fake")
+        assert created == 3
+
+    @patch("assessments.allocation.fetch_batch_roster")
+    def test_same_section_letter_in_a_different_department_is_not_matched(self, mock_fetch, assignment, two_sets):
+        # The exact cross-contamination bug this feature's design had to
+        # avoid: "CSE section A" must never accidentally match "ECE
+        # section A" just because both lists happen to contain "A".
+        assignment.department_sections = [{"department": "CSE", "sections": ["A"]}]
+        assignment.save(update_fields=["department_sections"])
+        roster = (
+            _roster(3, prefix="CSE", department="CSE", section="A")
+            + _roster(5, prefix="ECE", department="ECE", section="A")
+        )
+        mock_fetch.return_value = roster
+        created = snapshot_roster_and_allocate(assignment, "Bearer fake")
+        assert created == 3  # only the CSE-A students, none of the ECE-A ones
+
+    @patch("assessments.allocation.fetch_batch_roster")
+    def test_different_sections_per_department_combine_independently(self, mock_fetch, assignment, two_sets):
+        assignment.department_sections = [
+            {"department": "CSE", "sections": ["A", "B"]},
+            {"department": "ECE", "sections": ["C"]},
+        ]
+        assignment.save(update_fields=["department_sections"])
+        roster = (
+            _roster(2, prefix="CSEA", department="CSE", section="A")
+            + _roster(2, prefix="CSEB", department="CSE", section="B")
+            + _roster(2, prefix="CSEC", department="CSE", section="C")  # excluded: CSE only wants A/B
+            + _roster(2, prefix="ECEC", department="ECE", section="C")
+            + _roster(2, prefix="ECEA", department="ECE", section="A")  # excluded: ECE only wants C
+        )
+        mock_fetch.return_value = roster
+        created = snapshot_roster_and_allocate(assignment, "Bearer fake")
+        assert created == 6  # 2 CSE-A + 2 CSE-B + 2 ECE-C
+
+    @patch("assessments.allocation.fetch_batch_roster")
+    def test_empty_sections_list_for_a_department_means_whole_department(self, mock_fetch, assignment, two_sets):
+        assignment.department_sections = [{"department": "CSE", "sections": []}]
+        assignment.save(update_fields=["department_sections"])
+        roster = (
+            _roster(2, prefix="A", department="CSE", section="A")
+            + _roster(2, prefix="Z", department="CSE", section="Z")
+        )
+        mock_fetch.return_value = roster
+        created = snapshot_roster_and_allocate(assignment, "Bearer fake")
+        assert created == 4  # no section narrowing for CSE at all
+
+    @patch("assessments.allocation.fetch_batch_roster")
+    def test_whole_department_entry_wins_over_a_narrower_duplicate_entry(self, mock_fetch, assignment, two_sets):
+        # Defensive: if the same department somehow appears twice — once
+        # narrowed, once whole — the broader (whole-department) intent
+        # must win, regardless of which entry comes first.
+        assignment.department_sections = [
+            {"department": "CSE", "sections": ["A"]},
+            {"department": "CSE", "sections": []},
+        ]
+        assignment.save(update_fields=["department_sections"])
+        roster = (
+            _roster(2, prefix="A", department="CSE", section="A")
+            + _roster(2, prefix="Z", department="CSE", section="Z")
+        )
+        mock_fetch.return_value = roster
+        created = snapshot_roster_and_allocate(assignment, "Bearer fake")
+        assert created == 4

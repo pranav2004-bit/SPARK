@@ -295,12 +295,24 @@ class BatchAssignment(models.Model):
     institution_id = models.UUIDField(db_index=True)
     # Empty list (the default) means every department in the batch — this
     # assignment's roster snapshot (allocation.py's
-    # snapshot_roster_and_allocate) only narrows to specific departments
-    # when this is non-empty. department itself is free-text on Student
-    # (user-service), no fixed enum — matched case-insensitively at
-    # allocation time, same convention as the existing department filter
-    # on the admin results table (department__iexact).
-    departments = models.JSONField(default=list, blank=True)
+    # snapshot_roster_and_allocate) only narrows down when this is
+    # non-empty. Replaces the old flat `departments` field (2026-11-14,
+    # user decision) — an admin can now scope an assignment to specific
+    # *sections within* a department (e.g. "CSE section A and B, ECE
+    # section C"), not just whole departments. Shape:
+    #   [{"department": "CSE", "sections": ["A", "B"]},
+    #    {"department": "ECE", "sections": []}]
+    # `sections: []` for a given department entry means "every section in
+    # that department" — this is exactly how a bare department name in
+    # the old `departments` list behaved, so every pre-existing assignment
+    # was migrated losslessly into this shape (migration 0024) with an
+    # empty `sections` list per department, preserving identical roster
+    # behavior. department itself is free-text on Student (user-service),
+    # no fixed enum; section is a single A-Z letter (mandatory on Student
+    # since 2026-11-13) — both matched case-insensitively at allocation
+    # time (allocation.py), same convention as the admin results table's
+    # existing department filter (department__iexact).
+    department_sections = models.JSONField(default=list, blank=True)
 
     # Mandatory (changed 2026-11-12, user decision) — every assignment now
     # declares when it's meant to start, not just when it expires. Read by

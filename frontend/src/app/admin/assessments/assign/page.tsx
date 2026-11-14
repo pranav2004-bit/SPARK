@@ -17,6 +17,7 @@ import { useToast } from "@/components/ui/Toast";
 import { useAuth } from "@/hooks/useAuth";
 import api, { getErrorMessage } from "@/lib/api";
 import { useDepartments } from "@/lib/departmentsContext";
+import { STUDENT_SECTIONS } from "@/lib/constants";
 import type {
   QuestionPaper, QuestionSet, Batch, BatchAssignment, BatchAssignmentStatusPoll, ApiSuccess, PaginatedResponse,
 } from "@/types";
@@ -29,6 +30,58 @@ interface PaperReviewDetail {
 function formatReviewDateTime(value: string): string {
   const d = new Date(value);
   return isNaN(d.getTime()) ? value : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+// "CSE (A, B), ECE" — an empty sections array for an entry renders as just
+// the department name (whole department, no section narrowing), matching
+// its own meaning. Shared by the Final Review checklist and the
+// assignment card's own summary line, so both read identically.
+function formatDepartmentSections(entries: { department: string; sections: string[] }[]): string {
+  return entries
+    .map(e => e.sections.length > 0 ? `${e.department} (${e.sections.join(", ")})` : e.department)
+    .join(", ");
+}
+
+// One row per selected department, each with its own A-Z section toggle
+// chips — no chips selected means "every section in that department."
+// Shared by the create form and the Edit modal.
+function DepartmentSectionsPicker({ departments, sections, onToggleSection }: {
+  departments: string[];
+  sections: Record<string, string[]>;
+  onToggleSection: (department: string, section: string) => void;
+}) {
+  if (departments.length === 0) return null;
+  return (
+    <div className="mt-3 space-y-2">
+      {departments.map(dept => {
+        const active = sections[dept] ?? [];
+        return (
+          <div key={dept} className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-xs font-medium mr-1" style={{ color: "var(--color-text-muted)" }}>{dept}:</span>
+            {STUDENT_SECTIONS.map(s => {
+              const on = active.includes(s);
+              return (
+                <button
+                  key={s} type="button" aria-pressed={on}
+                  onClick={() => onToggleSection(dept, s)}
+                  className="w-6 h-6 rounded text-[11px] font-semibold transition-colors cursor-pointer"
+                  style={on
+                    ? { background: "var(--color-accent)", color: "#fff", border: "1px solid var(--color-accent)" }
+                    : { background: "var(--color-surface)", color: "var(--color-text-subtle)", border: "1px solid var(--color-border)" }
+                  }
+                >
+                  {s}
+                </button>
+              );
+            })}
+            {active.length === 0 && (
+              <span className="text-xs italic ml-1" style={{ color: "var(--color-text-subtle)" }}>(every section)</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 // `<input type="datetime-local">` wants "YYYY-MM-DDTHH:mm" in the browser's
@@ -93,6 +146,13 @@ export default function AdminAssessmentAssignPage() {
   const [batchId, setBatchId] = useState("");
   // Empty = every department in the batch (unchanged default behavior).
   const [selectedDepartments, setSelectedDepartments] = useState<string[]>([]);
+  // Per-department section narrowing (added 2026-11-14, user decision) —
+  // keyed by department code; an empty (or missing) array for a selected
+  // department means "every section in that department," exactly like
+  // selecting no departments at all means "every department in the
+  // batch." Built into the create/edit payload's department_sections via
+  // buildDepartmentSections() below.
+  const [selectedSections, setSelectedSections] = useState<Record<string, string[]>>({});
   const [duration, setDuration] = useState("60");
   const [startTime, setStartTime] = useState("");
   const [expireTime, setExpireTime] = useState("");
@@ -136,7 +196,7 @@ export default function AdminAssessmentAssignPage() {
   useEffect(() => {
     setReviewed({});
     setMockChoice(null);
-  }, [paperId, batchId, selectedDepartments, duration, startTime, expireTime, passCutoff, showResult, paperDetail]);
+  }, [paperId, batchId, selectedDepartments, selectedSections, duration, startTime, expireTime, passCutoff, showResult, paperDetail]);
 
   // Shared by the Final Review "Yes" prompt and each assignment card's
   // "Mock Test" toolbar button — starts (or resumes) a trial session on
@@ -165,6 +225,15 @@ export default function AdminAssessmentAssignPage() {
     startMockTrial(a.paper, a.exam_duration_minutes).finally(() => setStartingMockFor(null));
   }
 
+  // Builds the department_sections payload shape ({department, sections}[])
+  // from a flat list of selected department codes plus the per-department
+  // section map — shared by the create form, the edit form, and the live
+  // eligible-count preview below, so all three can never disagree on what
+  // "the selected scope" actually means.
+  function buildDepartmentSections(departments: string[], sectionsByDept: Record<string, string[]>) {
+    return departments.map(department => ({ department, sections: sectionsByDept[department] ?? [] }));
+  }
+
   // "Students attending this assessment" — deliberately requires BOTH a
   // batch AND at least one department selected before showing a number
   // (leaving departments empty means "every department," but the admin
@@ -185,14 +254,15 @@ export default function AdminAssessmentAssignPage() {
     let cancelled = false;
     setLoadingEligibleCount(true);
     setEligibleCountError(false);
+    const departmentSections = buildDepartmentSections(selectedDepartments, selectedSections);
     api.get<PaginatedResponse<unknown>>(
-      `/users/batches/${batchId}/students/?departments=${encodeURIComponent(selectedDepartments.join(","))}&page_size=1`
+      `/users/batches/${batchId}/students/?department_sections=${encodeURIComponent(JSON.stringify(departmentSections))}&page_size=1`
     )
       .then(res => { if (!cancelled) setEligibleCount(res.data.count); })
       .catch(() => { if (!cancelled) { setEligibleCount(null); setEligibleCountError(true); } })
       .finally(() => { if (!cancelled) setLoadingEligibleCount(false); });
     return () => { cancelled = true; };
-  }, [batchId, selectedDepartments]);
+  }, [batchId, selectedDepartments, selectedSections]);
 
   const [confirmStart, setConfirmStart] = useState<BatchAssignment | null>(null);
   // Set only when a Start-Exam attempt comes back with the backend's 409
@@ -221,6 +291,7 @@ export default function AdminAssessmentAssignPage() {
   // they're locked at creation (AdminAssignmentDetailView._LOCKED_EDIT_FIELDS).
   const [editingAssignment, setEditingAssignment] = useState<BatchAssignment | null>(null);
   const [editDepartments, setEditDepartments] = useState<string[]>([]);
+  const [editSections, setEditSections] = useState<Record<string, string[]>>({});
   const [editDuration, setEditDuration] = useState("");
   const [editStartTime, setEditStartTime] = useState("");
   const [editExpireTime, setEditExpireTime] = useState("");
@@ -325,14 +396,14 @@ export default function AdminAssessmentAssignPage() {
       exam_duration_minutes: durationNum,
       pass_cutoff_percentage: Number(passCutoff) || 40,
       show_result_to_student: showResult,
-      departments: selectedDepartments,
+      department_sections: buildDepartmentSections(selectedDepartments, selectedSections),
     };
 
     setCreating(true);
     try {
       const res = await api.post<ApiSuccess<BatchAssignment>>("/assessments/admin/assignments/", payload);
       setAssignments(prev => [res.data.data, ...prev]);
-      setBatchId(""); setSelectedDepartments([]); setStartTime(""); setExpireTime(""); setDuration("60"); setPassCutoff("40"); setShowResult(true);
+      setBatchId(""); setSelectedDepartments([]); setSelectedSections({}); setStartTime(""); setExpireTime(""); setDuration("60"); setPassCutoff("40"); setShowResult(true);
       setFormOpen(false);
       toast.success("Assignment created.");
     } catch (err) {
@@ -427,12 +498,43 @@ export default function AdminAssessmentAssignPage() {
     setSelectedDepartments(prev =>
       prev.includes(dept) ? prev.filter(d => d !== dept) : [...prev, dept]
     );
+    // Deselecting a department drops its section narrowing too — leaving
+    // a stale entry around would silently resurrect it if the same
+    // department is re-selected later in the same form session.
+    setSelectedSections(prev => {
+      if (!(dept in prev)) return prev;
+      const next = { ...prev };
+      delete next[dept];
+      return next;
+    });
+  }
+
+  function toggleSection(dept: string, section: string) {
+    setSelectedSections(prev => {
+      const current = prev[dept] ?? [];
+      const next = current.includes(section) ? current.filter(s => s !== section) : [...current, section];
+      return { ...prev, [dept]: next };
+    });
   }
 
   function toggleEditDepartment(dept: string) {
     setEditDepartments(prev =>
       prev.includes(dept) ? prev.filter(d => d !== dept) : [...prev, dept]
     );
+    setEditSections(prev => {
+      if (!(dept in prev)) return prev;
+      const next = { ...prev };
+      delete next[dept];
+      return next;
+    });
+  }
+
+  function toggleEditSection(dept: string, section: string) {
+    setEditSections(prev => {
+      const current = prev[dept] ?? [];
+      const next = current.includes(section) ? current.filter(s => s !== section) : [...current, section];
+      return { ...prev, [dept]: next };
+    });
   }
 
   // Opens the Edit panel pre-populated from the assignment's current
@@ -441,7 +543,10 @@ export default function AdminAssessmentAssignPage() {
   // the same gate server-side regardless.
   function openEditModal(assignment: BatchAssignment) {
     setEditingAssignment(assignment);
-    setEditDepartments(assignment.departments);
+    setEditDepartments(assignment.department_sections.map(entry => entry.department));
+    setEditSections(Object.fromEntries(
+      assignment.department_sections.map(entry => [entry.department, entry.sections])
+    ));
     setEditDuration(String(assignment.exam_duration_minutes));
     setEditStartTime(toDatetimeLocalValue(assignment.global_start_time));
     setEditExpireTime(toDatetimeLocalValue(assignment.global_expire_time));
@@ -474,7 +579,7 @@ export default function AdminAssessmentAssignPage() {
           exam_duration_minutes: durationNum,
           pass_cutoff_percentage: Number(editPassCutoff) || 40,
           show_result_to_student: editShowResult,
-          departments: editDepartments,
+          department_sections: buildDepartmentSections(editDepartments, editSections),
         },
       );
       setAssignments(prev => prev.map(a => a.id === editingAssignment.id ? res.data.data : a));
@@ -533,7 +638,9 @@ export default function AdminAssessmentAssignPage() {
     },
     {
       id: "departments", label: "Assigned department(s)",
-      value: selectedDepartments.length > 0 ? selectedDepartments.join(", ") : "All departments in the batch",
+      value: selectedDepartments.length > 0
+        ? formatDepartmentSections(buildDepartmentSections(selectedDepartments, selectedSections))
+        : "All departments in the batch",
     },
     {
       id: "duration", label: "Exam duration",
@@ -637,7 +744,7 @@ export default function AdminAssessmentAssignPage() {
 
             <div>
               <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--color-text-muted)" }}>
-                Departments (optional — leave all unchecked to include every department in the batch)
+                Departments (optional — leave all unchecked to include every department in the batch; pick a department's sections to narrow further, e.g. CSE section A only)
               </label>
               <div className="flex flex-wrap gap-2">
                 {activeDepartments.map(d => {
@@ -659,9 +766,14 @@ export default function AdminAssessmentAssignPage() {
                   );
                 })}
               </div>
+              <DepartmentSectionsPicker
+                departments={selectedDepartments}
+                sections={selectedSections}
+                onToggleSection={toggleSection}
+              />
               {selectedDepartments.length > 0 && (
                 <p className="text-xs mt-1.5" style={{ color: "var(--color-text-subtle)" }}>
-                  Only {selectedDepartments.join(", ")} student{selectedDepartments.length === 1 ? "" : "s"} in the selected batch will be assigned this exam.
+                  Only {formatDepartmentSections(buildDepartmentSections(selectedDepartments, selectedSections))} student{selectedDepartments.length === 1 ? "" : "s"} in the selected batch will be assigned this exam.
                 </p>
               )}
             </div>
@@ -891,8 +1003,8 @@ export default function AdminAssessmentAssignPage() {
                         </span>
                         <span className="flex items-center gap-1"><CheckCircle2 size={11} /> cutoff {a.pass_cutoff_percentage}%</span>
                         <span>{a.show_result_to_student ? "Results visible to students" : "Results hidden from students"}</span>
-                        {a.departments.length > 0 && (
-                          <span>Departments: {a.departments.join(", ")}</span>
+                        {a.department_sections.length > 0 && (
+                          <span>Departments: {formatDepartmentSections(a.department_sections)}</span>
                         )}
                       </p>
                     </div>
@@ -1058,7 +1170,7 @@ export default function AdminAssessmentAssignPage() {
 
             <div>
               <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--color-text-muted)" }}>
-                Departments (leave all unchecked to include every department in the batch)
+                Departments (leave all unchecked to include every department in the batch; pick a department's sections to narrow further)
               </label>
               <div className="flex flex-wrap gap-2">
                 {activeDepartments.map(d => {
@@ -1080,9 +1192,14 @@ export default function AdminAssessmentAssignPage() {
                   );
                 })}
               </div>
+              <DepartmentSectionsPicker
+                departments={editDepartments}
+                sections={editSections}
+                onToggleSection={toggleEditSection}
+              />
               {editDepartments.length > 0 && (
                 <p className="text-xs mt-1.5" style={{ color: "var(--color-text-subtle)" }}>
-                  Changing departments re-runs the roster snapshot — newly-matching students are added; students already allocated are never removed.
+                  Changing departments or sections re-runs the roster snapshot — newly-matching students are added; students already allocated are never removed.
                 </p>
               )}
             </div>

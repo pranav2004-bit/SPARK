@@ -1133,30 +1133,30 @@ class AdminAssignmentDetailView(APIView):
                 status_code=400,
             )
 
-        departments_before = list(assignment.departments)
+        department_sections_before = list(assignment.department_sections)
         s = BatchAssignmentSerializer(assignment, data=request.data, partial=True)
         if not s.is_valid():
             return error_response("Validation failed", errors=s.errors, status_code=400)
         s.save()
 
-        # departments changing is only a real, effective edit if the
-        # roster snapshot is re-run against the new filter — otherwise an
-        # admin narrowing/widening departments here would see the field
-        # value change with no actual effect on who's allocated, which is
-        # a worse outcome than refusing the edit outright. Reuses the exact
+        # department_sections changing is only a real, effective edit if
+        # the roster snapshot is re-run against the new filter — otherwise
+        # an admin narrowing/widening it here would see the field value
+        # change with no actual effect on who's allocated, which is a
+        # worse outcome than refusing the edit outright. Reuses the exact
         # same primitive AdminAssignmentResyncRosterView already calls for
         # the equivalent "re-check the roster" action — additive only
         # (matches that view's own established, already-shipped behavior):
         # newly-matching students are allocated, students already
         # allocated under the old filter are not retroactively removed.
         new_allocations = None
-        if list(assignment.departments) != departments_before:
+        if list(assignment.department_sections) != department_sections_before:
             auth_header = request.META.get("HTTP_AUTHORIZATION", "")
             try:
                 new_allocations = snapshot_roster_and_allocate(assignment, auth_header)
             except RuntimeError as exc:
                 return error_response(
-                    f"Assignment updated, but could not resync the roster for the new departments: {exc}",
+                    f"Assignment updated, but could not resync the roster for the new department(s)/section(s): {exc}",
                     status_code=502,
                 )
 
