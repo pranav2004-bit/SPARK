@@ -67,7 +67,7 @@ function PaperCard({ paper, isOwner, onNavigate, onEdit, onDelete }: PaperCardPr
       title={isOwner ? undefined : `Created by ${creatorLabel || "another admin"} — you can't open this.`}
     >
       <div className="min-w-0 flex-1">
-        <p className="text-base font-semibold leading-snug truncate" style={{ color: "var(--color-text)" }}>{paper.title}</p>
+        <p className="text-base font-semibold leading-snug break-words" style={{ color: "var(--color-text)" }}>{paper.title}</p>
         <p className="text-sm mt-1" style={{ color: "var(--color-text-subtle)" }}>
           {paper.set_count} set{paper.set_count === 1 ? "" : "s"}
         </p>
