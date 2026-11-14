@@ -399,9 +399,11 @@ export interface BatchAssignment {
   // created with show_result_to_student=false — null means either "still
   // hidden" or "visible since creation" (never explicitly published).
   results_published_at: string | null;
-  // Empty array means every department in the batch — non-empty narrows
-  // the roster snapshot to just those department(s).
-  departments: string[];
+  // Empty array means every department in the batch. Each entry's own
+  // `sections` narrows further within that department — empty means
+  // every section in it (added 2026-11-14, replacing the old flat
+  // `departments: string[]`).
+  department_sections: { department: string; sections: string[] }[];
   status: BatchAssignmentStatus;
   created_by: string;
   created_at: string;

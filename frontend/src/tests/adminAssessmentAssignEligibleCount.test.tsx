@@ -9,7 +9,9 @@
  * a number — leaving departments empty still means "every department" for
  * the actual assignment, but this preview only populates once both choices
  * are explicit — so that gating is the main thing this file proves, backed
- * by GET /users/batches/<id>/students/?departments=<comma-separated>.
+ * by GET /users/batches/<id>/students/?department_sections=<JSON-encoded>
+ * (changed 2026-11-14 from the old flat ?departments=<comma-separated>, to
+ * support per-department section narrowing).
  */
 
 const mockPush = jest.fn();
@@ -122,8 +124,9 @@ describe("Admin Assign page — Batch dropdown and eligible-student count", () =
     await openFormAndSelect(user, { paper: false });
     await user.click(screen.getByRole("button", { name: /Computer Science and Data Science/ }));
 
+    const expectedParam = encodeURIComponent(JSON.stringify([{ department: "CSD", sections: [] }]));
     await waitFor(() => expect(api.get).toHaveBeenCalledWith(
-      expect.stringMatching(/^\/users\/batches\/batch-1\/students\/\?departments=CSD&page_size=1$/)
+      `/users/batches/batch-1/students/?department_sections=${expectedParam}&page_size=1`
     ));
     expect(await screen.findByText("7 students")) .toBeInTheDocument();
   });
@@ -137,8 +140,11 @@ describe("Admin Assign page — Batch dropdown and eligible-student count", () =
     await user.click(screen.getByRole("button", { name: /Computer Science and Data Science/ }));
     await user.click(screen.getByRole("button", { name: /Electronics and Communication Engineering/ }));
 
+    const expectedParam = encodeURIComponent(JSON.stringify([
+      { department: "CSD", sections: [] }, { department: "ECE", sections: [] },
+    ]));
     await waitFor(() => expect(api.get).toHaveBeenCalledWith(
-      expect.stringContaining("departments=CSD%2CECE")
+      expect.stringContaining(`department_sections=${expectedParam}`)
     ));
     expect(await screen.findByText("12 students")).toBeInTheDocument();
 

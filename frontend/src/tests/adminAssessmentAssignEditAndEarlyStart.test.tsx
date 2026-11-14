@@ -58,7 +58,7 @@ function scheduledAssignment(overrides: Record<string, unknown> = {}) {
     id: "assign-1", paper: "paper-1", paper_title: "MOCK TEST 2", batch_id: "batch-1", institution_id: "inst-1",
     global_start_time: "2026-09-01T09:00:00Z", global_expire_time: "2026-09-01T12:00:00Z",
     exam_duration_minutes: 60, pass_cutoff_percentage: 40, show_result_to_student: true,
-    results_published_at: null, departments: [], status: "SCHEDULED", created_by: "admin-1",
+    results_published_at: null, department_sections: [], status: "SCHEDULED", created_by: "admin-1",
     created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
     ...overrides,
   };
@@ -176,7 +176,7 @@ describe("Admin Assign page — Edit assignment", () => {
   it("shows the new-allocations count when changing departments resyncs the roster", async () => {
     mockApiGet([scheduledAssignment()]);
     jest.spyOn(api, "patch").mockResolvedValueOnce({
-      data: { data: { ...scheduledAssignment({ departments: ["CSE"] }), new_allocations: 5 } },
+      data: { data: { ...scheduledAssignment({ department_sections: [{ department: "CSE", sections: [] }] }), new_allocations: 5 } },
     } as any);
     const user = userEvent.setup();
     render(<AdminAssessmentAssignPage />);

@@ -188,3 +188,63 @@ class TestBatchStudentsMultiDepartmentFilter:
         resp = admin_client.get(f"/api/users/batches/{batch.pk}/students/?departments=MECH")
         assert resp.status_code == 200
         assert resp.json()["count"] == 0
+
+
+class TestBatchStudentsDepartmentSectionsFilter:
+    """department_sections (added 2026-11-14, user decision) — pairs each
+    department with its own section narrowing, so this endpoint's live
+    preview count stays accurate for assessment-service's new per-
+    department-section assignment scoping (assessments/allocation.py)."""
+
+    def _make_students(self, batch, entries):
+        from users.models import Student
+        for i, (dept, section) in enumerate(entries):
+            Student.objects.create(
+                user_id=uuid.uuid4(), student_id=f"DS{i:03d}", department=dept, section=section,
+                batch=batch, institution_id=INSTITUTION_A,
+            )
+
+    def _url(self, batch, entries):
+        import json
+        import urllib.parse
+        return (
+            f"/api/users/batches/{batch.pk}/students/"
+            f"?department_sections={urllib.parse.quote(json.dumps(entries))}"
+        )
+
+    def test_matches_only_listed_section_within_a_department(self, admin_client, batch):
+        self._make_students(batch, [("CSE", "A"), ("CSE", "B"), ("CSE", "C")])
+        resp = admin_client.get(self._url(batch, [{"department": "CSE", "sections": ["A", "B"]}]))
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 2
+
+    def test_same_section_letter_in_a_different_department_is_not_matched(self, admin_client, batch):
+        self._make_students(batch, [("CSE", "A"), ("ECE", "A")])
+        resp = admin_client.get(self._url(batch, [{"department": "CSE", "sections": ["A"]}]))
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 1  # only the CSE-A student
+
+    def test_different_sections_per_department_combine_independently(self, admin_client, batch):
+        self._make_students(batch, [("CSE", "A"), ("CSE", "C"), ("ECE", "C"), ("ECE", "A")])
+        resp = admin_client.get(self._url(batch, [
+            {"department": "CSE", "sections": ["A"]}, {"department": "ECE", "sections": ["C"]},
+        ]))
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 2  # CSE-A + ECE-C only
+
+    def test_empty_sections_list_means_whole_department(self, admin_client, batch):
+        self._make_students(batch, [("CSE", "A"), ("CSE", "Z"), ("ECE", "A")])
+        resp = admin_client.get(self._url(batch, [{"department": "CSE", "sections": []}]))
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 2  # both CSE students, ECE excluded
+
+    def test_case_insensitive(self, admin_client, batch):
+        self._make_students(batch, [("CSE", "A")])
+        resp = admin_client.get(self._url(batch, [{"department": "cse", "sections": ["a"]}]))
+        assert resp.json()["count"] == 1
+
+    def test_malformed_json_does_not_crash_and_returns_everyone(self, admin_client, batch):
+        self._make_students(batch, [("CSE", "A"), ("ECE", "B")])
+        resp = admin_client.get(f"/api/users/batches/{batch.pk}/students/?department_sections=not-json")
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 2

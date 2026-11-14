@@ -1,3 +1,4 @@
+import json
 import logging
 from django.db import models, transaction, IntegrityError
 from core.auth_client import create_student_auth, set_student_active, delete_student_auth
@@ -164,6 +165,19 @@ def _apply_student_filters(qs, request):
     # are somehow passed together; no existing caller does that.
     departments = request.query_params.get("departments", "").strip()
     section = request.query_params.get("section", "").strip()
+    # JSON-encoded list of {"department": str, "sections": [str, ...]}
+    # (added 2026-11-14, user decision) — pairs each department with its
+    # OWN section narrowing, unlike `departments`/`section` above which
+    # are two independent flat filters (department="CSE" AND section="A"
+    # would also match an ECE-A student if ECE were somehow in a second
+    # filter at the same time — this param exists specifically so "CSE
+    # section A" and "ECE section C" can be expressed together without
+    # that cross-contamination). Matching logic is a deliberate mirror of
+    # assessment-service's snapshot_roster_and_allocate (assessments/
+    # allocation.py) so this endpoint's live preview count — the admin
+    # Assign page's "students attending this assessment" — is never wrong
+    # relative to what an actual assignment creation would allocate.
+    department_sections_raw = request.query_params.get("department_sections", "").strip()
     batch_id = request.query_params.get("batch_id", "").strip()
     if search:
         qs = qs.filter(
@@ -180,6 +194,35 @@ def _apply_student_filters(qs, request):
             qs = qs.filter(match)
     if section:
         qs = qs.filter(section__iexact=section)
+    if department_sections_raw:
+        try:
+            entries = json.loads(department_sections_raw)
+        except (TypeError, ValueError):
+            entries = []
+        if isinstance(entries, list):
+            match = Q()
+            any_valid = False
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                dept = str(entry.get("department") or "").strip()
+                if not dept:
+                    continue
+                any_valid = True
+                raw_sections = entry.get("sections") or []
+                sections = (
+                    [str(s).strip() for s in raw_sections if str(s).strip()]
+                    if isinstance(raw_sections, list) else []
+                )
+                if sections:
+                    sect_match = Q()
+                    for s in sections:
+                        sect_match |= Q(section__iexact=s)
+                    match |= (Q(department__iexact=dept) & sect_match)
+                else:
+                    match |= Q(department__iexact=dept)
+            if any_valid:
+                qs = qs.filter(match)
     if batch_id:
         qs = qs.filter(batch_id=batch_id)
     return qs
