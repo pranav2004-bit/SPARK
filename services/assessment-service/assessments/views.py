@@ -68,11 +68,13 @@ PAPER_OWNERSHIP_DENIED_MSG = "This assessment was created by another admin and c
 def _require_paper_owner(paper, request):
     """Faculty-privacy restriction: a question paper's contents (sets,
     questions, options, instructions, images) and the ability to assign it
-    to a batch are visible/actionable only to the admin who authored it —
-    every other admin at the same institution sees the paper listed
-    (AdminPaperListCreateView.get is intentionally NOT gated by this) but
-    cannot open, edit, delete, or assign it. Results/Analytics/Dashboard
-    stay institution-wide and are never gated by this check.
+    to a batch are visible/actionable only to the admin who authored it.
+    Enforced on every direct-access endpoint this function guards; the
+    list itself (AdminPaperListCreateView.get) goes further (2026-11-14,
+    user decision) and doesn't even include another admin's papers in the
+    response at all, rather than listing them locked/"View only" as it
+    used to. Results/Analytics/Dashboard stay institution-wide and are
+    never gated by this check.
 
     Super admins always bypass this — without an override, a paper would
     become permanently inaccessible to everyone the instant its creator's
@@ -233,7 +235,16 @@ class AdminPaperListCreateView(APIView):
         # not in this authoring list.
         papers = QuestionPaper.objects.filter(
             institution_id=institution_id, is_deleted=False,
-        ).annotate(set_count=Count("sets"))
+        )
+        # Owner-only (changed 2026-11-14, user decision) — a regular admin
+        # no longer even sees another admin's papers listed here, let alone
+        # the old locked/"View only" card for them. super_admin is the one
+        # exception, same bypass as _require_paper_owner's own: their role
+        # is institution-wide oversight, not a creator identity, so they
+        # still see (and can open) every paper.
+        if request.user.role != "super_admin":
+            papers = papers.filter(created_by=request.user.id)
+        papers = papers.annotate(set_count=Count("sets"))
 
         paginator = StandardResultsPagination()
         page = paginator.paginate_queryset(papers, request)
