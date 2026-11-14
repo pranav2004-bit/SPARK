@@ -307,6 +307,16 @@ function QuestionEditorModal({ isOpen, onClose, question, sectionId, setId, onCr
     setPendingOptions(prev => prev.length <= 1 ? prev : prev.filter((_, i) => i !== index));
   }
 
+  // Manual "Add Option" for the pre-creation list (added as an addition
+  // alongside the existing paste-splits-into-many-rows behavior above —
+  // that still works exactly as before for anyone who pastes a multi-line
+  // block; this just covers the case where an admin wants to add rows one
+  // at a time instead, e.g. after typing only Option A by hand). Same
+  // 26-row cap as the post-creation editor's own Add Option (A-Z).
+  function addPendingOption() {
+    setPendingOptions(prev => prev.length >= 26 ? prev : [...prev, { text: "", correct: false }]);
+  }
+
   // Same behavior as OptionRow's onPaste (below, for an already-created
   // question) — pasting multiple lines spills each extra line into a new
   // pending row instead of cramming them all into one option's text.
@@ -621,9 +631,16 @@ function QuestionEditorModal({ isOpen, onClose, question, sectionId, setId, onCr
             as OptionRow, below, for an already-created question). */}
         {!current && (
           <div>
-            <label className="block text-xs font-semibold mb-1.5" style={{ color: T.muted }}>
-              Answer Options <span className="font-normal" style={{ color: T.subtle }}>(required — mark at least one correct with the check button; add more after creating)</span>
-            </label>
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+              <label className="block text-xs font-semibold" style={{ color: T.muted }}>
+                Answer Options <span className="font-normal" style={{ color: T.subtle }}>(required — mark at least one correct with the check button)</span>
+              </label>
+              <button type="button" onClick={addPendingOption} disabled={pendingOptions.length >= 26}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--radius-md)] text-xs font-semibold border transition-colors disabled:opacity-50 shrink-0"
+                style={{ background: "var(--color-surface-secondary)", color: T.muted, borderColor: T.border, boxShadow: "var(--shadow-sm)" }}>
+                <Plus size={12} /> Add Option
+              </button>
+            </div>
             <div className="space-y-2">
               {pendingOptions.map((opt, i) => (
                 <div key={i} className="flex items-start gap-3 p-3 rounded-[var(--radius-md)]"
@@ -671,7 +688,7 @@ function QuestionEditorModal({ isOpen, onClose, question, sectionId, setId, onCr
               <p className="text-sm font-semibold" style={{ color: T.text }}>Answer Options</p>
               <button type="button" onClick={handleAddOption} disabled={addingOpt || options.length >= 26}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--radius-md)] text-xs font-semibold border transition-colors disabled:opacity-50"
-                style={{ background: T.surface, color: T.muted, borderColor: T.border }}>
+                style={{ background: "var(--color-surface-secondary)", color: T.muted, borderColor: T.border, boxShadow: "var(--shadow-sm)" }}>
                 {addingOpt ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />} Add Option
               </button>
             </div>

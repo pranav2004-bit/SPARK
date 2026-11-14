@@ -561,6 +561,11 @@ export interface AdminResultResponseQuestion {
 
 export interface AdminResultResponsesData {
   result_id: string;
+  // True once the admin has deleted this paper's content (2026-11-13) —
+  // the actual question/option text is gone, so `questions` is always []
+  // alongside this flag; the UI shows a "deleted by the admin" message
+  // instead of an empty list.
+  paper_deleted?: boolean;
   questions: AdminResultResponseQuestion[];
 }
 
@@ -586,6 +591,10 @@ export interface AdminQuestionResponsesData {
   count: number;
   total_pages: number;
   current_page: number;
+  // True once the admin has deleted this question's paper (2026-11-13) —
+  // the real Question row is gone, so every other field here is just a
+  // placeholder; the UI shows a "deleted by the admin" message instead.
+  paper_deleted?: boolean;
   students: AdminQuestionResponseStudent[];
 }
 

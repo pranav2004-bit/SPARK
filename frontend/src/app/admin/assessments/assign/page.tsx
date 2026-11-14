@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import axios from "axios";
-import { PlayCircle, StopCircle, RefreshCcw, Users, Clock, CheckCircle2, FileText, TrendingUp, LayoutDashboard, ChevronDown, AlertTriangle, FlaskConical, Pencil } from "lucide-react";
+import { PlayCircle, StopCircle, RefreshCcw, Users, Clock, CheckCircle2, FileText, TrendingUp, LayoutDashboard, ChevronDown, AlertTriangle, FlaskConical, Pencil, Trash2 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -205,6 +205,14 @@ export default function AdminAssessmentAssignPage() {
   const [confirmClose, setConfirmClose] = useState<BatchAssignment | null>(null);
   const [actingOn, setActingOn] = useState<string | null>(null);
   const [resyncingId, setResyncingId] = useState<string | null>(null);
+  // Delete (added 2026-11-13, user decision) — SCHEDULED is a true hard
+  // delete, CLOSED is a soft delete/archive (preserves Results/Analytics/
+  // Dashboard data); LIVE can't be deleted at all, enforced both by hiding
+  // the button below and by the backend. Same typed-confirmation pattern
+  // as the Question Bank paper delete, since the SCHEDULED branch is
+  // genuinely irreversible.
+  const [confirmDelete, setConfirmDelete] = useState<BatchAssignment | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   // Edit (Task — mandatory start time / auto-start / edit panel, added
   // 2026-11-12) — only reachable while an assignment is still SCHEDULED
@@ -393,6 +401,22 @@ export default function AdminAssessmentAssignPage() {
       toast.error(getErrorMessage(err));
     } finally {
       setResyncingId(null);
+    }
+  }
+
+  async function handleDelete(assignment: BatchAssignment) {
+    setDeletingId(assignment.id);
+    try {
+      await api.delete(`/assessments/admin/assignments/${assignment.id}/`);
+      setAssignments(prev => prev.filter(a => a.id !== assignment.id));
+      toast.success(
+        assignment.status === "CLOSED" ? "Assignment archived." : "Assignment deleted."
+      );
+    } catch (err) {
+      toast.error(getErrorMessage(err));
+    } finally {
+      setDeletingId(null);
+      setConfirmDelete(null);
     }
   }
 
@@ -938,6 +962,15 @@ export default function AdminAssessmentAssignPage() {
                           Close Exam
                         </Button>
                       )}
+                      {a.status !== "LIVE" && (
+                        <Button
+                          variant="danger" size="sm"
+                          leftIcon={<Trash2 size={13} />}
+                          onClick={() => setConfirmDelete(a)}
+                        >
+                          Delete
+                        </Button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -992,6 +1025,22 @@ export default function AdminAssessmentAssignPage() {
         confirmLabel="Close Exam"
         confirmVariant="danger"
         loading={actingOn === confirmClose?.id}
+      />
+
+      <ConfirmDialog
+        isOpen={!!confirmDelete}
+        onClose={() => setConfirmDelete(null)}
+        onConfirm={() => confirmDelete && handleDelete(confirmDelete)}
+        title={confirmDelete?.status === "CLOSED" ? "Delete this assignment?" : "Delete this scheduled assignment?"}
+        message={
+          confirmDelete?.status === "CLOSED"
+            ? `This removes "${confirmDelete ? batchName(confirmDelete.batch_id) : ""}" from this list. Its results, analytics, dashboard, and students' past results are unaffected and stay exactly as they are — only this entry is archived.`
+            : `This permanently deletes "${confirmDelete ? batchName(confirmDelete.batch_id) : ""}" — it hasn't started, so there's no student data to preserve. This cannot be undone.`
+        }
+        confirmLabel="Delete"
+        confirmVariant="danger"
+        loading={deletingId === confirmDelete?.id}
+        requireTypedConfirmation="delete"
       />
 
       <Modal

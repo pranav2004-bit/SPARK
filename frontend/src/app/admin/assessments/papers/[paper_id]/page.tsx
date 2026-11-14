@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
-  Layers, HelpCircle, Pencil, Trash2, ChevronRight, ListChecks, ScrollText,
+  HelpCircle, Pencil, Trash2, ChevronRight, ScrollText,
 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -18,13 +18,32 @@ import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
 import type { QuestionPaper, QuestionSet, ApiSuccess } from "@/types";
 
-const PALETTE = [
-  { bg: "#EFF6FF", color: "#2563EB" },
-  { bg: "#F0FDF4", color: "#16A34A" },
-  { bg: "#FDF4FF", color: "#9333EA" },
-  { bg: "#FFF4E6", color: "#E8820C" },
-];
-const palette = (i: number) => PALETTE[i % PALETTE.length];
+// Small icon button with a black/white hover tooltip showing its label —
+// Edit/Delete here are icon-only with no visible text, so on-hover
+// identification matters. Mirrors the same component in the sibling
+// sets/[set_id] page.
+function IconActionButton({ label, onClick, color, children }: {
+  label: string;
+  onClick: (e: React.MouseEvent) => void;
+  color: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="relative group">
+      <button onClick={onClick} aria-label={label}
+        className="w-8 h-8 rounded-[var(--radius-md)] flex items-center justify-center transition-colors cursor-pointer"
+        style={{ color }}>
+        {children}
+      </button>
+      <span
+        className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 whitespace-nowrap rounded px-2 py-1 text-xs font-medium opacity-0 group-hover:opacity-100 transition-opacity z-10"
+        style={{ background: "#111827", color: "#fff" }}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
 
 interface PaperDetail {
   paper: QuestionPaper;
@@ -160,7 +179,7 @@ export default function AdminAssessmentPaperPage() {
         />
 
         {loading ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
             {[1, 2, 3].map(i => <ResourceItemCardSkeleton key={i} />)}
           </div>
         ) : isEmpty ? (
@@ -170,53 +189,39 @@ export default function AdminAssessmentPaperPage() {
             subtitle="Add at least one set (e.g. Set A) to start authoring questions."
           />
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {detail!.sets.map((s, i) => {
-              const { bg, color } = palette(i);
+          // auto-fill + minmax, not a fixed column count — a row with few
+          // cards keeps each card at its own natural width instead of
+          // stretching to fill its grid cell (same fix as the Section
+          // cards one level down, sets/[set_id]/page.tsx).
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
+            {detail!.sets.map((s) => {
               return (
                 <div
                   key={s.id}
-                  className="rounded-[var(--radius-xl)] overflow-hidden transition-shadow duration-150 hover:shadow-[var(--shadow-md)]"
+                  className="flex items-center justify-between gap-3 p-4 rounded-[var(--radius-xl)] cursor-pointer transition-shadow duration-150 hover:shadow-[var(--shadow-md)] group/card"
                   style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", boxShadow: "var(--shadow-sm)" }}
+                  onClick={() => router.push(`/admin/assessments/papers/${paper_id}/sets/${s.id}`)}
                 >
-                  <button
-                    onClick={() => router.push(`/admin/assessments/papers/${paper_id}/sets/${s.id}`)}
-                    className="w-full text-left px-5 pt-5 pb-4 group cursor-pointer"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="w-11 h-11 rounded-[var(--radius-lg)] flex items-center justify-center shrink-0" style={{ background: bg }}>
-                        <Layers size={20} style={{ color }} />
-                      </div>
-                      <ChevronRight size={16} style={{ color: "var(--color-text-subtle)", marginTop: 2, flexShrink: 0 }}
-                        className="transition-transform duration-150 group-hover:translate-x-0.5" />
-                    </div>
-                    <div className="mt-3">
-                      <p className="text-[15px] font-semibold leading-snug" style={{ color: "var(--color-text)" }}>{s.label}</p>
-                      <p className="text-xs mt-1 flex items-center gap-2" style={{ color: "var(--color-text-subtle)" }}>
-                        <span className="flex items-center gap-1"><ListChecks size={11} /> {s.question_count} question{s.question_count === 1 ? "" : "s"}</span>
-                        <span>·</span>
-                        <span>{s.total_marks} mark{s.total_marks === 1 ? "" : "s"}</span>
-                      </p>
-                    </div>
-                  </button>
-
-                  <div className="flex items-center justify-end px-4 py-3 gap-1" style={{ borderTop: "1px solid var(--color-border)" }}>
-                    <button onClick={() => openModal({ mode: "edit", item: s })}
-                      className="w-8 h-8 rounded-[var(--radius-md)] flex items-center justify-center transition-colors cursor-pointer"
-                      style={{ color: "var(--color-text-subtle)" }} aria-label="Edit"
-                      onMouseEnter={e => { e.currentTarget.style.background = "var(--color-surface-hover)"; e.currentTarget.style.color = "var(--color-text)"; }}
-                      onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--color-text-subtle)"; }}
-                    >
+                  <div className="min-w-0 flex-1">
+                    <p className="text-base font-semibold leading-snug truncate" style={{ color: "var(--color-text)" }}>{s.label}</p>
+                    <p className="text-sm mt-1 flex items-center gap-2" style={{ color: "var(--color-text-subtle)" }}>
+                      <span>{s.question_count} question{s.question_count === 1 ? "" : "s"}</span>
+                      <span>·</span>
+                      <span>{s.total_marks} mark{s.total_marks === 1 ? "" : "s"}</span>
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-0.5 shrink-0">
+                    <ChevronRight size={16} style={{ color: "var(--color-text-subtle)" }}
+                      className="transition-transform duration-150 group-hover/card:translate-x-0.5" />
+                    <span className="w-px h-5 mx-1" style={{ background: "var(--color-border)" }} />
+                    <IconActionButton label="Edit" color="#2563EB"
+                      onClick={e => { e.stopPropagation(); openModal({ mode: "edit", item: s }); }}>
                       <Pencil size={14} />
-                    </button>
-                    <button onClick={() => setDeleteTarget({ id: s.id, label: s.label })}
-                      className="w-8 h-8 rounded-[var(--radius-md)] flex items-center justify-center transition-colors cursor-pointer"
-                      style={{ color: "var(--color-text-subtle)" }} aria-label="Delete"
-                      onMouseEnter={e => { e.currentTarget.style.background = "var(--color-danger-bg)"; e.currentTarget.style.color = "var(--color-danger)"; }}
-                      onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--color-text-subtle)"; }}
-                    >
+                    </IconActionButton>
+                    <IconActionButton label="Delete" color="var(--color-danger)"
+                      onClick={e => { e.stopPropagation(); setDeleteTarget({ id: s.id, label: s.label }); }}>
                       <Trash2 size={14} />
-                    </button>
+                    </IconActionButton>
                   </div>
                 </div>
               );

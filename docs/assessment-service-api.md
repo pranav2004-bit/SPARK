@@ -59,8 +59,13 @@ erDiagram
 | `description` | text | |
 | `created_by` | UUID | admin user_id |
 | `created_at` / `updated_at` | timestamp | |
+| `is_deleted` | bool, default `False` | added 2026-11-13 — see "Content deletion" below |
+| `deleted_at` | timestamp, nullable | |
+| `deleted_set_count` | int, nullable | frozen `sets.count()` at the moment of deletion |
 
 **Immutability:** becomes read-only the instant it has ≥1 `BatchAssignment` in `SCHEDULED`/`LIVE`/`CLOSED` (Task 2.2 stub → Task 3.2 real check). Admins wanting a changed version duplicate the paper.
+
+**Content deletion (added 2026-11-13, user decision):** `DELETE /api/assessments/admin/papers/<pk>/` erases this paper's *content* — every `QuestionSet`/`QuestionSection`/`Question`/`QuestionOption` row and their S3 images — to reclaim real storage, once `is_content_deletable()` holds: no `BatchAssignment` referencing the paper is `SCHEDULED` or `LIVE`, and no session (real or an admin's trial/mock-test, `assignment IS NULL`) against it is `IN_PROGRESS`. The `QuestionPaper` row itself is **never deleted** — only flagged `is_deleted=True` with `deleted_at`/`deleted_set_count` frozen — so its title/description/creator/dates/set-count keep displaying correctly forever in Results, Analytics, Dashboard, and student past-results, with zero change to any of those numbers. The one accepted exception: a deleted paper's question-by-question drill-down (`AdminResultResponsesView`, `AdminQuestionResponsesView`) shows a "deleted by the admin" message instead, since the actual question/option text is genuinely gone. S3 image keys are collected before deletion and cleaned up asynchronously via `tasks.delete_s3_images_task` (queued through `transaction.on_commit`, so cleanup never runs against a rolled-back delete). A deleted paper no longer appears in `GET /api/assessments/admin/papers/` (the Question Bank list), but its referencing assignments/results are otherwise untouched. See `StudentSetAllocation`/`AssessmentSession`'s new `set_label_snapshot` fields and `BatchAssignment.question_difficulty_snapshot` below for how every live `.set.label`/`Question` read site was made to survive this.
 
 **Ownership restriction (added 2026-08-17):** only the creating admin (`created_by`) or a `super_admin` may open, edit, delete, or assign a paper — enforced server-side via `_require_paper_owner` on every paper/set/question/option mutation and detail-read endpoint, returning `403` for any other admin. Every admin can still *see* every paper in the institution's list (`GET /api/assessments/admin/papers/`); non-owned papers just render locked/view-only in the UI. This is a faculty-privacy control, not an institution-isolation one — `institution_id` scoping is unchanged and unrelated.
 
@@ -134,6 +139,11 @@ Validation (Task 2.2): single-choice → exactly one `is_correct`; multiple-choi
 | `status` | enum | `SCHEDULED` / `LIVE` / `CLOSED` — see ADR 001 |
 | `created_by` | UUID | |
 | `departments` | JSON list of strings | added 2026-08-17. Empty (default) = every department in the batch, matching pre-existing behavior. Non-empty = roster is filtered case-insensitively to just those departments at snapshot time (`snapshot_roster_and_allocate`) — raises if the filter would leave a first-ever snapshot with zero students against a non-empty source roster, so an assignment can never be silently created with nobody in it. |
+| `is_deleted` | bool, default `False` | added 2026-11-13 |
+| `deleted_at` | timestamp, nullable | |
+| `question_difficulty_snapshot` | JSON, nullable | frozen copy of `_question_difficulty()`'s own return value, computed just-in-time by the paper-content-delete endpoint (not backfilled for history) — see "Content deletion" above |
+
+**Deletion (added 2026-11-13):** `DELETE /api/assessments/admin/assignments/<pk>/` — `LIVE` is blocked (`403`); `SCHEDULED` is a true hard delete (nothing has started, so no real `AssessmentSession`/`ResultSummary` row can exist yet — cascades through `StudentSetAllocation`); `CLOSED` is a soft delete/archive (`is_deleted`/`deleted_at`), never a row delete, since real session/result rows exist and `PROTECT` their `assignment` FK, and Results/Analytics/Dashboard/student past-results must show zero change. `GET /api/assessments/admin/assignments/` excludes `is_deleted=True` by default (hides it from the Assign page's own list) unless the caller passes `?include_archived=true`, which `AssignmentPickerList.tsx` (backing Results/Analytics/Dashboard) always does, so an archived assignment stays fully selectable there.
 
 ### StudentSetAllocation — Task 3.1
 | Field | Type | Notes |
@@ -141,7 +151,8 @@ Validation (Task 2.2): single-choice → exactly one `is_correct`; multiple-choi
 | `id` | UUID | PK |
 | `assignment` | FK → BatchAssignment | |
 | `student_id` | UUID | |
-| `set` | FK → QuestionSet | |
+| `set` | FK → QuestionSet, **nullable** (changed 2026-11-13, was `PROTECT`) | now `SET_NULL` — set to NULL the instant the set's paper has its content deleted |
+| `set_label_snapshot` | string, added 2026-11-13 | frozen copy of `set.label` at allocation time; every live read of this allocation's set label (results table, CSV export, `?set=` filter, `available_sets`) reads this instead of `set.label`, so it survives the set row later being deleted |
 | `allocated_at` | timestamp | |
 
 `unique_together = (assignment, student_id)`. Distribution: `hash(student_id + assignment_id) % set_count` — deterministic (idempotent re-run) but unpredictable (closes AT7). Roster snapshotted from `user-service` at assignment-creation time; the exam-taking path never calls `user-service` live.
@@ -152,7 +163,9 @@ Validation (Task 2.2): single-choice → exactly one `is_correct`; multiple-choi
 | `id` | UUID | PK |
 | `assignment` | FK → BatchAssignment, **nullable** (added 2026-08-27) | NULL marks an admin "mock test" trial session — see below |
 | `student_id` | UUID | For a trial session, the trialing admin's own user_id (see below) |
-| `set` | FK → QuestionSet | which set this student was allocated |
+| `set` | FK → QuestionSet, **nullable** (changed 2026-11-13, was `PROTECT`) | now `SET_NULL` — set to NULL once the set's paper has its content deleted |
+| `set_label_snapshot` | string, added 2026-11-13 | same purpose as `StudentSetAllocation.set_label_snapshot` above — `_set_comparison()`'s Analytics read goes through this, not `session.set.label` |
+| `paper` | FK → QuestionPaper, nullable, `PROTECT`, added 2026-11-13 | direct reference, independent of `set` — safe as `PROTECT` since a `QuestionPaper` row is never truly deleted, only flagged. Lets `AdminResultResponsesView`/`AdminQuestionResponsesView` detect "this session's paper was content-deleted" even after `set` itself goes NULL. |
 | `started_at` | timestamp | |
 | `ends_at` | timestamp | computed once — see ADR 001, Decision #2 |
 | `status` | enum | `NOT_STARTED` / `IN_PROGRESS` / `SUBMITTED` / `AUTO_SUBMITTED` / `EXPIRED_UNSTARTED` |
@@ -258,12 +271,15 @@ POST                     /api/assessments/admin/questions/<uuid:pk>/options/<uui
 `admin/sets/<pk>/image-presign/` (added 2026-08-14): scoped to the QuestionSet rather than a Question, since `question_content_type='image'`/`'both'` couldn't otherwise ever be used on a question's first save — the question-level presign endpoint needs a question id, but `'both'` can't be saved without an image already attached, and there was no way to get an image attached before the question exists. `AdminSetQuestionsView.post` (question create) now runs the same verify/quarantine-scan + paper image-quota gate on `question_image_key` that `AdminQuestionDetailView.patch` already applied on every later image change, so an image attached at creation time is checked exactly once, not skipped.
 All PATCH/DELETE on a locked (assigned) paper, its sets, sections, questions, or options → `403` "This paper is assigned and locked." Publish/unpublish was removed from the admin workflow (2026-08-14) — `POST /api/assessments/admin/assignments/` is now the sole readiness gate: it runs the full readiness check (every question in every set: has content, ≥2 options, exactly the right correct-answer count; equal question counts/marks across sets; and, added 2026-08-27, equal section counts across sets with every section non-empty, whenever the paper has more than one set) and rejects with `400` and the specific reasons if any check fails.
 
+`DELETE /api/assessments/admin/papers/<pk>/` (semantics changed 2026-11-13) — no longer "delete while unlocked," which was never actually reachable once a paper had any assignment at all. Now gated by `paper.is_content_deletable()` (no `SCHEDULED`/`LIVE` assignment, no `IN_PROGRESS` session including trials) rather than `is_locked()`, and erases only the paper's *content* (sets/sections/questions/options + S3 images) — the `QuestionPaper` row survives, flagged `is_deleted`. Returns `403` with the readiness reason if not yet eligible, `409` if already deleted. See the model section above for the full behavior.
+
 ### Admin — Batch Assignment & Timer Control (Task 3.2)
 ```
-GET     /api/assessments/admin/assignments/                                      list (paginated, filterable by paper_id) — missing from this doc until a Phase 15 audit found it, added here to close the gap
+GET     /api/assessments/admin/assignments/                                      list (paginated, filterable by paper_id); excludes is_deleted=True unless ?include_archived=true (added 2026-11-13) — the Assign page omits it (its list hides deleted assignments), AssignmentPickerList.tsx (Results/Analytics/Dashboard) always passes it (those three must keep showing an archived assignment)
 POST    /api/assessments/admin/assignments/                                      create + distribute (Task 3.1)
 GET     /api/assessments/admin/assignments/<id>/                                 detail — same as above, added during the Phase 15 audit
 PATCH   /api/assessments/admin/assignments/<id>/                                 added 2026-11-12: edit any of paper's/batch's own fields (departments, duration, pass cutoff, show_result_to_student, global_start_time, global_expire_time) — 403 once status is no longer SCHEDULED (LIVE via manual start, early-override, or the auto-start sweep, or CLOSED — regardless of whether any student has started), matching the paper-content "locked once assigned" convention. `paper`/`batch_id` are rejected with 400 if present — swapping either isn't a field edit, it's structurally a different assignment. A `departments` change re-runs `snapshot_roster_and_allocate` (same additive-only semantics as resync-roster/ below) and the response includes `new_allocations`; a resync failure here returns 502 but the rest of the edit has already been committed.
+DELETE  /api/assessments/admin/assignments/<id>/                                 added 2026-11-13: LIVE → 403 blocked. SCHEDULED → true hard delete (nothing has started yet, cascades through StudentSetAllocation). CLOSED → soft delete/archive (is_deleted + deleted_at) — real AssessmentSession/ResultSummary rows PROTECT their assignment FK and must survive, per the "zero impact on Results/Analytics/Dashboard/past-results" requirement. Race-safe conditional delete/update against a concurrent status change; 409 if the assignment's status moved since the request was read, or it's already archived.
 PATCH   /api/assessments/admin/assignments/<id>/start/                           SCHEDULED → LIVE. Since global_start_time became mandatory (2026-11-12): if the scheduled start time hasn't been reached yet, this returns 409 `{"errors": {"code": "START_TIME_NOT_REACHED", "scheduled_start_time": ...}}` unless the request body carries `{"confirm_early_start": true}` — a deliberate second confirmation for jumping the queue, not the normal path. Never writes to global_start_time itself, before or after this change — it's the admin's own declared schedule, not a log of when Start was actually clicked.
 PATCH   /api/assessments/admin/assignments/<id>/close/                           LIVE → CLOSED (+ cascade, Task 4.1)
 PATCH   /api/assessments/admin/assignments/<id>/publish-results/                 added 2026-11-12: for an assignment created with show_result_to_student=False, flips it True and stamps results_published_at. One-directional (no un-publish); institution-wide admin access, same as start/close/status — not owner-gated. Idempotent: already-visible assignments (whether published earlier or visible since creation) return 200 unchanged rather than erroring. Deliberately does nothing beyond that one write — every place that decides whether a student can see their own score (StudentSubmitView's immediate post-submit response, StudentResultsView's past-results list) already reads show_result_to_student fresh from the DB on every single request, never a value frozen at submission time or cached, so this one field flip is already correct for a student who already finished, one mid-exam right now, and one who hasn't started yet — no per-student/per-session state needed.
@@ -287,6 +303,7 @@ GET  /api/assessments/admin/assignments/<id>/analytics/export/
 GET  /api/assessments/admin/assignments/<id>/dashboard/            Redis-cached KPI rollup
 GET  /api/assessments/admin/assignments/<id>/dashboard/export/
 ```
+`responses/` degrades gracefully once a paper's content is deleted (2026-11-13): instead of crashing on a now-NULL `session.set`/a deleted `Question` row, both endpoints return `{"paper_deleted": true, "questions": []}` / `{"paper_deleted": true, "students": [], ...}` respectively, and the admin UI shows a "deleted by the admin" message in place of the drill-down. Every other field on this list (results rows, analytics aggregates, dashboard KPIs) is unaffected — see `set_label_snapshot`/`question_difficulty_snapshot` in the model section above.
 
 ### Student (Task 5.1 / 5.2 / 4.2 / 10.1)
 ```

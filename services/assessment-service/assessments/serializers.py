@@ -7,6 +7,13 @@ class QuestionPaperSerializer(serializers.ModelSerializer):
     set_count = serializers.SerializerMethodField()
 
     def get_set_count(self, obj):
+        # Once content is deleted (2026-11-13) the real sets are gone —
+        # obj.sets.count() (or an annotated set_count) would read 0, which
+        # would silently violate "the number of sets must keep displaying
+        # after the paper is deleted." deleted_set_count is the frozen
+        # pre-deletion value, saved for exactly this.
+        if obj.is_deleted:
+            return obj.deleted_set_count or 0
         if hasattr(obj, "set_count"):
             return obj.set_count
         return obj.sets.count()
@@ -16,8 +23,9 @@ class QuestionPaperSerializer(serializers.ModelSerializer):
         fields = [
             "id", "title", "description", "instructions",
             "set_count", "created_by", "created_at", "updated_at",
+            "is_deleted", "deleted_at",
         ]
-        read_only_fields = ["id", "created_by", "created_at", "updated_at"]
+        read_only_fields = ["id", "created_by", "created_at", "updated_at", "is_deleted", "deleted_at"]
 
 
 class QuestionSetSerializer(serializers.ModelSerializer):

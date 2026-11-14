@@ -49,10 +49,12 @@ def results_setup(db):
     # and_allocate(); constructed directly here since these tests only exercise
     # the read side.
     for student_id in (student_a, student_b, student_c, student_d):
-        StudentSetAllocation.objects.create(assignment=assignment, student_id=student_id, set=qset)
+        StudentSetAllocation.objects.create(
+            assignment=assignment, student_id=student_id, set=qset, set_label_snapshot=qset.label,
+        )
 
     session_a = AssessmentSession.objects.create(
-        assignment=assignment, student_id=student_a, set=qset,
+        assignment=assignment, student_id=student_a, set=qset, set_label_snapshot=qset.label, paper=paper,
         ends_at=timezone.now() + timedelta(hours=1), status=SESSION_STATUS_SUBMITTED,
         started_at=timezone.now() - timedelta(minutes=20),
     )
@@ -68,7 +70,7 @@ def results_setup(db):
     )
 
     session_b = AssessmentSession.objects.create(
-        assignment=assignment, student_id=student_b, set=qset,
+        assignment=assignment, student_id=student_b, set=qset, set_label_snapshot=qset.label, paper=paper,
         ends_at=timezone.now() + timedelta(hours=1), status=SESSION_STATUS_AUTO_SUBMITTED,
         started_at=timezone.now() - timedelta(minutes=10),
     )
@@ -84,7 +86,7 @@ def results_setup(db):
     # student_d: session exists, still in progress — writing. No ResultSummary
     # for either — that's only ever written at finalize time.
     session_d = AssessmentSession.objects.create(
-        assignment=assignment, student_id=student_d, set=qset,
+        assignment=assignment, student_id=student_d, set=qset, set_label_snapshot=qset.label, paper=paper,
         ends_at=timezone.now() + timedelta(hours=1), status=SESSION_STATUS_IN_PROGRESS,
         started_at=timezone.now() - timedelta(minutes=5),
     )
@@ -167,7 +169,9 @@ class TestResultsTable:
         mock_roster.return_value = results_setup["roster"]
         assignment = results_setup["assignment"]
         qset_b = QuestionSet.objects.create(paper=assignment.paper, label="Set B", order=2)
-        StudentSetAllocation.objects.filter(assignment=assignment, student_id=results_setup["student_d"]).update(set=qset_b)
+        StudentSetAllocation.objects.filter(assignment=assignment, student_id=results_setup["student_d"]).update(
+            set=qset_b, set_label_snapshot=qset_b.label,
+        )
 
         resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/results/?set=Set+B")
         assert resp.status_code == 200
@@ -533,7 +537,9 @@ class TestQuestionResponses:
         # not appear at all, not show up as a false "not answered" row.
         qset_b = QuestionSet.objects.create(paper=assignment.paper, label="Set B", order=2)
         other_student = uuid.uuid4()
-        StudentSetAllocation.objects.create(assignment=assignment, student_id=other_student, set=qset_b)
+        StudentSetAllocation.objects.create(
+            assignment=assignment, student_id=other_student, set=qset_b, set_label_snapshot=qset_b.label,
+        )
         mock_roster.return_value = results_setup["roster"] + [_roster_entry(other_student, "ROLL-005", "Eve E", "CSE")]
 
         resp = admin_client.get(f"/api/assessments/admin/assignments/{assignment.id}/questions/{q1.id}/responses/")

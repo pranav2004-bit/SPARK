@@ -11,6 +11,7 @@ from django.utils.dateparse import parse_datetime
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from rest_framework.generics import get_object_or_404
+from rest_framework.response import Response
 
 from core.permissions import IsAdminUser, IsStudentUser, IsAdminOrSuperAdmin
 from core.responses import success_response, error_response
@@ -45,6 +46,7 @@ from .validators import get_content_type_blocker, get_assignment_readiness_block
 from .shuffling import shuffle_questions_within_sections, shuffle_options
 from .allocation import snapshot_roster_and_allocate
 from .scoring import finalize_sessions
+from .tasks import delete_s3_images_task
 from .enforcement import session_is_writable, strip_client_timestamps
 from .throttling import ActivityLogRateThrottle, AnswerSubmitRateThrottle
 
@@ -224,8 +226,13 @@ class AdminPaperListCreateView(APIView):
 
     def get(self, request):
         institution_id = _get_institution_id(request)
+        # is_deleted=False (2026-11-13) — a paper whose content has been
+        # deleted "erases from the question bank interface" per the user's
+        # own spec; it keeps displaying everywhere else (Results/Analytics/
+        # Dashboard/student past-results) via its own preserved row, just
+        # not in this authoring list.
         papers = QuestionPaper.objects.filter(
-            institution_id=institution_id
+            institution_id=institution_id, is_deleted=False,
         ).annotate(set_count=Count("sets"))
 
         paginator = StandardResultsPagination()
@@ -301,15 +308,76 @@ class AdminPaperDetailView(APIView):
         return success_response(data=s.data, message="Paper updated")
 
     def delete(self, request, pk):
+        """Erases this paper's CONTENT (Sets/Sections/Questions/Options and
+        their S3 images) to reclaim real storage — added 2026-11-13, user
+        decision. Deliberately never deletes the QuestionPaper row itself:
+        it's flagged is_deleted instead, so its title/description/
+        created_by/created_at/deleted_set_count keep displaying correctly
+        in Results/Analytics/Dashboard/student past-results forever, per
+        the user's explicit "zero impact" requirement. See
+        QuestionPaper.is_content_deletable()'s own docstring for the full
+        eligibility rule."""
         institution_id = _get_institution_id(request)
         paper = self._get(pk, institution_id)
         denied = _require_paper_owner(paper, request)
         if denied:
             return denied
-        if paper.is_locked():
-            return error_response("This paper is assigned and locked.", status_code=403)
-        paper.delete()
-        return success_response(message="Paper deleted")
+        if paper.is_deleted:
+            return error_response("This paper's content has already been deleted.", status_code=409)
+        if not paper.is_content_deletable():
+            return error_response(
+                "This paper can't be deleted yet — it's still referenced by a scheduled or "
+                "live assignment, or a trial/mock-test session on it is still in progress.",
+                status_code=403,
+            )
+
+        # Collected BEFORE anything is deleted, so cleanup can run async
+        # afterward without re-querying rows that will no longer exist.
+        image_keys = list(
+            Question.objects.filter(set__paper=paper).exclude(question_image_key="")
+            .values_list("question_image_key", flat=True)
+        ) + list(
+            QuestionOption.objects.filter(question__set__paper=paper).exclude(image_key="")
+            .values_list("image_key", flat=True)
+        )
+
+        with transaction.atomic():
+            # Freeze question_difficulty_snapshot for every assignment that
+            # ever referenced this paper (archived/soft-deleted ones
+            # included — they're still reachable via the Results/
+            # Analytics/Dashboard picker's include_archived view) BEFORE
+            # any content is deleted — _question_difficulty()'s own
+            # short-circuit (views.py) means this is the only moment this
+            # computation can ever happen correctly; a live read after
+            # this transaction commits would just see empty Question rows.
+            # Trial sessions (assignment IS NULL) have no BatchAssignment
+            # row to freeze this onto and were never shown in Analytics
+            # anyway, so they're correctly out of scope here.
+            for assignment in paper.assignments.all():
+                time_by_key = _question_time_spent(assignment)
+                assignment.question_difficulty_snapshot = _question_difficulty(assignment, time_by_key)
+                assignment.save(update_fields=["question_difficulty_snapshot"])
+
+            deleted_set_count = paper.sets.count()
+            # Cascades through QuestionSection -> Question -> QuestionOption
+            # (all CASCADE). StudentSetAllocation.set and
+            # AssessmentSession.set are SET_NULL, not CASCADE (2026-11-13)
+            # — those rows survive with their own frozen set_label_snapshot.
+            paper.sets.all().delete()
+
+            paper.is_deleted = True
+            paper.deleted_at = timezone.now()
+            paper.deleted_set_count = deleted_set_count
+            paper.save(update_fields=["is_deleted", "deleted_at", "deleted_set_count"])
+
+            if image_keys:
+                # on_commit: never fires if this transaction rolls back —
+                # e.g. a mid-transaction DB error on the saves above must
+                # not have already deleted real images for a paper whose
+                # deletion never actually took effect.
+                transaction.on_commit(lambda keys=image_keys: delete_s3_images_task.delay(keys))
+
+        return success_response(message="Question paper's content deleted")
 
 
 class AdminPaperInstructionsView(APIView):
@@ -937,6 +1005,16 @@ class AdminAssignmentListCreateView(APIView):
         # select_related("paper") makes BatchAssignmentSerializer's new
         # paper_title field free — one JOIN, not one extra query per row.
         qs = BatchAssignment.objects.filter(institution_id=institution_id).select_related("paper")
+        # Archived (soft-deleted, 2026-11-13) assignments are hidden from
+        # the Assign page's own list by default — that's the "create/
+        # manage" surface, where a deleted assignment is just clutter — but
+        # must stay fully selectable from the Results/Analytics/Dashboard
+        # picker (AssignmentPickerList.tsx), per explicit user requirement
+        # that those three keep zero-impact access to anything deleted from
+        # the Assign page. Same endpoint backs both call sites, so this
+        # query param is what tells them apart rather than two endpoints.
+        if request.query_params.get("include_archived") != "true":
+            qs = qs.filter(is_deleted=False)
         paper_id = request.query_params.get("paper_id")
         if paper_id:
             qs = qs.filter(paper_id=paper_id)
@@ -1086,6 +1164,66 @@ class AdminAssignmentDetailView(APIView):
         if new_allocations is not None:
             data["new_allocations"] = new_allocations
         return success_response(data=data, message="Assignment updated")
+
+    # DELETE /api/assessments/admin/assignments/<pk>/ (added 2026-11-13,
+    # user decision). Branches on lifecycle status, same three-way split as
+    # QuestionPaper content deletion:
+    #   LIVE      -> blocked outright — never delete something currently
+    #                running, regardless of real data existing yet or not.
+    #   SCHEDULED -> true hard delete. Nothing has started, so no real
+    #                AssessmentSession/ResultSummary row can exist under
+    #                this assignment yet (both PROTECT their own
+    #                `assignment` FK — if that assumption were ever wrong,
+    #                this would raise loudly via ProtectedError rather than
+    #                silently losing data). Cascades through
+    #                StudentSetAllocation (CASCADE) automatically.
+    #   CLOSED    -> soft delete/archive (is_deleted + deleted_at), never a
+    #                real row delete — real AssessmentSession/ResultSummary
+    #                rows exist and PROTECT `assignment`, and the user's
+    #                explicit requirement is that Results/Analytics/
+    #                Dashboard/student past-results show zero change after
+    #                this, which only a preserved row can guarantee.
+    def delete(self, request, pk):
+        institution_id = _get_institution_id(request)
+        assignment = get_object_or_404(BatchAssignment, pk=pk, institution_id=institution_id)
+
+        if assignment.status == ASSIGNMENT_STATUS_LIVE:
+            return error_response(
+                "This assignment is live — close it before it can be deleted.",
+                status_code=403,
+            )
+
+        if assignment.status == ASSIGNMENT_STATUS_SCHEDULED:
+            # Conditional DELETE ... WHERE status=SCHEDULED — race-safe
+            # against a concurrent Start/Close landing between the read
+            # above and this call, the same pattern as every other
+            # lifecycle mutation on this model (Start/Close above).
+            deleted, _ = BatchAssignment.objects.filter(
+                pk=assignment.pk, status=ASSIGNMENT_STATUS_SCHEDULED,
+            ).delete()
+            if not deleted:
+                assignment.refresh_from_db()
+                return error_response(
+                    f"This assignment is now {assignment.status.lower()} and can no longer be deleted this way.",
+                    status_code=409,
+                )
+            return success_response(message="Assignment deleted")
+
+        # CLOSED. Conditional UPDATE, race-safe against a duplicate delete
+        # click or a concurrent change — only a request that actually finds
+        # it CLOSED-and-not-already-deleted wins.
+        updated = BatchAssignment.objects.filter(
+            pk=assignment.pk, status=ASSIGNMENT_STATUS_CLOSED, is_deleted=False,
+        ).update(is_deleted=True, deleted_at=timezone.now())
+        if not updated:
+            assignment.refresh_from_db()
+            if assignment.is_deleted:
+                return error_response("This assignment has already been deleted.", status_code=409)
+            return error_response(
+                f"This assignment is now {assignment.status.lower()} and can no longer be deleted this way.",
+                status_code=409,
+            )
+        return success_response(message="Assignment archived")
 
 
 class AdminAssignmentStartView(APIView):
@@ -1474,7 +1612,8 @@ class StudentAssignmentStartSessionView(APIView):
         try:
             session = AssessmentSession.objects.create(
                 assignment=assignment, student_id=request.user.id,
-                set=allocation.set, ends_at=ends_at,
+                set=allocation.set, set_label_snapshot=allocation.set_label_snapshot,
+                paper=assignment.paper, ends_at=ends_at,
             )
         except IntegrityError:
             # Lost a create race against a concurrent request for the same
@@ -1705,14 +1844,14 @@ def _get_or_start_trial_session(paper, admin_id, duration_minutes):
         )
 
     existing = AssessmentSession.objects.filter(
-        assignment__isnull=True, student_id=admin_id, set__paper=paper, status=SESSION_STATUS_IN_PROGRESS,
+        assignment__isnull=True, student_id=admin_id, paper=paper, status=SESSION_STATUS_IN_PROGRESS,
     ).order_by("-started_at").first()
     if existing is not None:
         return existing, None
 
     session = AssessmentSession.objects.create(
-        assignment=None, student_id=admin_id, set=qset,
-        ends_at=timezone.now() + timedelta(minutes=duration_minutes),
+        assignment=None, student_id=admin_id, set=qset, set_label_snapshot=qset.label,
+        paper=paper, ends_at=timezone.now() + timedelta(minutes=duration_minutes),
     )
     return session, None
 
@@ -1912,9 +2051,13 @@ class AdminPaperTrialResultsView(APIView):
         if denied:
             return denied
 
+        # session__paper (not session__set__paper, 2026-11-13) — session.set
+        # is SET_NULL'd the moment this paper's content is deleted, which
+        # would otherwise silently drop every trial result from this list;
+        # session.paper is a direct, PROTECT'd reference that survives.
         results = list(
-            ResultSummary.objects.filter(assignment__isnull=True, session__set__paper=paper)
-            .select_related("session__set")
+            ResultSummary.objects.filter(assignment__isnull=True, session__paper=paper)
+            .select_related("session")
             .order_by("-ended_at")
         )
         attempted_by = resolve_user_names(
@@ -1923,7 +2066,7 @@ class AdminPaperTrialResultsView(APIView):
 
         data = [{
             "id": str(r.id),
-            "set_label": r.session.set.label,
+            "set_label": r.session.set_label_snapshot,
             "score": r.score,
             "total_marks": r.total_marks,
             "percentage": round((r.score / r.total_marks) * 100, 2) if r.total_marks else 0,
@@ -2107,7 +2250,7 @@ def _build_results_queryset(assignment, request, roster_by_user_id):
     session_sq = AssessmentSession.objects.filter(assignment=assignment, student_id=OuterRef("student_id"))
     result_sq = ResultSummary.objects.filter(assignment=assignment, student_id=OuterRef("student_id"))
 
-    qs = StudentSetAllocation.objects.filter(assignment=assignment).select_related("set").annotate(
+    qs = StudentSetAllocation.objects.filter(assignment=assignment).annotate(
         session_status=Subquery(session_sq.values("status")[:1]),
         # Needed so the admin UI can call .../sessions/<id>/extend/ for a
         # student currently mid-exam (exam_status="writing") — result_id
@@ -2144,9 +2287,12 @@ def _build_results_queryset(assignment, request, roster_by_user_id):
     # Drill-down target from Analytics' Set Fairness panel (each bar links
     # here with ?set=<label>) — exact match against the same set_label the
     # row already displays, not a DB id, since that's what the link carries.
+    # Matched against the frozen snapshot (2026-11-13), not a live set__label
+    # join — works identically whether or not the paper's content still
+    # exists (see StudentSetAllocation.set_label_snapshot).
     set_label = request.query_params.get("set")
     if set_label:
-        qs = qs.filter(set__label=set_label)
+        qs = qs.filter(set_label_snapshot=set_label)
 
     # Roll-number search — case-insensitive substring match against the
     # roster (already fetched once above; same no-extra-call pattern as the
@@ -2235,7 +2381,7 @@ def _serialize_result_row(alloc, roster_by_user_id):
         "student_roll_id": info.get("student_id", ""),
         "student_name": info.get("fullname") or "Unknown",
         "department": info.get("department") or "",
-        "set_label": alloc.set.label,
+        "set_label": alloc.set_label_snapshot,
         "exam_status": alloc.exam_status,
         "started_at": alloc.result_started_at,
         "ended_at": alloc.result_ended_at,
@@ -2271,9 +2417,15 @@ class AdminAssignmentResultsView(APIView):
         # Independent of any currently-applied filters (including ?set=
         # itself) — always the full roster's set list, so the "Set" dropdown
         # doesn't shrink to one option once a set filter narrows the table.
+        # From the frozen snapshot (2026-11-13), not a live QuestionSet
+        # query — keeps working identically once a paper's content is
+        # deleted, when a live join would just return nothing. Ordered
+        # alphabetically instead of by QuestionSet.order (no longer
+        # reachable from here) — equivalent in practice, since every set
+        # label in this app already follows "Set A"/"Set B"/"Set C"...
         resp.data["available_sets"] = list(
-            QuestionSet.objects.filter(allocations__assignment=assignment)
-            .order_by("order").values_list("label", flat=True).distinct()
+            StudentSetAllocation.objects.filter(assignment=assignment)
+            .order_by("set_label_snapshot").values_list("set_label_snapshot", flat=True).distinct()
         )
         return resp
 
@@ -2292,6 +2444,20 @@ class AdminResultResponsesView(APIView):
             pk=result_id, institution_id=institution_id,
         )
         session = result.session
+
+        # session.set is SET_NULL'd the instant its paper's content is
+        # deleted (2026-11-13) — the score itself (ResultSummary, what the
+        # results table and every other view already display) is
+        # untouched and keeps showing correctly everywhere; only this
+        # question-by-question drill-down is the one accepted exception to
+        # "zero impact" the user signed off on, since the actual
+        # question/option text is genuinely gone, not just hidden.
+        if session.set_id is None:
+            return success_response(data={
+                "result_id": str(result.id),
+                "paper_deleted": True,
+                "questions": [],
+            })
 
         questions = list(
             session.set.questions.prefetch_related("options").order_by("question_number")
@@ -2345,7 +2511,35 @@ class AdminQuestionResponsesView(APIView):
 
     def get(self, request, pk, question_id):
         institution_id = _get_institution_id(request)
-        assignment = get_object_or_404(BatchAssignment, pk=pk, institution_id=institution_id)
+        assignment = get_object_or_404(
+            BatchAssignment.objects.select_related("paper"), pk=pk, institution_id=institution_id,
+        )
+
+        # question_id here can come straight from a frozen
+        # question_difficulty_snapshot (Analytics' Per-Question Difficulty
+        # table, read once a paper's content is deleted, 2026-11-13) — the
+        # real Question row is gone by then, which would otherwise 404
+        # with no explanation. Checked before the Question lookup so this
+        # never depends on get_object_or_404's generic 404 message.
+        if assignment.paper.is_deleted:
+            # Flat shape, not success_response's {success, data} envelope —
+            # matches the normal path below, which returns
+            # paginator.get_paginated_response(...) directly (the frontend
+            # reads res.data as the payload itself, e.g. res.data.students).
+            return Response({
+                "question_id": str(question_id),
+                "question_number": 0,
+                "set_label": "",
+                "question_text": "",
+                "question_image_url": None,
+                "marks": 0,
+                "options": [],
+                "count": 0, "total_pages": 0, "current_page": 1,
+                "next": None, "previous": None,
+                "paper_deleted": True,
+                "students": [],
+            })
+
         question = get_object_or_404(
             Question.objects.select_related("set"),
             pk=question_id, set__paper_id=assignment.paper_id,
@@ -2554,7 +2748,7 @@ def _export_rows(assignment, request, roster_by_user_id):
             info.get("student_id", ""),
             info.get("fullname") or "Unknown",
             info.get("department") or "",
-            r.set.label,
+            r.set_label_snapshot,
             r.exam_status,
             r.result_started_at.isoformat() if r.result_started_at else "",
             r.result_ended_at.isoformat() if r.result_ended_at else "",
@@ -2665,6 +2859,15 @@ def _question_time_spent(assignment):
 
 
 def _question_difficulty(assignment, time_by_key):
+    # Once this assignment's paper content has been deleted (2026-11-13),
+    # the live Question.objects.filter(set__paper=...) scan below would
+    # silently return empty — the frozen snapshot (computed and saved by
+    # the paper-content-delete endpoint, BEFORE any Question row was
+    # actually erased) is the only source left, and is byte-for-byte what
+    # this same function would have returned at that moment anyway.
+    if assignment.question_difficulty_snapshot is not None:
+        return assignment.question_difficulty_snapshot
+
     stats = (
         AssessmentResponse.objects.filter(session__assignment=assignment)
         .values("question_id")
@@ -2706,8 +2909,10 @@ def _set_comparison(qs):
     Set B, ... carrying different-but-equally-weighted questions) creates a
     real fairness question this answers directly: did the sets actually turn
     out comparably difficult, or did one group get an easier/harder paper?"""
+    # From the frozen snapshot (2026-11-13), not a live session__set__label
+    # join — see AssessmentSession.set_label_snapshot.
     set_percentages: dict = {}
-    for set_label, pct in qs.values_list("session__set__label", "percentage"):
+    for set_label, pct in qs.values_list("session__set_label_snapshot", "percentage"):
         set_percentages.setdefault(set_label, []).append(pct)
     return [
         {"set_label": label, "student_count": len(pcts), "average_percentage": round(sum(pcts) / len(pcts), 2)}
