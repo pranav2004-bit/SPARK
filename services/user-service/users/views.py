@@ -758,3 +758,127 @@ class OutboxHealthView(APIView):
             'done':       data.get('done',       0),
             'dead_letter': data.get('dead_letter', 0),
         })
+
+
+# ── IT Dashboard (added 2026-11-14, user decision) ──────────────────────────
+# The student/batch/section half of the dashboard — auth-service's own
+# ITDashboardStatsView covers departments/admins/super_admins (this
+# service's institution-isolation convention: no cross-service FK, so
+# department here is just whatever free-text string each Student has, not
+# validated against auth-service's own Department list; the frontend
+# composes both endpoints and does that merge). Deliberately uncached, same
+# reasoning as that endpoint: the user's own explicit requirement is
+# "100% accuracy... update automatically every time," and these are cheap
+# aggregate queries at this platform's real scale (a few thousand students
+# at most), so live computation is the simplest way to actually guarantee
+# that rather than a cache with its own invalidation surface to get wrong.
+
+def _empty_bucket():
+    return {"total": 0, "active": 0}
+
+
+def _finalize_buckets(buckets: dict, key_name: str) -> list:
+    """{key: {total, active}} -> sorted [{key_name: key, total, active,
+    inactive}, ...] — shared by every department/section breakdown below,
+    institution-wide and per-batch alike."""
+    return sorted(
+        (
+            {key_name: key, "total": v["total"], "active": v["active"], "inactive": v["total"] - v["active"]}
+            for key, v in buckets.items()
+        ),
+        key=lambda row: row[key_name],
+    )
+
+
+class ITDashboardStatsView(APIView):
+    permission_classes = [IsITUser]
+
+    def get(self, request):
+        institution_id = getattr(request.user, "institution_id", None)
+
+        students_qs = Student.objects.filter(institution_id=institution_id)
+        students_total = students_qs.count()
+        students_active = students_qs.filter(is_active=True).count()
+
+        # One grouped query, reshaped in Python into every breakdown the
+        # dashboard needs (by department, by section, per batch, and within
+        # each batch) — avoids a separate query per batch/department/
+        # section combination. Aggregated in Python rather than a
+        # Postgres-only JSON aggregate, matching assessment-service's own
+        # convention (_department_comparison, _malpractice_breakdown) for
+        # staying portable across the Postgres/SQLite split this project
+        # already supports.
+        rows = (
+            students_qs.values("batch_id", "batch__batch_name", "department", "section")
+            .annotate(total=Count("id"), active=Count("id", filter=Q(is_active=True)))
+        )
+
+        by_department: dict = {}
+        by_section: dict = {}
+        # batch_id (str) -> {"batch_name", "total", "active", "by_department": {}, "by_section": {}}
+        batch_breakdowns: dict = {}
+        # department -> set of distinct section letters seen under it
+        dept_sections: dict = {}
+
+        for row in rows:
+            dept = row["department"] or ""
+            section = row["section"] or ""
+            batch_id = str(row["batch_id"])
+            total, active = row["total"], row["active"]
+
+            d = by_department.setdefault(dept, _empty_bucket())
+            d["total"] += total; d["active"] += active
+
+            s = by_section.setdefault(section, _empty_bucket())
+            s["total"] += total; s["active"] += active
+
+            b = batch_breakdowns.setdefault(batch_id, {
+                "batch_name": row["batch__batch_name"], "total": 0, "active": 0,
+                "by_department": {}, "by_section": {},
+            })
+            b["total"] += total; b["active"] += active
+            bd = b["by_department"].setdefault(dept, _empty_bucket())
+            bd["total"] += total; bd["active"] += active
+            bs = b["by_section"].setdefault(section, _empty_bucket())
+            bs["total"] += total; bs["active"] += active
+
+            if dept and section:
+                dept_sections.setdefault(dept, set()).add(section)
+
+        # Every batch in the institution, including ones with zero students
+        # — "number of batches, number of students in those batches" means
+        # every batch, not just ones that happen to already have students.
+        batches_result = []
+        for batch in Batch.objects.filter(institution_id=institution_id).values("id", "batch_name"):
+            batch_id = str(batch["id"])
+            b = batch_breakdowns.get(batch_id, {"total": 0, "active": 0, "by_department": {}, "by_section": {}})
+            batches_result.append({
+                "id": batch_id,
+                "batch_name": batch["batch_name"],
+                "total": b["total"],
+                "active": b["active"],
+                "inactive": b["total"] - b["active"],
+                "by_department": _finalize_buckets(b["by_department"], "department"),
+                "by_section": _finalize_buckets(b["by_section"], "section"),
+            })
+        batches_result.sort(key=lambda row: row["batch_name"])
+
+        sections_per_department = sorted(
+            (
+                {"department": dept, "sections": sorted(sections), "section_count": len(sections)}
+                for dept, sections in dept_sections.items()
+            ),
+            key=lambda row: row["department"],
+        )
+
+        return success_response(data={
+            "students": {
+                "total": students_total,
+                "active": students_active,
+                "inactive": students_total - students_active,
+                "by_department": _finalize_buckets(by_department, "department"),
+                "by_section": _finalize_buckets(by_section, "section"),
+            },
+            "sections_per_department": sections_per_department,
+            "batches": batches_result,
+        })

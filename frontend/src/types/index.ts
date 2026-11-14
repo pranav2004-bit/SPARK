@@ -1041,3 +1041,40 @@ export interface EssayPipelineHealthSummary {
   recent_failure_events: EssayFailureEvent[];
   alerts: EssayPipelineAlert[];
 }
+
+// ── IT Dashboard (added 2026-11-14) ─────────────────────────────────────────
+// Split across two services' own stats endpoints (each owns its own data,
+// no cross-service call at read time) — the frontend composes both. See
+// GET /api/auth/dashboard-stats/ and GET /api/users/it/dashboard-stats/.
+
+export interface ActiveInactiveCount {
+  total: number;
+  active: number;
+  inactive: number;
+}
+
+export interface ITDashboardAuthStats {
+  departments: ActiveInactiveCount & {
+    list: { code: string; name: string; is_active: boolean }[];
+  };
+  admins: ActiveInactiveCount & {
+    by_department: (ActiveInactiveCount & { department: string })[];
+  };
+  super_admins: ActiveInactiveCount;
+}
+
+export interface ITDashboardBatchStats extends ActiveInactiveCount {
+  id: string;
+  batch_name: string;
+  by_department: (ActiveInactiveCount & { department: string })[];
+  by_section: (ActiveInactiveCount & { section: string })[];
+}
+
+export interface ITDashboardUserStats {
+  students: ActiveInactiveCount & {
+    by_department: (ActiveInactiveCount & { department: string })[];
+    by_section: (ActiveInactiveCount & { section: string })[];
+  };
+  sections_per_department: { department: string; sections: string[]; section_count: number }[];
+  batches: ITDashboardBatchStats[];
+}

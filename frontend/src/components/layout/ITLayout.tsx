@@ -3,7 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { LogOut, ChevronDown, Inbox, MessageSquare, LayoutDashboard, Users, ShieldCheck, Crown, Building2 } from "lucide-react";
+import { LogOut, ChevronDown, Inbox, MessageSquare, LayoutDashboard, Users, ShieldCheck, Crown, Building2, Gauge } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { usePortalGuard } from "@/hooks/usePortalGuard";
 import { useState, useRef, useEffect } from "react";
@@ -31,7 +31,14 @@ interface NavItem {
 // module distinct from Students. Drives every department dropdown app-wide
 // live (see @/lib/departmentsContext) — no rebuild needed to add/rename one.
 // Add further modules to this array as decided.
+// Dashboard added here (2026-11-14, user decision) — institution-wide
+// counts (students/admins/super admins/batches/departments, each with an
+// active/inactive and department/section/batch breakdown), recomputed
+// live on every visit, never cached. Placed first — a dashboard is
+// conventionally the landing tab, even though it doesn't replace
+// /it/welcome as the actual post-login redirect (not asked for).
 const NAV_ITEMS: NavItem[] = [
+  { href: "/it/dashboard", label: "Dashboard",         icon: <Gauge size={15} /> },
   { href: "/it/super-admins", label: "Super Admins",   icon: <Crown size={15} /> },
   { href: "/it/admins",    label: "Admins",            icon: <ShieldCheck size={15} /> },
   { href: "/it/departments", label: "Departments",     icon: <Building2 size={15} /> },
