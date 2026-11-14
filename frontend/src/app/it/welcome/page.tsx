@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Inbox, MessageSquare, ArrowRight, LayoutDashboard, Users, ShieldCheck, Crown, Building2 } from "lucide-react";
+import { Inbox, MessageSquare, ArrowRight, LayoutDashboard, Users, ShieldCheck, Crown, Building2, Gauge } from "lucide-react";
 import { ITLayout } from "@/components/layout/ITLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { useAuth } from "@/hooks/useAuth";
@@ -10,6 +10,12 @@ import type { ITUser } from "@/types";
 // Post-login landing page for this role. Add a card here for each new
 // module as it's added to NAV_ITEMS in ITLayout.
 const MODULES = [
+  {
+    href: "/it/dashboard",
+    icon: Gauge,
+    title: "Dashboard",
+    desc: "Live institution-wide counts — students, admins, super admins, batches, and departments.",
+  },
   {
     href: "/it/super-admins",
     icon: Crown,

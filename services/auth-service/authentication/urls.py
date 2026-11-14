@@ -26,6 +26,7 @@ from .views import (
     InternalStudentCreateView,
     InternalStudentUpdateView,
     InternalStudentDeleteView,
+    ITDashboardStatsView,
 )
 
 urlpatterns = [
@@ -62,6 +63,9 @@ urlpatterns = [
     # Department management — read: Admin + Super Admin + IT; write: IT only
     path("departments/", DepartmentListCreateView.as_view(), name="department-list-create"),
     path("departments/<uuid:pk>/", DepartmentDetailView.as_view(), name="department-detail"),
+
+    # IT Dashboard — IT only
+    path("dashboard-stats/", ITDashboardStatsView.as_view(), name="it-dashboard-stats"),
 
     # Internal service-to-service endpoints (user-service → auth-service).
     # Only reachable via Docker internal network (http://auth-service:8000).

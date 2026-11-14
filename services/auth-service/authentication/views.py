@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.validators import EmailValidator
 from django.db import connection
+from django.db.models import Count, Q
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated, SAFE_METHODS
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -1133,3 +1134,71 @@ class InternalStudentDeleteView(APIView):
         user.delete()
         logger.info("Auth account for student_id=%s deleted by internal service", student_id)
         return success_response(message="Student auth account deleted.")
+
+
+# ── IT Dashboard (added 2026-11-14, user decision) ──────────────────────────
+# Everything this endpoint reports lives in auth-service: departments and
+# every non-student account (admin/super_admin). Deliberately NOT cached —
+# the user's own explicit requirement is "100% accuracy... update
+# automatically every time" — these are small, cheap aggregate queries at
+# this platform's real scale (tens of admins, a handful of departments per
+# institution), so computing live on every request is the simplest way to
+# actually guarantee that, rather than a cache with its own invalidation
+# surface to get wrong. Student/batch/section stats are a separate
+# user-service endpoint (that service owns that data) — the frontend
+# composes both, the same way AssignmentPickerList already composes
+# assessment-service + user-service data for an unrelated page.
+class ITDashboardStatsView(APIView):
+    permission_classes = [IsITUser]
+
+    def get(self, request):
+        institution_id = request.user.institution_id
+
+        departments_qs = Department.objects.filter(institution_id=institution_id)
+        departments_total = departments_qs.count()
+        departments_active = departments_qs.filter(is_active=True).count()
+
+        admins_qs = User.objects.filter(institution_id=institution_id, role="admin")
+        admins_total = admins_qs.count()
+        admins_active = admins_qs.filter(is_active=True).count()
+        # Grouped by whatever free-text department string each admin account
+        # actually has (no FK to Department — same cross-service-isolation
+        # convention used throughout this platform) — an admin with a blank
+        # department shows up under "" rather than being silently dropped,
+        # since that's a real, visible data-quality gap IT should see, not
+        # hide.
+        admins_by_department = list(
+            admins_qs.values("department")
+            .annotate(total=Count("id"), active=Count("id", filter=Q(is_active=True)))
+            .order_by("department")
+        )
+        for row in admins_by_department:
+            row["inactive"] = row["total"] - row["active"]
+
+        super_admins_qs = User.objects.filter(institution_id=institution_id, role="super_admin")
+        super_admins_total = super_admins_qs.count()
+        super_admins_active = super_admins_qs.filter(is_active=True).count()
+
+        return success_response(data={
+            "departments": {
+                "total": departments_total,
+                "active": departments_active,
+                "inactive": departments_total - departments_active,
+                # Full list (not just counts) so the frontend can merge this
+                # with user-service's student-by-department breakdown — e.g.
+                # show a real department with zero current students as 0,
+                # rather than that department silently never appearing.
+                "list": list(departments_qs.order_by("code").values("code", "name", "is_active")),
+            },
+            "admins": {
+                "total": admins_total,
+                "active": admins_active,
+                "inactive": admins_total - admins_active,
+                "by_department": admins_by_department,
+            },
+            "super_admins": {
+                "total": super_admins_total,
+                "active": super_admins_active,
+                "inactive": super_admins_total - super_admins_active,
+            },
+        })

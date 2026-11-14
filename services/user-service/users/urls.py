@@ -11,6 +11,7 @@ from .views import (
     AdminScrollUpdateListCreateView, AdminScrollUpdateDetailView, AdminScrollReorderView,
     StudentScrollView,
     OutboxDeadLetterListView, OutboxDeadLetterRetryView, OutboxHealthView,
+    ITDashboardStatsView,
 )
 
 urlpatterns = [
@@ -51,4 +52,7 @@ urlpatterns = [
     path("admin/outbox/dead-letters/", OutboxDeadLetterListView.as_view(), name="outbox-dead-letters"),
     path("admin/outbox/dead-letters/<uuid:pk>/retry/", OutboxDeadLetterRetryView.as_view(), name="outbox-retry"),
     path("admin/outbox/health/", OutboxHealthView.as_view(), name="outbox-health"),
+
+    # IT: Dashboard
+    path("it/dashboard-stats/", ITDashboardStatsView.as_view(), name="it-dashboard-stats"),
 ]
