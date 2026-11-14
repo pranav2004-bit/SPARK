@@ -1066,15 +1066,26 @@ export interface ITDashboardAuthStats {
 export interface ITDashboardBatchStats extends ActiveInactiveCount {
   id: string;
   batch_name: string;
-  by_department: (ActiveInactiveCount & { department: string })[];
-  by_section: (ActiveInactiveCount & { section: string })[];
+  // Each department's own section counts within this batch (changed
+  // 2026-11-14, user decision) — not a flat cross-batch/cross-department
+  // section tally, same reasoning as students.sections_per_department.
+  by_department: (ActiveInactiveCount & {
+    department: string;
+    sections: (ActiveInactiveCount & { section: string })[];
+  })[];
 }
 
 export interface ITDashboardUserStats {
   students: ActiveInactiveCount & {
     by_department: (ActiveInactiveCount & { department: string })[];
-    by_section: (ActiveInactiveCount & { section: string })[];
   };
-  sections_per_department: { department: string; sections: string[]; section_count: number }[];
+  // Each department's OWN section counts (changed 2026-11-14, user
+  // decision) — not a flat cross-department section tally, which would
+  // silently lump e.g. CSE's "Section A" together with ECE's "Section A".
+  sections_per_department: {
+    department: string;
+    section_count: number;
+    sections: (ActiveInactiveCount & { section: string })[];
+  }[];
   batches: ITDashboardBatchStats[];
 }

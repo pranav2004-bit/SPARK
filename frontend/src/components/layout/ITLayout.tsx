@@ -34,9 +34,9 @@ interface NavItem {
 // Dashboard added here (2026-11-14, user decision) — institution-wide
 // counts (students/admins/super admins/batches/departments, each with an
 // active/inactive and department/section/batch breakdown), recomputed
-// live on every visit, never cached. Placed first — a dashboard is
-// conventionally the landing tab, even though it doesn't replace
-// /it/welcome as the actual post-login redirect (not asked for).
+// live on every visit, never cached. Placed first — it is also now the
+// post-login landing page (the /it/welcome page it replaced was removed
+// the same day, per user decision).
 const NAV_ITEMS: NavItem[] = [
   { href: "/it/dashboard", label: "Dashboard",         icon: <Gauge size={15} /> },
   { href: "/it/super-admins", label: "Super Admins",   icon: <Crown size={15} /> },
