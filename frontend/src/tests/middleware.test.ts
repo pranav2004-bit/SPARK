@@ -168,8 +168,8 @@ describe("Unauthenticated portal access", () => {
     expect(lastRedirect()).toBe("/super-admin/login");
   });
 
-  it("redirects /it/welcome to /it/login when no cookie", () => {
-    middleware(req("/it/welcome"));
+  it("redirects /it/dashboard to /it/login when no cookie", () => {
+    middleware(req("/it/dashboard"));
     expect(lastRedirect()).toBe("/it/login");
   });
 

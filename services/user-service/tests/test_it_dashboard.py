@@ -81,7 +81,7 @@ def test_overall_student_counts(it_client):
 
 
 @pytest.mark.django_db
-def test_students_by_department_and_section(it_client):
+def test_students_by_department(it_client):
     batch = _batch("2023-27")
     _student(batch, "CSE", "A", is_active=True)
     _student(batch, "CSE", "A", is_active=False)
@@ -94,24 +94,35 @@ def test_students_by_department_and_section(it_client):
     assert by_dept["CSE"] == {"department": "CSE", "total": 3, "active": 2, "inactive": 1}
     assert by_dept["ECE"] == {"department": "ECE", "total": 1, "active": 1, "inactive": 0}
 
-    by_section = {row["section"]: row for row in data["students"]["by_section"]}
-    assert by_section["A"] == {"section": "A", "total": 3, "active": 2, "inactive": 1}
-    assert by_section["B"] == {"section": "B", "total": 1, "active": 1, "inactive": 0}
+    # No global, cross-department section tally (removed 2026-11-14, user
+    # decision) — a bare "Section A" count that silently lumps CSE-A with
+    # ECE-A together was never a meaningful number.
+    assert "by_section" not in data["students"]
 
 
 @pytest.mark.django_db
-def test_sections_per_department(it_client):
+def test_sections_per_department_has_real_counts_not_just_letters(it_client):
     batch = _batch("2023-27")
-    _student(batch, "CSE", "A")
-    _student(batch, "CSE", "B")
-    _student(batch, "CSE", "A")  # duplicate section — must not double-count
-    _student(batch, "ECE", "C")
+    _student(batch, "CSE", "A", is_active=True)
+    _student(batch, "CSE", "A", is_active=False)
+    _student(batch, "CSE", "B", is_active=True)
+    _student(batch, "ECE", "A", is_active=True)  # same letter "A" as CSE's — must not merge with it
 
     data = it_client.get(URL).json()["data"]
     by_dept = {row["department"]: row for row in data["sections_per_department"]}
-    assert by_dept["CSE"]["section_count"] == 2
-    assert sorted(by_dept["CSE"]["sections"]) == ["A", "B"]
-    assert by_dept["ECE"]["section_count"] == 1
+
+    cse = by_dept["CSE"]
+    assert cse["section_count"] == 2
+    cse_sections = {row["section"]: row for row in cse["sections"]}
+    assert cse_sections["A"] == {"section": "A", "total": 2, "active": 1, "inactive": 1}
+    assert cse_sections["B"] == {"section": "B", "total": 1, "active": 1, "inactive": 0}
+
+    ece = by_dept["ECE"]
+    assert ece["section_count"] == 1
+    ece_sections = {row["section"]: row for row in ece["sections"]}
+    # ECE's own "A" is counted separately from CSE's "A" — the whole point
+    # of this being scoped per department rather than a flat global tally.
+    assert ece_sections["A"] == {"section": "A", "total": 1, "active": 1, "inactive": 0}
 
 
 @pytest.mark.django_db
@@ -126,7 +137,6 @@ def test_every_batch_listed_including_empty_ones(it_client):
     assert by_name["2023-27"]["total"] == 1
     assert by_name["2024-28"]["total"] == 0
     assert by_name["2024-28"]["by_department"] == []
-    assert by_name["2024-28"]["by_section"] == []
 
 
 @pytest.mark.django_db
@@ -142,12 +152,39 @@ def test_per_batch_breakdown_is_scoped_to_that_batch_only(it_client):
 
     a = by_name["2023-27"]
     assert a["total"] == 2 and a["active"] == 1 and a["inactive"] == 1
-    assert a["by_department"] == [{"department": "CSE", "total": 2, "active": 1, "inactive": 1}]
-    assert a["by_section"] == [{"section": "A", "total": 2, "active": 1, "inactive": 1}]
+    assert a["by_department"] == [{
+        "department": "CSE", "total": 2, "active": 1, "inactive": 1,
+        "sections": [{"section": "A", "total": 2, "active": 1, "inactive": 1}],
+    }]
 
     b = by_name["2024-28"]
     assert b["total"] == 1
-    assert b["by_department"] == [{"department": "ECE", "total": 1, "active": 1, "inactive": 0}]
+    assert b["by_department"] == [{
+        "department": "ECE", "total": 1, "active": 1, "inactive": 0,
+        "sections": [{"section": "C", "total": 1, "active": 1, "inactive": 0}],
+    }]
+
+
+@pytest.mark.django_db
+def test_per_batch_sections_are_scoped_to_their_own_department_not_a_flat_tally(it_client):
+    # Two departments share the same section letter "A", both within the
+    # SAME batch — each department's own row must carry only its own count
+    # for "A", never a combined/global one (same requirement as the
+    # institution-wide sections_per_department, 2026-11-14 user decision).
+    batch = _batch("2023-27")
+    _student(batch, "CSE", "A", is_active=True)
+    _student(batch, "CSE", "A", is_active=False)
+    _student(batch, "ECE", "A", is_active=True)
+
+    data = it_client.get(URL).json()["data"]
+    batch_row = data["batches"][0]
+    by_dept = {row["department"]: row for row in batch_row["by_department"]}
+
+    cse_sections = {row["section"]: row for row in by_dept["CSE"]["sections"]}
+    assert cse_sections["A"] == {"section": "A", "total": 2, "active": 1, "inactive": 1}
+
+    ece_sections = {row["section"]: row for row in by_dept["ECE"]["sections"]}
+    assert ece_sections["A"] == {"section": "A", "total": 1, "active": 1, "inactive": 0}
 
 
 @pytest.mark.django_db

@@ -34,5 +34,5 @@ export const PORTAL_HOME: Record<PortalRole, string> = {
   admin: "/admin/batch",
   student: "/students/home",
   super_admin: "/super-admin/overview",
-  it: "/it/welcome",
+  it: "/it/dashboard",
 };

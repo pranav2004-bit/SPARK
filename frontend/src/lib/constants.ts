@@ -102,6 +102,6 @@ export const SUPER_ADMIN_LOGIN_CONFIG = {
 export const IT_LOGIN_CONFIG = {
   apiEndpoint: "/auth/login/",
   cookieRole: "it" as const,
-  redirectTo: "/it/welcome",
+  redirectTo: "/it/dashboard",
   extraBody: { role: "it" },
 } as const;

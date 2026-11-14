@@ -790,6 +790,28 @@ def _finalize_buckets(buckets: dict, key_name: str) -> list:
     )
 
 
+def _finalize_department_buckets(dept_buckets: dict, dept_sections: dict) -> list:
+    """Same as _finalize_buckets(dept_buckets, "department") but each row
+    also carries its own `sections` breakdown (scoped to that department,
+    not a flat cross-department tally) — used by the per-batch "by
+    department" list so a batch's section counts are nested inside the
+    department they belong to, same reasoning as the institution-wide
+    sections_per_department below."""
+    return sorted(
+        (
+            {
+                "department": dept,
+                "total": v["total"],
+                "active": v["active"],
+                "inactive": v["total"] - v["active"],
+                "sections": _finalize_buckets(dept_sections.get(dept, {}), "section"),
+            }
+            for dept, v in dept_buckets.items()
+        ),
+        key=lambda row: row["department"],
+    )
+
+
 class ITDashboardStatsView(APIView):
     permission_classes = [IsITUser]
 
@@ -801,9 +823,10 @@ class ITDashboardStatsView(APIView):
         students_active = students_qs.filter(is_active=True).count()
 
         # One grouped query, reshaped in Python into every breakdown the
-        # dashboard needs (by department, by section, per batch, and within
-        # each batch) — avoids a separate query per batch/department/
-        # section combination. Aggregated in Python rather than a
+        # dashboard needs (by department, by department-then-section, per
+        # batch, and within each batch) — avoids a separate query per
+        # batch/department/section combination. Aggregated in Python rather
+        # than a
         # Postgres-only JSON aggregate, matching assessment-service's own
         # convention (_department_comparison, _malpractice_breakdown) for
         # staying portable across the Postgres/SQLite split this project
@@ -814,11 +837,14 @@ class ITDashboardStatsView(APIView):
         )
 
         by_department: dict = {}
-        by_section: dict = {}
         # batch_id (str) -> {"batch_name", "total", "active", "by_department": {}, "by_section": {}}
         batch_breakdowns: dict = {}
-        # department -> set of distinct section letters seen under it
-        dept_sections: dict = {}
+        # (department, section) -> {total, active} — deliberately NOT a
+        # flat cross-department section tally (removed 2026-11-14, user
+        # decision: a global "Section A" count that silently lumps
+        # CSE-A with ECE-A together was never a meaningful number) —
+        # every section breakdown is scoped to its own department.
+        dept_section_counts: dict = {}
 
         for row in rows:
             dept = row["department"] or ""
@@ -829,21 +855,18 @@ class ITDashboardStatsView(APIView):
             d = by_department.setdefault(dept, _empty_bucket())
             d["total"] += total; d["active"] += active
 
-            s = by_section.setdefault(section, _empty_bucket())
-            s["total"] += total; s["active"] += active
-
             b = batch_breakdowns.setdefault(batch_id, {
                 "batch_name": row["batch__batch_name"], "total": 0, "active": 0,
-                "by_department": {}, "by_section": {},
+                "by_department": {}, "dept_sections": {},
             })
             b["total"] += total; b["active"] += active
             bd = b["by_department"].setdefault(dept, _empty_bucket())
             bd["total"] += total; bd["active"] += active
-            bs = b["by_section"].setdefault(section, _empty_bucket())
+            bs = b["dept_sections"].setdefault(dept, {}).setdefault(section, _empty_bucket())
             bs["total"] += total; bs["active"] += active
 
-            if dept and section:
-                dept_sections.setdefault(dept, set()).add(section)
+            ds = dept_section_counts.setdefault((dept, section), _empty_bucket())
+            ds["total"] += total; ds["active"] += active
 
         # Every batch in the institution, including ones with zero students
         # — "number of batches, number of students in those batches" means
@@ -851,22 +874,32 @@ class ITDashboardStatsView(APIView):
         batches_result = []
         for batch in Batch.objects.filter(institution_id=institution_id).values("id", "batch_name"):
             batch_id = str(batch["id"])
-            b = batch_breakdowns.get(batch_id, {"total": 0, "active": 0, "by_department": {}, "by_section": {}})
+            b = batch_breakdowns.get(batch_id, {"total": 0, "active": 0, "by_department": {}, "dept_sections": {}})
             batches_result.append({
                 "id": batch_id,
                 "batch_name": batch["batch_name"],
                 "total": b["total"],
                 "active": b["active"],
                 "inactive": b["total"] - b["active"],
-                "by_department": _finalize_buckets(b["by_department"], "department"),
-                "by_section": _finalize_buckets(b["by_section"], "section"),
+                "by_department": _finalize_department_buckets(b["by_department"], b["dept_sections"]),
             })
         batches_result.sort(key=lambda row: row["batch_name"])
 
+        # Group the (department, section) counts back up by department —
+        # each department's own `sections` list carries real student
+        # counts per section, not just which letters exist.
+        by_dept_sections: dict = {}
+        for (dept, section), counts in dept_section_counts.items():
+            by_dept_sections.setdefault(dept, {})[section] = counts
+
         sections_per_department = sorted(
             (
-                {"department": dept, "sections": sorted(sections), "section_count": len(sections)}
-                for dept, sections in dept_sections.items()
+                {
+                    "department": dept,
+                    "section_count": len(sections),
+                    "sections": _finalize_buckets(sections, "section"),
+                }
+                for dept, sections in by_dept_sections.items()
             ),
             key=lambda row: row["department"],
         )
@@ -877,7 +910,6 @@ class ITDashboardStatsView(APIView):
                 "active": students_active,
                 "inactive": students_total - students_active,
                 "by_department": _finalize_buckets(by_department, "department"),
-                "by_section": _finalize_buckets(by_section, "section"),
             },
             "sections_per_department": sections_per_department,
             "batches": batches_result,
