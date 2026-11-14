@@ -4,18 +4,16 @@ import { usePathname } from "next/navigation";
 
 export function GlobalFooter() {
   const pathname = usePathname();
-  // Hidden on mobile for student routes in general (screen space is tight
-  // on data-dense student pages), except the login page, which is shown on
-  // mobile too since it's not a data-dense screen.
-  const hideOnMobile = pathname.startsWith("/students") && pathname !== "/students/login";
+  // Restricted to the application's own home page only (2026-11-14, user
+  // decision) — every other route (every admin/student/super-admin/IT
+  // portal screen) used to show this unconditionally since it's mounted
+  // once in the root layout; it's branding for the public landing page,
+  // not something that belongs on every data-dense authenticated screen.
+  if (pathname !== "/") return null;
 
   return (
     <footer
-      className={[
-        "fixed bottom-0 inset-x-0 z-50",
-        "px-5",
-        hideOnMobile ? "hidden sm:grid" : "grid",
-      ].join(" ")}
+      className="fixed bottom-0 inset-x-0 z-50 px-5 grid"
       style={{
         background: "var(--color-surface-secondary)",
         borderTop: "1px solid var(--color-border)",

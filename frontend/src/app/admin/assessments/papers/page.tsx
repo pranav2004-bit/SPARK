@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   HelpCircle, AlertTriangle,
-  Pencil, Trash2, ChevronRight, Lock,
+  Pencil, Trash2, ChevronRight,
 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -16,7 +16,6 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ResourceItemCardSkeleton } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toast";
-import { useAuth } from "@/hooks/useAuth";
 import api, { getErrorMessage } from "@/lib/api";
 import type { QuestionPaper, ApiSuccess, PaginatedResponse } from "@/types";
 
@@ -48,23 +47,26 @@ function IconActionButton({ label, onClick, color, children }: {
 }
 
 // ── Paper card ────────────────────────────────────────────────────────────────
+// No more locked/"View only" state (changed 2026-11-14, user decision) —
+// this list is now always just the papers this admin can actually open
+// (their own, or every paper for a super_admin), since the backend
+// (AdminPaperListCreateView.get) no longer sends anyone else's papers to
+// a regular admin at all.
 interface PaperCardProps {
   paper: QuestionPaper;
-  isOwner: boolean;
   onNavigate: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }
 
-function PaperCard({ paper, isOwner, onNavigate, onEdit, onDelete }: PaperCardProps) {
+function PaperCard({ paper, onNavigate, onEdit, onDelete }: PaperCardProps) {
   const creatorLabel = paper.created_by_name || paper.created_by_email;
 
   return (
     <div
-      className={["flex items-center justify-between gap-3 p-4 rounded-[var(--radius-xl)] transition-shadow duration-150 group/card", isOwner ? "cursor-pointer hover:shadow-[var(--shadow-md)]" : "cursor-not-allowed"].join(" ")}
+      className="flex items-center justify-between gap-3 p-4 rounded-[var(--radius-xl)] transition-shadow duration-150 group/card cursor-pointer hover:shadow-[var(--shadow-md)]"
       style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", boxShadow: "var(--shadow-sm)" }}
-      onClick={isOwner ? onNavigate : undefined}
-      title={isOwner ? undefined : `Created by ${creatorLabel || "another admin"} — you can't open this.`}
+      onClick={onNavigate}
     >
       <div className="min-w-0 flex-1">
         <p className="text-base font-semibold leading-snug break-words" style={{ color: "var(--color-text)" }}>{paper.title}</p>
@@ -73,7 +75,9 @@ function PaperCard({ paper, isOwner, onNavigate, onEdit, onDelete }: PaperCardPr
         </p>
         {/* Falls back to email when the creator hasn't set a display
             name — omitted entirely (not "Created by") if neither
-            resolved, e.g. a transient auth-service lookup failure. */}
+            resolved, e.g. a transient auth-service lookup failure. Still
+            shown even for an admin's own papers (not just a super_admin
+            viewing someone else's) — harmless and consistent either way. */}
         {creatorLabel && (
           <p className="text-sm mt-0.5 truncate" style={{ color: "var(--color-text-subtle)" }}>
             Created by {creatorLabel}
@@ -81,25 +85,17 @@ function PaperCard({ paper, isOwner, onNavigate, onEdit, onDelete }: PaperCardPr
         )}
       </div>
       <div className="flex items-center gap-0.5 shrink-0">
-        {isOwner ? (
-          <>
-            <ChevronRight size={16} style={{ color: "var(--color-text-subtle)" }}
-              className="transition-transform duration-150 group-hover/card:translate-x-0.5" />
-            <span className="w-px h-5 mx-1" style={{ background: "var(--color-border)" }} />
-            <IconActionButton label="Edit" color="#2563EB"
-              onClick={e => { e.stopPropagation(); onEdit(); }}>
-              <Pencil size={14} />
-            </IconActionButton>
-            <IconActionButton label="Delete" color="var(--color-danger)"
-              onClick={e => { e.stopPropagation(); onDelete(); }}>
-              <Trash2 size={14} />
-            </IconActionButton>
-          </>
-        ) : (
-          <span className="inline-flex items-center gap-1.5 text-xs font-medium" style={{ color: "var(--color-text-subtle)" }}>
-            <Lock size={11} /> View only
-          </span>
-        )}
+        <ChevronRight size={16} style={{ color: "var(--color-text-subtle)" }}
+          className="transition-transform duration-150 group-hover/card:translate-x-0.5" />
+        <span className="w-px h-5 mx-1" style={{ background: "var(--color-border)" }} />
+        <IconActionButton label="Edit" color="#2563EB"
+          onClick={e => { e.stopPropagation(); onEdit(); }}>
+          <Pencil size={14} />
+        </IconActionButton>
+        <IconActionButton label="Delete" color="var(--color-danger)"
+          onClick={e => { e.stopPropagation(); onDelete(); }}>
+          <Trash2 size={14} />
+        </IconActionButton>
       </div>
     </div>
   );
@@ -112,11 +108,6 @@ type ModalState = null | "add" | { mode: "edit"; item: QuestionPaper };
 export default function AdminAssessmentPapersPage() {
   const router = useRouter();
   const toast  = useToast();
-  const { user, isSuperAdmin } = useAuth();
-  // This page is admin-only (route-guarded elsewhere), so `user` is always
-  // AdminUser here in practice — StudentUser (the only AuthUser variant
-  // without `.id`) narrowed out via the "id" in user check for TypeScript.
-  const currentUserId = user && "id" in user ? user.id : undefined;
 
   const [papers,  setPapers]  = useState<QuestionPaper[]>([]);
   const [loading, setLoading] = useState(true);
@@ -230,7 +221,6 @@ export default function AdminAssessmentPapersPage() {
               <PaperCard
                 key={p.id}
                 paper={p}
-                isOwner={isSuperAdmin || p.created_by === currentUserId}
                 onNavigate={() => router.push(`/admin/assessments/papers/${p.id}`)}
                 onEdit={() => openModal({ mode: "edit", item: p })}
                 onDelete={() => setDeleteTarget({ id: p.id, title: p.title })}

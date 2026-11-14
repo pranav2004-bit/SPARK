@@ -2,12 +2,14 @@
 Faculty-privacy restriction (live user request): a question paper's
 contents (sets/questions/options/instructions/images) and the ability to
 assign it to a batch are visible-but-inaccessible to any admin other than
-the one who created it — the papers *list* stays fully visible to every
-admin at the institution (unchanged), only opening/editing/assigning is
-gated. A super admin always bypasses the restriction (escape hatch for a
-creator's account later being deactivated/deleted). Results, Analytics, and
-Dashboard are explicitly NOT part of this restriction — still open to any
-admin, per the same decision.
+the one who created it. The papers *list* originally stayed fully visible
+to every admin at the institution (locked/"View only" for a non-owner);
+changed 2026-11-14 (user decision) so a regular admin's list no longer
+even includes another admin's papers at all. A super admin always
+bypasses the restriction (escape hatch for a creator's account later
+being deactivated/deleted) and still sees every paper in the list.
+Results, Analytics, and Dashboard are explicitly NOT part of this
+restriction — still open to any admin, per the same decision.
 """
 import uuid
 from unittest.mock import patch
@@ -30,8 +32,8 @@ PAPER_OWNERSHIP_DENIED_MSG = "This assessment was created by another admin and c
 def owned_paper_chain(db):
     """An unlocked, assignment-ready paper → set → question → 2 options,
     created by ADMIN_USER_ID (admin_client). colleague_admin_client is a
-    different admin at the same institution and must be denied everywhere
-    except the papers list; super_admin_client must always get through."""
+    different admin at the same institution and must be denied everywhere,
+    including the list itself; super_admin_client must always get through."""
     paper = QuestionPaper.objects.create(
         institution_id=INSTITUTION_A, title="Faculty-Private Paper",
         created_by=ADMIN_USER_ID,
@@ -45,11 +47,23 @@ def owned_paper_chain(db):
     return {"paper": paper, "qset": qset, "question": question, "option": opt_a}
 
 
-# ── The list itself is NOT restricted ───────────────────────────────────────
+# ── The list itself (changed 2026-11-14, user decision) ─────────────────────
 
-class TestPapersListStaysVisibleToEveryone:
-    def test_colleague_admin_sees_the_paper_in_the_list(self, colleague_admin_client, owned_paper_chain):
+class TestPapersListOwnershipFilter:
+    def test_creator_sees_their_own_paper_in_the_list(self, admin_client, owned_paper_chain):
+        resp = admin_client.get("/api/assessments/admin/papers/")
+        assert resp.status_code == 200
+        ids = [p["id"] for p in resp.json()["results"]]
+        assert str(owned_paper_chain["paper"].id) in ids
+
+    def test_colleague_admin_does_not_see_the_paper_in_the_list(self, colleague_admin_client, owned_paper_chain):
         resp = colleague_admin_client.get("/api/assessments/admin/papers/")
+        assert resp.status_code == 200
+        ids = [p["id"] for p in resp.json()["results"]]
+        assert str(owned_paper_chain["paper"].id) not in ids
+
+    def test_super_admin_sees_every_admins_paper_in_the_list(self, super_admin_client, owned_paper_chain):
+        resp = super_admin_client.get("/api/assessments/admin/papers/")
         assert resp.status_code == 200
         ids = [p["id"] for p in resp.json()["results"]]
         assert str(owned_paper_chain["paper"].id) in ids

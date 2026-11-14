@@ -31,18 +31,6 @@ jest.mock("@/components/ui/Toast", () => ({
   useToast: () => ({ error: mockToastError, success: jest.fn() }),
 }));
 
-// The page itself (not just AdminLayout) now calls useAuth() directly, to
-// decide which paper cards are locked (faculty-privacy restriction — a
-// paper's creator or a super admin can open it, no one else). Mutate
-// mockAuthStore.user per test to control that.
-const mockAuthStore: { user: { id: string; role: string } | null } = { user: null };
-jest.mock("@/lib/auth-store", () => ({
-  useAuthStore: Object.assign(
-    jest.fn(() => mockAuthStore),
-    { getState: jest.fn(() => mockAuthStore) },
-  ),
-}));
-
 import React from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -76,7 +64,6 @@ const REAL_PAPERS_LIST_RESPONSE = {
 beforeEach(() => {
   mockPush.mockClear();
   mockToastError.mockClear();
-  mockAuthStore.user = { id: "owner-user-id", role: "admin" };
 });
 
 afterEach(() => {
@@ -148,8 +135,14 @@ describe("Admin papers list — load failure", () => {
   });
 });
 
-// ── Faculty-privacy restriction — locked cards for non-creator admins ────────
-describe("Admin papers list — ownership lock", () => {
+// ── Faculty-privacy restriction — enforced server-side only (changed
+// 2026-11-14, user decision) ─────────────────────────────────────────────
+// AdminPaperListCreateView.get no longer sends another admin's papers to
+// a regular admin at all (previously it did, and this page rendered them
+// locked/"View only" client-side). The page itself has no ownership logic
+// left — every paper the API returns is rendered as fully open/editable,
+// trusting the backend's own filtering entirely.
+describe("Admin papers list — every returned paper is fully actionable", () => {
   function paperResponse(created_by: string) {
     return {
       data: {
@@ -169,8 +162,7 @@ describe("Admin papers list — ownership lock", () => {
     };
   }
 
-  it("lets the creator open their own paper and shows edit/delete", async () => {
-    mockAuthStore.user = { id: "owner-user-id", role: "admin" };
+  it("shows edit/delete and allows navigation for any paper the API returns, no client-side lock", async () => {
     jest.spyOn(api, "get").mockResolvedValue(paperResponse("owner-user-id") as any);
     const user = userEvent.setup();
 
@@ -185,34 +177,12 @@ describe("Admin papers list — ownership lock", () => {
     expect(mockPush).toHaveBeenCalledWith("/admin/assessments/papers/990e26ff-6012-4f91-814e-51db6a9eed16");
   });
 
-  it("locks another admin's paper — no navigation, no edit/delete, shows View only", async () => {
-    mockAuthStore.user = { id: "owner-user-id", role: "admin" };
+  it("still shows the creator's name on the card", async () => {
     jest.spyOn(api, "get").mockResolvedValue(paperResponse("someone-elses-user-id") as any);
-    const user = userEvent.setup();
 
     render(<AdminAssessmentPapersPage />);
     await waitFor(() => expect(screen.getByText("MOCK TEST 1")).toBeInTheDocument());
 
-    expect(screen.getByText("View only")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Edit")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Delete")).not.toBeInTheDocument();
-
-    await user.click(screen.getByText("MOCK TEST 1"));
-    expect(mockPush).not.toHaveBeenCalled();
-  });
-
-  it("a super admin can always open and edit any paper, regardless of creator", async () => {
-    mockAuthStore.user = { id: "some-super-admin-id", role: "super_admin" };
-    jest.spyOn(api, "get").mockResolvedValue(paperResponse("someone-elses-user-id") as any);
-    const user = userEvent.setup();
-
-    render(<AdminAssessmentPapersPage />);
-    await waitFor(() => expect(screen.getByText("MOCK TEST 1")).toBeInTheDocument());
-
-    expect(screen.getByLabelText("Edit")).toBeInTheDocument();
-    expect(screen.queryByText("View only")).not.toBeInTheDocument();
-
-    await user.click(screen.getByText("MOCK TEST 1"));
-    expect(mockPush).toHaveBeenCalledWith("/admin/assessments/papers/990e26ff-6012-4f91-814e-51db6a9eed16");
+    expect(screen.getByText(/Created by Someone Else/)).toBeInTheDocument();
   });
 });
