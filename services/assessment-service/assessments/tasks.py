@@ -160,6 +160,41 @@ _PURGE_MAX_BATCHES = 500
 
 
 @shared_task(bind=True, base=DeadLetteringTask, max_retries=_MAX_RETRIES, default_retry_delay=_RETRY_BACKOFF_SECONDS)
+def delete_s3_images_task(self, image_keys):
+    """Deletes every S3 image key collected by AdminPaperDetailView.delete()
+    (2026-11-13's paper-content-deletion feature) — queued via
+    transaction.on_commit, so this only ever runs once that delete's
+    transaction has actually committed, never on one that later rolled
+    back. Each key is deleted independently: one bad/already-missing key
+    must not abort the whole batch, since every other key is still real
+    storage worth reclaiming. A retry only re-sends the keys that actually
+    failed, not the ones already deleted (core.storage.delete_file is
+    itself idempotent against a missing key — S3 DELETE on a non-existent
+    object is a no-op — but there's no reason to redo confirmed work)."""
+    from core.storage import delete_file
+
+    with bind_request_id(self.request.id):
+        failures = []
+        for key in image_keys:
+            try:
+                delete_file(key)
+            except Exception as exc:
+                failures.append(key)
+                logger.warning("delete_s3_images_task: failed to delete key=%s: %s", key, exc)
+        if failures:
+            logger.error(
+                "delete_s3_images_task: %d/%d key(s) failed to delete — retrying.",
+                len(failures), len(image_keys),
+            )
+            raise self.retry(
+                exc=RuntimeError(f"{len(failures)} key(s) failed to delete"),
+                args=(failures,),
+                countdown=_RETRY_BACKOFF_SECONDS * (self.request.retries + 1),
+            )
+        return {"deleted": len(image_keys)}
+
+
+@shared_task(bind=True, base=DeadLetteringTask, max_retries=_MAX_RETRIES, default_retry_delay=_RETRY_BACKOFF_SECONDS)
 def purge_old_activity_logs(self):
     """Deletes ActivityLog rows older than ACTIVITY_LOG_RETENTION_DAYS
     (models.py) — the raw tab-switch/copy/paste/etc. audit trail only.

@@ -67,7 +67,7 @@ def analytics_setup(db):
     def _make(student_key, qset, responses, score, total_marks, flagged=False):
         sid = students[student_key]
         session = AssessmentSession.objects.create(
-            assignment=assignment, student_id=sid, set=qset,
+            assignment=assignment, student_id=sid, set=qset, set_label_snapshot=qset.label, paper=paper,
             ends_at=timezone.now() + timedelta(hours=1), status=SESSION_STATUS_SUBMITTED,
             started_at=timezone.now() - timedelta(minutes=10),
         )

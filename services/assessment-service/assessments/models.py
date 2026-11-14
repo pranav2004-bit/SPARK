@@ -22,6 +22,26 @@ class QuestionPaper(models.Model):
     created_at     = models.DateTimeField(auto_now_add=True)
     updated_at     = models.DateTimeField(auto_now=True)
 
+    # ── Content deletion (added 2026-11-13, user decision) ─────────────────
+    # A paper can now be deleted once every assignment referencing it has
+    # ended, specifically to reclaim real storage (including S3 images) —
+    # see AdminPaperDetailView.delete() and tasks.delete_paper_content_task.
+    # Deliberately NOT a row delete: this row (title/description/
+    # created_by/created_at — everything already on this model) stays
+    # forever, so every place that displays a paper's own identity
+    # (Results, Analytics, Dashboard, student past-results, this model's
+    # own admin detail view) keeps working with zero change. Only the
+    # CONTENT underneath — QuestionSet/QuestionSection/Question/
+    # QuestionOption rows, and their S3 images — is actually erased.
+    is_deleted  = models.BooleanField(default=False, db_index=True)
+    deleted_at  = models.DateTimeField(null=True, blank=True)
+    # "Number of sets" is normally computed live (self.sets.count()) — once
+    # the Set rows are actually gone, that live count would read 0. Frozen
+    # here at the moment of deletion specifically so every place that shows
+    # a paper's set count keeps showing the real pre-deletion number
+    # forever. Only ever read once is_deleted=True (see QuestionPaperSerializer).
+    deleted_set_count = models.PositiveIntegerField(null=True, blank=True)
+
     class Meta:
         db_table = "assessment_question_papers"
         ordering = ["-created_at"]
@@ -41,6 +61,28 @@ class QuestionPaper(models.Model):
         return self.assignments.filter(
             status__in=[ASSIGNMENT_STATUS_SCHEDULED, ASSIGNMENT_STATUS_LIVE, ASSIGNMENT_STATUS_CLOSED]
         ).exists()
+
+    def is_content_deletable(self) -> bool:
+        """A paper's content (Sets/Sections/Questions/Options + S3 images)
+        can be erased once no assignment referencing it is currently
+        SCHEDULED or LIVE — i.e. nothing is relying on this content right
+        now or will in the future. This is deliberately NOT "every
+        assignment has status CLOSED": a paper with zero assignments ever
+        (never assigned, or every assignment since individually deleted —
+        see BatchAssignment.is_deleted) is just as safe to delete as one
+        where every assignment ended normally; the only thing that must
+        never be true is a live-or-upcoming dependency.
+
+        Also blocked while any session — real OR an admin's solo mock-test
+        trial (assignment IS NULL) — is still IN_PROGRESS against this
+        paper. Trial sessions aren't governed by assignment status at all
+        (an admin can start one any time), so this is the one dependency
+        the assignment-status check above can never see on its own."""
+        if self.assignments.filter(
+            status__in=[ASSIGNMENT_STATUS_SCHEDULED, ASSIGNMENT_STATUS_LIVE]
+        ).exists():
+            return False
+        return not self.sessions.filter(status=SESSION_STATUS_IN_PROGRESS).exists()
 
 
 # ── Question Sets ──────────────────────────────────────────────────────────────
@@ -305,6 +347,31 @@ class BatchAssignment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # ── Delete (added 2026-11-13, user decision) ────────────────────────────
+    # Two different things happen under one "Delete" button depending on
+    # status, see AdminAssignmentDetailView.delete():
+    #   SCHEDULED — nothing has ever depended on this row (no session can
+    #     exist before LIVE) — a real row delete, cascading to its
+    #     StudentSetAllocation rows exactly like today.
+    #   CLOSED — real student history (sessions/results) exists. This row
+    #     is never actually deleted — only flagged, so Results/Analytics/
+    #     Dashboard/student-past-results keep reading it with zero change;
+    #     it's just hidden from the active Assign-page list.
+    # LIVE is never deletable either way (blocked in the view).
+    is_deleted = models.BooleanField(default=False, db_index=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    # Per-question difficulty (Analytics) is normally computed live by
+    # scanning this assignment's paper's live Question rows every time the
+    # page loads (_question_difficulty in views.py). Once that paper's
+    # content is actually erased (QuestionPaper.is_deleted), there's
+    # nothing left to scan — so the full computed table is snapshotted
+    # here, once, at the moment the paper's content is deleted (for every
+    # assignment that ever used it, not just this one), and
+    # _question_difficulty() reads this instead whenever it's set. Null for
+    # every assignment whose paper's content is still live — the ordinary,
+    # overwhelming majority case — so nothing changes for those.
+    question_difficulty_snapshot = models.JSONField(null=True, blank=True)
+
     class Meta:
         db_table = "assessment_batch_assignments"
         ordering = ["-created_at"]
@@ -341,12 +408,32 @@ class StudentSetAllocation(models.Model):
     # assignment") can't use that composite index's leftmost prefix and
     # genuinely needs this standalone index.
     student_id = models.UUIDField(db_index=True)
+    # Nullable since 2026-11-13 (previously on_delete=PROTECT) — a paper's
+    # content can now be deliberately deleted once every assignment using
+    # it has ended (see QuestionPaper.is_content_deletable), which means
+    # this Set row can genuinely go away out from under an allocation that
+    # still needs to display which set a student was on. set_label_snapshot
+    # below is the real source of truth for display purposes now — this FK
+    # is kept for whatever still legitimately needs the live Set object
+    # (while content hasn't been deleted), and simply goes NULL once it has.
     set = models.ForeignKey(
         QuestionSet,
-        on_delete=models.PROTECT,  # a set with allocations is part of a locked paper (Task 3.2) — never silently delete allocation history
+        on_delete=models.SET_NULL,
         related_name="allocations",
         db_index=True,
+        null=True, blank=True,
     )
+    # Copied from set.label at allocation time (snapshot_roster_and_allocate)
+    # and never updated afterward — safe to freeze permanently, not just at
+    # deletion time, because a Set's label can never actually change after
+    # allocation happens anyway: allocation only ever occurs once the
+    # paper is already locked (QuestionPaper.is_locked), and a locked
+    # paper's sets are already read-only. So this always exactly matches
+    # what `set.label` would show live, with zero behavioral difference —
+    # it's simply immune to the Set row later being deleted. Every read
+    # site that used to show `alloc.set.label` reads this instead now
+    # (views.py: _serialize_result_row, _export_rows, available_sets).
+    set_label_snapshot = models.CharField(max_length=50, blank=True, default="")
     allocated_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -452,12 +539,39 @@ class AssessmentSession(models.Model):
     # NULLs equal for uniqueness purposes, so the same admin can retake the
     # same paper as many times as they want.
     student_id = models.UUIDField(db_index=True)
+    # Nullable since 2026-11-13 (previously on_delete=PROTECT) — see
+    # StudentSetAllocation.set's comment for the full reasoning: a paper's
+    # content can now be deliberately deleted once eligible, and this Set
+    # row goes with it. set_label_snapshot below is the frozen display
+    # value; `paper` below is the frozen way to resolve "which paper, is it
+    # deleted" once this is NULL.
     set = models.ForeignKey(
         QuestionSet,
+        on_delete=models.SET_NULL,
+        related_name="sessions",
+        db_index=True,
+        null=True, blank=True,
+    )
+    # Added 2026-11-13 alongside `set` becoming nullable — `assignment.paper`
+    # already gives this for a real student session, but a trial/mock-test
+    # session (assignment IS NULL, see above) had no other way to reach its
+    # paper once `set` can go NULL. QuestionPaper rows are never actually
+    # deleted (only flagged, see QuestionPaper.is_deleted) so PROTECT here
+    # is always safe — this FK never blocks anything. Populated at session
+    # creation for every session, real or trial, from set.paper.
+    paper = models.ForeignKey(
+        QuestionPaper,
         on_delete=models.PROTECT,
         related_name="sessions",
         db_index=True,
+        null=True, blank=True,
     )
+    # Copied from set.label at session-creation time — see
+    # StudentSetAllocation.set_label_snapshot's comment for why this is
+    # always safe to freeze permanently (a locked paper's set labels can
+    # never change again after assignment). Read by _set_comparison
+    # (Analytics' per-set average) instead of the live `set__label` join.
+    set_label_snapshot = models.CharField(max_length=50, blank=True, default="")
     started_at = models.DateTimeField(auto_now_add=True)
     # Computed exactly once at creation (Task 5.1) as
     # min(now() + exam_duration_minutes, global_expire_time) — never
@@ -569,8 +683,19 @@ class AssessmentResponse(models.Model):
     # composite index's leftmost prefix — Task 8.1's per-question
     # difficulty aggregation filters/groups by question_id across many
     # sessions and genuinely needs this standalone index.
+    # Nullable since 2026-11-13 (previously on_delete=PROTECT) — a paper's
+    # content can now be deliberately deleted once eligible (see
+    # QuestionPaper.is_content_deletable), and this Question row goes with
+    # it. A response whose question has been deleted this way still exists
+    # (the overall score it contributed to, ResultSummary, is untouched —
+    # that's computed and stored once at finalize time, never read live
+    # from this table) — only its own per-question detail (which question,
+    # which option) is gone, surfaced as a clear "this paper was deleted"
+    # message rather than a crash (AdminResultResponsesView/
+    # AdminQuestionResponsesView).
     question = models.ForeignKey(
-        Question, on_delete=models.PROTECT, related_name="assessment_responses", db_index=True,
+        Question, on_delete=models.SET_NULL, related_name="assessment_responses", db_index=True,
+        null=True, blank=True,
     )
     selected_option_ids = models.JSONField(default=list, blank=True)
     # Computed once, at finalize time (scoring.py's finalize_sessions()) —

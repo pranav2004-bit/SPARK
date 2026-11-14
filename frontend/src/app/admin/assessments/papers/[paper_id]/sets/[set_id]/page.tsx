@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { Layers, ChevronRight, ChevronUp, ChevronDown, Pencil, Trash2, ListChecks } from "lucide-react";
+import { Layers, ChevronRight, ChevronUp, ChevronDown, Pencil, Trash2 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -19,6 +19,33 @@ const T = {
   text: "var(--color-text)", muted: "var(--color-text-muted)", subtle: "var(--color-text-subtle)",
   border: "var(--color-border)",
 };
+
+// Small icon button with a black/white hover tooltip showing its label —
+// these section-card actions (reorder, edit, delete) are icon-only with no
+// visible text, so on-hover identification matters.
+function IconActionButton({ label, onClick, disabled, color, children }: {
+  label: string;
+  onClick: (e: React.MouseEvent) => void;
+  disabled?: boolean;
+  color: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="relative group">
+      <button onClick={onClick} disabled={disabled} aria-label={label}
+        className="w-7 h-7 rounded-[var(--radius-md)] flex items-center justify-center transition-colors disabled:opacity-30"
+        style={{ color }}>
+        {children}
+      </button>
+      <span
+        className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 whitespace-nowrap rounded px-2 py-1 text-xs font-medium opacity-0 group-hover:opacity-100 transition-opacity z-10"
+        style={{ background: "#111827", color: "#fff" }}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
 
 interface SetSections {
   set:      QuestionSet;
@@ -192,57 +219,50 @@ export default function AdminAssessmentSetSectionsPage() {
         />
 
         {loading ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
             {[1, 2].map(i => <ResourceItemCardSkeleton key={i} />)}
           </div>
         ) : isEmpty ? (
           <EmptyState icon={Layers} title="No sections yet" subtitle="Create a section to start adding questions to this set."
             action={{ label: "+ Section", onClick: () => setFormSection("new") }} />
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          // auto-fill + minmax, not a fixed 2-column grid — a lone card (or
+          // any count that doesn't fill a row) keeps its own natural width
+          // instead of being stretched to fill half the page, which read as
+          // a lot of dead space for how little each card actually holds.
+          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
             {detail!.sections.map((s, idx) => (
               <div key={s.id}
-                className="flex items-start justify-between gap-3 p-4 rounded-[var(--radius-lg)] cursor-pointer transition-shadow hover:shadow-[var(--shadow-sm)]"
+                className="flex items-center justify-between gap-3 p-4 rounded-[var(--radius-lg)] cursor-pointer transition-shadow hover:shadow-[var(--shadow-sm)]"
                 style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)" }}
                 onClick={() => router.push(`/admin/assessments/papers/${paper_id}/sets/${set_id}/sections/${s.id}`)}
               >
                 <div className="min-w-0 flex-1">
-                  <div className="w-9 h-9 rounded-[var(--radius-md)] flex items-center justify-center mb-3"
-                    style={{ background: "#EFF6FF" }}>
-                    <ListChecks size={16} style={{ color: "#2563EB" }} />
-                  </div>
-                  <p className="text-sm font-semibold truncate" style={{ color: T.text }}>{s.title}</p>
-                  <p className="text-xs mt-0.5" style={{ color: T.subtle }}>
+                  <p className="text-base font-semibold truncate" style={{ color: T.text }}>{s.title}</p>
+                  <p className="text-sm mt-0.5" style={{ color: T.subtle }}>
                     {s.question_count} question{s.question_count === 1 ? "" : "s"}
                   </p>
                 </div>
-                <div className="flex flex-col items-center gap-1 shrink-0">
-                  <div className="flex gap-0.5">
-                    <button onClick={e => { e.stopPropagation(); handleMove(idx, -1); }}
-                      disabled={idx === 0 || reordering}
-                      className="w-7 h-7 rounded-[var(--radius-md)] flex items-center justify-center transition-colors disabled:opacity-30"
-                      style={{ color: T.subtle }} aria-label="Move up">
-                      <ChevronUp size={13} />
-                    </button>
-                    <button onClick={e => { e.stopPropagation(); handleMove(idx, 1); }}
-                      disabled={idx === detail!.sections.length - 1 || reordering}
-                      className="w-7 h-7 rounded-[var(--radius-md)] flex items-center justify-center transition-colors disabled:opacity-30"
-                      style={{ color: T.subtle }} aria-label="Move down">
-                      <ChevronDown size={13} />
-                    </button>
-                  </div>
-                  <div className="flex gap-0.5">
-                    <button onClick={e => { e.stopPropagation(); setFormSection(s); }}
-                      className="w-7 h-7 rounded-[var(--radius-md)] flex items-center justify-center transition-colors"
-                      style={{ color: T.subtle }} aria-label="Rename section">
-                      <Pencil size={13} />
-                    </button>
-                    <button onClick={e => { e.stopPropagation(); setDeleteTarget(s); }}
-                      className="w-7 h-7 rounded-[var(--radius-md)] flex items-center justify-center transition-colors"
-                      style={{ color: T.subtle }} aria-label="Delete section">
-                      <Trash2 size={13} />
-                    </button>
-                  </div>
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <IconActionButton label="Move up" color={T.subtle}
+                    disabled={idx === 0 || reordering}
+                    onClick={e => { e.stopPropagation(); handleMove(idx, -1); }}>
+                    <ChevronUp size={13} />
+                  </IconActionButton>
+                  <IconActionButton label="Move down" color={T.subtle}
+                    disabled={idx === detail!.sections.length - 1 || reordering}
+                    onClick={e => { e.stopPropagation(); handleMove(idx, 1); }}>
+                    <ChevronDown size={13} />
+                  </IconActionButton>
+                  <span className="w-px h-5 mx-1" style={{ background: T.border }} />
+                  <IconActionButton label="Rename section" color="#2563EB"
+                    onClick={e => { e.stopPropagation(); setFormSection(s); }}>
+                    <Pencil size={13} />
+                  </IconActionButton>
+                  <IconActionButton label="Delete section" color="var(--color-danger)"
+                    onClick={e => { e.stopPropagation(); setDeleteTarget(s); }}>
+                    <Trash2 size={13} />
+                  </IconActionButton>
                 </div>
               </div>
             ))}

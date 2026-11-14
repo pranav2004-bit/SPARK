@@ -37,9 +37,12 @@ def snapshot_roster_and_allocate(assignment, auth_header: str) -> int:
     Returns the number of NEW allocations created (0 is valid — e.g. a
     0-student batch, or a resync where nobody new was added).
     """
-    set_ids = list(
-        assignment.paper.sets.order_by("order").values_list("id", flat=True)
-    )
+    # (id, label) pairs, not just ids — label is needed to populate each new
+    # allocation's set_label_snapshot (2026-11-13), the frozen display value
+    # that survives the Set row itself later being deleted.
+    sets = list(assignment.paper.sets.order_by("order").values_list("id", "label"))
+    set_ids = [s[0] for s in sets]
+    set_labels = [s[1] for s in sets]
     if not set_ids:
         raise RuntimeError(
             "This paper has no question sets — cannot distribute students to a set."
@@ -95,6 +98,7 @@ def snapshot_roster_and_allocate(assignment, auth_header: str) -> int:
             assignment=assignment,
             student_id=student_uuid,
             set_id=set_ids[set_index],
+            set_label_snapshot=set_labels[set_index],
         ))
 
     if skipped:

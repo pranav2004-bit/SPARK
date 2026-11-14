@@ -66,7 +66,12 @@ export function AssignmentPickerList({ title, subtitle, basePath, icon: Icon, em
     setLoading(true);
     setLoadError(false);
     Promise.all([
-      api.get<PaginatedResponse<BatchAssignment>>("/assessments/admin/assignments/"),
+      // include_archived=true (2026-11-13) — Results/Analytics/Dashboard
+      // must keep showing an assignment an admin deleted from the Assign
+      // page (soft-deleted, CLOSED-only): that delete only hides it from
+      // the Assign page's own list, per the user's explicit requirement
+      // that these three stay zero-impact.
+      api.get<PaginatedResponse<BatchAssignment>>("/assessments/admin/assignments/?include_archived=true"),
       api.get<ApiSuccess<Batch[]>>("/users/batches/"),
     ])
       .then(([assignRes, batchesRes]) => {

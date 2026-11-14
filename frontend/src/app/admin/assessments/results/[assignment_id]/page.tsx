@@ -712,7 +712,11 @@ export default function AdminAssessmentResultsPage() {
       {/* Responses modal */}
       <Modal isOpen={!!responsesModal} onClose={() => setResponsesModal(null)} title="Submitted Responses" maxWidth="lg">
         <div className="space-y-4 max-h-[60vh] overflow-y-auto">
-          {responsesModal?.questions.map(q => (
+          {responsesModal?.paper_deleted ? (
+            <p className="text-sm text-center py-6" style={{ color: "var(--color-text-subtle)" }}>
+              This question paper was deleted by the admin — its question-by-question detail is no longer available.
+            </p>
+          ) : responsesModal?.questions.map(q => (
             <div key={q.question_id} className="rounded-[var(--radius-lg)] p-4" style={{ border: "1px solid var(--color-border)" }}>
               <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--color-text-subtle)" }}>
                 Question {q.question_number} · {q.marks_awarded}/{q.marks} marks

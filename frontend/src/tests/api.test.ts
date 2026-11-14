@@ -490,6 +490,30 @@ describe("Response interceptor — 401 redirect behaviour", () => {
     expect(mockLocationHref).toBe("");
   });
 
+  // ── Rotated refresh token must be persisted (real production bug) ────────
+  //
+  // auth-service's SIMPLE_JWT has ROTATE_REFRESH_TOKENS + BLACKLIST_AFTER_
+  // ROTATION both on: every successful call to /auth/token/refresh/
+  // blacklists the refresh token it was just given and returns a new one.
+  // Before this fix, setAccessToken only ever stored the new access token
+  // — the store kept reusing the now-blacklisted refresh token forever, so
+  // the *next* silent refresh (one access-token lifetime later) always
+  // failed and force-logged the user out, in every role, roughly every
+  // session. This is the single regression test for that bug.
+
+  it("persists the rotated refresh token returned by the refresh endpoint, not just the access token", async () => {
+    mockStore.refreshToken = "old_refresh_token";
+    mockStore.user = { role: "student" };
+    jest.spyOn(freshAxios, "post").mockResolvedValue({
+      data: { access: "new_access_token", refresh: "rotated_refresh_token" },
+    });
+    jest.spyOn(freshApi, "request").mockResolvedValue({ data: { success: true } });
+
+    await getResponseErrorHandler()(make401Error());
+
+    expect(mockStore.setAccessToken).toHaveBeenCalledWith("new_access_token", "rotated_refresh_token");
+  });
+
   // ── 429 on token refresh — rate-limited, NOT proof the token is invalid ────
   //
   // Regression coverage for a real bug: students sharing one exam-hall IP

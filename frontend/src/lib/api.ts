@@ -69,13 +69,23 @@ function processPendingQueue(error: unknown, token: string | null) {
 // gateway/nginx.conf's token_refresh_zone comment for the full story.
 const REFRESH_RETRY_ATTEMPTS = 3;
 
-async function refreshAccessToken(refreshToken: string): Promise<string> {
+interface RefreshResult {
+  access: string;
+  // auth-service's SIMPLE_JWT has ROTATE_REFRESH_TOKENS + BLACKLIST_AFTER_
+  // ROTATION both on (core/settings.py) — every call here invalidates the
+  // refresh token it was just given and returns a brand-new one in the
+  // response body. undefined only if a future backend change ever turns
+  // rotation off.
+  refresh?: string;
+}
+
+async function refreshAccessToken(refreshToken: string): Promise<RefreshResult> {
   for (let attempt = 1; attempt <= REFRESH_RETRY_ATTEMPTS; attempt++) {
     try {
       const { data } = await axios.post(`${BASE_URL}/auth/token/refresh/`, {
         refresh: refreshToken,
       });
-      return data.access;
+      return { access: data.access, refresh: data.refresh };
     } catch (err) {
       const status = axios.isAxiosError(err) ? err.response?.status : undefined;
       if (status !== 429 || attempt === REFRESH_RETRY_ATTEMPTS) {
@@ -148,8 +158,11 @@ api.interceptors.response.use(
       }
 
       let newAccess: string;
+      let newRefresh: string | undefined;
       try {
-        newAccess = await refreshAccessToken(refreshToken);
+        const result = await refreshAccessToken(refreshToken);
+        newAccess = result.access;
+        newRefresh = result.refresh;
       } catch (refreshError) {
         if (axios.isAxiosError(refreshError) && refreshError.response?.status === 429) {
           // Still rate-limited after retrying with backoff — fail this one
@@ -168,7 +181,17 @@ api.interceptors.response.use(
         return forceLogout(refreshError);
       }
 
-      useAuthStore.getState().setAccessToken(newAccess);
+      // Persisting the rotated refresh token here (not just the access
+      // token) is the fix for the real production bug this was written
+      // for: with ROTATE_REFRESH_TOKENS on, the OLD refresh token is
+      // blacklisted server-side the instant this call succeeds. Before
+      // this, the store kept using that now-dead refresh token forever —
+      // the very next silent refresh (another ~15min access-token cycle
+      // later) always failed with a genuinely invalid/blacklisted token,
+      // forcing a hard logout for every single user, in every role, roughly
+      // twice the access-token lifetime into any session — including mid-
+      // exam for a student.
+      useAuthStore.getState().setAccessToken(newAccess, newRefresh);
       processPendingQueue(null, newAccess);
       isRefreshing = false;
 

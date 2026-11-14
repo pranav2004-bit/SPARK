@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  FileText, HelpCircle, AlertTriangle,
-  Pencil, Trash2, ChevronRight, Layers, User, Lock,
+  HelpCircle, AlertTriangle,
+  Pencil, Trash2, ChevronRight, Lock,
 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/AdminLayout";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -20,90 +20,81 @@ import { useAuth } from "@/hooks/useAuth";
 import api, { getErrorMessage } from "@/lib/api";
 import type { QuestionPaper, ApiSuccess, PaginatedResponse } from "@/types";
 
-// ── Card colour palette ───────────────────────────────────────────────────────
-const PALETTE = [
-  { bg: "#EFF6FF", color: "#2563EB" },
-  { bg: "#F0FDF4", color: "#16A34A" },
-  { bg: "#FDF4FF", color: "#9333EA" },
-  { bg: "#FFF4E6", color: "#E8820C" },
-  { bg: "#FFF1F2", color: "#E11D48" },
-  { bg: "#F0FDFA", color: "#0D9488" },
-];
-const palette = (i: number) => PALETTE[i % PALETTE.length];
+// Small icon button with a black/white hover tooltip showing its label —
+// Edit/Delete here are icon-only with no visible text, so on-hover
+// identification matters. Mirrors the same component in the sibling
+// papers/[paper_id] and papers/[paper_id]/sets/[set_id] pages.
+function IconActionButton({ label, onClick, color, children }: {
+  label: string;
+  onClick: (e: React.MouseEvent) => void;
+  color: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="relative group">
+      <button onClick={onClick} aria-label={label}
+        className="w-8 h-8 rounded-[var(--radius-md)] flex items-center justify-center transition-colors cursor-pointer"
+        style={{ color }}>
+        {children}
+      </button>
+      <span
+        className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 whitespace-nowrap rounded px-2 py-1 text-xs font-medium opacity-0 group-hover:opacity-100 transition-opacity z-10"
+        style={{ background: "#111827", color: "#fff" }}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
 
 // ── Paper card ────────────────────────────────────────────────────────────────
 interface PaperCardProps {
   paper: QuestionPaper;
-  index: number;
   isOwner: boolean;
   onNavigate: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }
 
-function PaperCard({ paper, index, isOwner, onNavigate, onEdit, onDelete }: PaperCardProps) {
-  const { bg, color } = palette(index);
+function PaperCard({ paper, isOwner, onNavigate, onEdit, onDelete }: PaperCardProps) {
   const creatorLabel = paper.created_by_name || paper.created_by_email;
 
   return (
     <div
-      className={["rounded-[var(--radius-xl)] overflow-hidden transition-shadow duration-150", isOwner ? "hover:shadow-[var(--shadow-md)]" : ""].join(" ")}
+      className={["flex items-center justify-between gap-3 p-4 rounded-[var(--radius-xl)] transition-shadow duration-150 group/card", isOwner ? "cursor-pointer hover:shadow-[var(--shadow-md)]" : "cursor-not-allowed"].join(" ")}
       style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", boxShadow: "var(--shadow-sm)" }}
+      onClick={isOwner ? onNavigate : undefined}
+      title={isOwner ? undefined : `Created by ${creatorLabel || "another admin"} — you can't open this.`}
     >
-      <button
-        onClick={onNavigate}
-        disabled={!isOwner}
-        title={isOwner ? undefined : `Created by ${creatorLabel || "another admin"} — you can't open this.`}
-        className={["w-full text-left px-5 pt-5 pb-4 group", isOwner ? "cursor-pointer" : "cursor-not-allowed"].join(" ")}
-      >
-        <div className="flex items-start justify-between gap-3">
-          <div className="w-11 h-11 rounded-[var(--radius-lg)] flex items-center justify-center shrink-0" style={{ background: bg }}>
-            <FileText size={20} style={{ color }} />
-          </div>
-          {isOwner ? (
-            <ChevronRight size={16} style={{ color: "var(--color-text-subtle)", marginTop: 2, flexShrink: 0 }}
-              className="transition-transform duration-150 group-hover:translate-x-0.5" />
-          ) : (
-            <Lock size={14} style={{ color: "var(--color-text-subtle)", marginTop: 3, flexShrink: 0 }} />
-          )}
-        </div>
-        <div className="mt-3">
-          <p className="text-[15px] font-semibold leading-snug" style={{ color: "var(--color-text)" }}>{paper.title}</p>
-          <p className="text-xs mt-1 flex items-center gap-1" style={{ color: "var(--color-text-subtle)" }}>
-            <Layers size={11} /> {paper.set_count} set{paper.set_count === 1 ? "" : "s"}
+      <div className="min-w-0 flex-1">
+        <p className="text-base font-semibold leading-snug truncate" style={{ color: "var(--color-text)" }}>{paper.title}</p>
+        <p className="text-sm mt-1" style={{ color: "var(--color-text-subtle)" }}>
+          {paper.set_count} set{paper.set_count === 1 ? "" : "s"}
+        </p>
+        {/* Falls back to email when the creator hasn't set a display
+            name — omitted entirely (not "Created by") if neither
+            resolved, e.g. a transient auth-service lookup failure. */}
+        {creatorLabel && (
+          <p className="text-sm mt-0.5 truncate" style={{ color: "var(--color-text-subtle)" }}>
+            Created by {creatorLabel}
           </p>
-          {/* Falls back to email when the creator hasn't set a display
-              name — omitted entirely (not "Created by") if neither
-              resolved, e.g. a transient auth-service lookup failure. */}
-          {creatorLabel && (
-            <p className="text-xs mt-1 flex items-center gap-1 truncate" style={{ color: "var(--color-text-subtle)" }}>
-              <User size={11} className="shrink-0" />
-              <span className="truncate">Created by {creatorLabel}</span>
-            </p>
-          )}
-        </div>
-      </button>
-
-      <div className="flex items-center justify-end px-4 py-3 gap-2" style={{ borderTop: "1px solid var(--color-border)" }}>
+        )}
+      </div>
+      <div className="flex items-center gap-0.5 shrink-0">
         {isOwner ? (
-          <div className="flex items-center gap-1">
-            <button onClick={onEdit}
-              className="w-8 h-8 rounded-[var(--radius-md)] flex items-center justify-center transition-colors cursor-pointer"
-              style={{ color: "var(--color-text-subtle)" }} aria-label="Edit"
-              onMouseEnter={e => { e.currentTarget.style.background = "var(--color-surface-hover)"; e.currentTarget.style.color = "var(--color-text)"; }}
-              onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--color-text-subtle)"; }}
-            >
+          <>
+            <ChevronRight size={16} style={{ color: "var(--color-text-subtle)" }}
+              className="transition-transform duration-150 group-hover/card:translate-x-0.5" />
+            <span className="w-px h-5 mx-1" style={{ background: "var(--color-border)" }} />
+            <IconActionButton label="Edit" color="#2563EB"
+              onClick={e => { e.stopPropagation(); onEdit(); }}>
               <Pencil size={14} />
-            </button>
-            <button onClick={onDelete}
-              className="w-8 h-8 rounded-[var(--radius-md)] flex items-center justify-center transition-colors cursor-pointer"
-              style={{ color: "var(--color-text-subtle)" }} aria-label="Delete"
-              onMouseEnter={e => { e.currentTarget.style.background = "var(--color-danger-bg)"; e.currentTarget.style.color = "var(--color-danger)"; }}
-              onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--color-text-subtle)"; }}
-            >
+            </IconActionButton>
+            <IconActionButton label="Delete" color="var(--color-danger)"
+              onClick={e => { e.stopPropagation(); onDelete(); }}>
               <Trash2 size={14} />
-            </button>
-          </div>
+            </IconActionButton>
+          </>
         ) : (
           <span className="inline-flex items-center gap-1.5 text-xs font-medium" style={{ color: "var(--color-text-subtle)" }}>
             <Lock size={11} /> View only
@@ -217,7 +208,7 @@ export default function AdminAssessmentPapersPage() {
         />
 
         {loading ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
             {[1, 2, 3].map(i => <ResourceItemCardSkeleton key={i} />)}
           </div>
         ) : loadError ? (
@@ -234,12 +225,11 @@ export default function AdminAssessmentPapersPage() {
             subtitle="Create a paper to start authoring sets and questions."
           />
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {papers.map((p, i) => (
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
+            {papers.map((p) => (
               <PaperCard
                 key={p.id}
                 paper={p}
-                index={i}
                 isOwner={isSuperAdmin || p.created_by === currentUserId}
                 onNavigate={() => router.push(`/admin/assessments/papers/${p.id}`)}
                 onEdit={() => openModal({ mode: "edit", item: p })}

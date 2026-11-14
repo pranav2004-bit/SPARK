@@ -539,10 +539,14 @@ export default function AdminAssessmentAnalyticsPage() {
       <Modal
         isOpen={!!questionModal}
         onClose={() => setQuestionModal(null)}
-        title={questionModal ? `Question ${questionModal.question_number} — ${questionModal.set_label}` : "Question Responses"}
+        title={questionModal && !questionModal.paper_deleted ? `Question ${questionModal.question_number} — ${questionModal.set_label}` : "Question Responses"}
         maxWidth="lg"
       >
-        {questionModal && (
+        {questionModal && questionModal.paper_deleted ? (
+          <p className="text-sm text-center py-6" style={{ color: "var(--color-text-subtle)" }}>
+            This question paper was deleted by the admin — its question-by-question detail is no longer available.
+          </p>
+        ) : questionModal && (
           <div>
             <div className="rounded-[var(--radius-lg)] p-4 mb-4" style={{ border: "1px solid var(--color-border)" }}>
               <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--color-text-subtle)" }}>

@@ -16,7 +16,10 @@ interface AuthState {
   // usePortalGuard.ts, the consumer this exists for.
   hasHydrated: boolean;
   setTokens: (access: string, refresh: string, user: AuthUser) => void;
-  setAccessToken: (token: string) => void;
+  // `refresh` is optional so a plain access-only update is still possible
+  // in principle, but every real caller (api.ts's 401 interceptor) must
+  // always pass it — see that call site's own comment for why.
+  setAccessToken: (token: string, refresh?: string) => void;
   setUser: (user: AuthUser) => void;
   clearAuth: () => void;
   setHasHydrated: (v: boolean) => void;
@@ -33,7 +36,8 @@ export const useAuthStore = create<AuthState>()(
       setTokens: (access, refresh, user) =>
         set({ accessToken: access, refreshToken: refresh, user }),
 
-      setAccessToken: (token) => set({ accessToken: token }),
+      setAccessToken: (token, refresh) =>
+        set((state) => ({ accessToken: token, refreshToken: refresh ?? state.refreshToken })),
 
       setUser: (user) => set({ user }),
 
