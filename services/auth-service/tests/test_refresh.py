@@ -91,10 +91,14 @@ def test_token_refresh_view_uses_dedicated_throttle_not_global_anon_default():
     assert TokenRefreshView.throttle_classes == [TokenRefreshThrottle]
 
 
-def test_token_refresh_throttle_rate_is_120_per_min_not_the_60_per_min_anon_default():
+def test_token_refresh_throttle_rate_is_3000_per_min_not_the_60_per_min_anon_default():
+    # 120/min -> 3000/min, 2026-11-15 capacity audit (kept at parity with
+    # gateway/nginx.conf's token_refresh_zone — see that zone's own comment
+    # for the full reasoning: a synchronized exam start produces a
+    # synchronized refresh burst at 2000-student, single-shared-IP scale).
     rate = TokenRefreshThrottle().get_rate()
-    assert rate == "120/min", (
-        f"Expected the dedicated token_refresh scope (120/min, parity with "
+    assert rate == "3000/min", (
+        f"Expected the dedicated token_refresh scope (3000/min, parity with "
         f"gateway/nginx.conf's token_refresh_zone) — got {rate!r}. If this "
         f"reads '60/min' the DEFAULT_THROTTLE_RATES['token_refresh'] entry "
         f"is missing and the view has silently fallen back to the global "

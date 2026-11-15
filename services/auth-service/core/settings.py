@@ -115,13 +115,21 @@ REST_FRAMEWORK = {
         "anon": "60/min",
         "user": "300/min",
         # Per-account login throttle (authentication/throttling.py) — keyed
-        # on the submitted student_id/email, not IP.
+        # on the submitted student_id/email, not IP. Deliberately NOT
+        # touched by the 2026-11-15 capacity audit below — this is the
+        # actual credential-brute-force defense (independent of IP/shared-
+        # campus-network concerns), not a capacity limit.
         "login": "5/min",
         # Token refresh (authentication/throttling.py, TokenRefreshThrottle)
         # — its own bucket, kept at parity with gateway/nginx.conf's
-        # token_refresh_zone. See that throttle class's docstring for why
-        # the global "anon" 60/min default isn't safe to leave this on.
-        "token_refresh": "120/min",
+        # token_refresh_zone (raised 120/min -> 3000/min together in the
+        # 2026-11-15 capacity audit — see that zone's own comment in
+        # nginx.conf for the full reasoning: a synchronized exam start
+        # produces a synchronized refresh burst at the same 2000-student,
+        # single-shared-IP scale as the original login burst). See
+        # TokenRefreshThrottle's docstring for why the global "anon"
+        # 60/min default isn't safe to leave this on.
+        "token_refresh": "3000/min",
     },
 }
 
