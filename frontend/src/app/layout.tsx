@@ -4,7 +4,13 @@ import { ToastProvider } from "@/components/ui/Toast";
 import { DepartmentsProvider } from "@/lib/departmentsContext";
 import { GlobalFooter } from "@/components/layout/GlobalFooter";
 import { ServiceWorkerRegistrar } from "@/components/ServiceWorkerRegistrar";
-import { InstallPrompt } from "@/components/ui/InstallPrompt";
+import { StaleAssetReloader } from "@/components/StaleAssetReloader";
+// InstallPrompt temporarily disabled (2026-11-16, explicit user request —
+// "not come again at all until I said to active it again explicitly").
+// Re-enable by restoring the import above and the <InstallPrompt /> line
+// below — the component itself is untouched, this is deliberately just an
+// unmount, not a deletion.
+// import { InstallPrompt } from "@/components/ui/InstallPrompt";
 import { SplashScreen } from "@/components/ui/SplashScreen";
 
 export const viewport: Viewport = {
@@ -57,7 +63,8 @@ export default function RootLayout({
             {children}
             <GlobalFooter />
             <ServiceWorkerRegistrar />
-            <InstallPrompt />
+            <StaleAssetReloader />
+            {/* <InstallPrompt /> — see the disabled import above */}
           </DepartmentsProvider>
         </ToastProvider>
       </body>

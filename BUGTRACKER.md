@@ -199,3 +199,35 @@ container-level connectivity check above first — it takes 15 seconds and
 tells you which of the two problems (or both) you actually have.
 
 ---
+
+## BUG-007 — Students on `www.spark.sanjivo.com` Got "No Internet Connection" at Login
+
+**Problem:** `gateway/nginx.conf`'s `$cors_origin` map only matched
+`~^https://spark\.sanjivo\.com$`. `https://www.spark.sanjivo.com` is a real,
+live production URL (same Vercel deployment, DNS confirmed) that students
+were actually using, but it never matched that regex.
+
+**Symptom:** Any student on the `www.` URL saw "No internet connection" on
+the login screen. Server logs showed the `OPTIONS` preflight always
+returning 204, but the real `POST /api/auth/login/` never arrived — because
+nginx sent back `Access-Control-Allow-Origin: ""` for the unmatched origin,
+so the browser blocked the request itself and never sent it. Looked
+network/institution-WiFi related (it correlated with whichever URL form a
+given institution was given), but reproduced from any network once the
+`www.` URL was used.
+
+**Fix:** Broadened the regex to `~^https://(www\.)?spark\.sanjivo\.com$`
+(`gateway/nginx.conf`'s `map $http_origin $cors_origin` block). `nginx.dev.conf`
+needs no change — local dev only ever deals with `localhost:3000`. No
+Vercel-side change needed — confirmed both domains already serve identical
+content there. Verified live: a preflight with `Origin: https://www.spark.sanjivo.com`
+against `api.spark.sanjivo.com` now returns that same origin in
+`Access-Control-Allow-Origin` instead of an empty value.
+
+**Rule:** Any time a new production domain/alias is added (www, a redirect
+domain, a new Vercel custom domain), it must be added to this same
+`$cors_origin` map explicitly — nothing here falls back to a wildcard, by
+design, so a missed alias fails silently as a client-side "network error"
+with no server-side error to grep for.
+
+---

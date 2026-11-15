@@ -34,5 +34,26 @@ export function usePortalGuard(requiredRole: PortalRole, options?: { skip?: bool
     }
   }, [skip, hasHydrated, isAuthenticated, user, requiredRole, router]);
 
+  // bfcache restore (browser back/forward) — logout (api.ts's forceLogout)
+  // does a hard `window.location.href` redirect, a real page unload, which
+  // is exactly what makes the page the student was just logged out of
+  // eligible for the browser's back-forward cache. A later back navigation
+  // can hand back that frozen pre-logout snapshot — still showing
+  // isAuthenticated: true in its own frozen state, since that was captured
+  // before logout ran in the *new* document — instantly, before this
+  // effect's dependencies have any reason to re-fire. No API call can
+  // actually succeed without a token, so this was never a real
+  // re-authentication bypass, only a stale-visual-flash risk — but a full
+  // reload re-reads this tab's actual, already-cleared sessionStorage from
+  // scratch and re-runs the check above for real.
+  useEffect(() => {
+    if (skip) return;
+    function handlePageShow(e: PageTransitionEvent) {
+      if (e.persisted) window.location.reload();
+    }
+    window.addEventListener("pageshow", handlePageShow);
+    return () => window.removeEventListener("pageshow", handlePageShow);
+  }, [skip]);
+
   return { ready: hasHydrated && isAuthenticated && user?.role === requiredRole };
 }
