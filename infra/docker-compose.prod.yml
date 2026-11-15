@@ -302,7 +302,19 @@ services:
       AWS_DEFAULT_REGION: ap-south-2
       AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
       AWS_S3_CDN_DOMAIN: spark-app-media-2026.s3.ap-south-2.amazonaws.com
-    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=4", "-Q", "resource-service"]
+    # Concurrency doubled 4 -> 8 (2026-11-16, EC2 resize 4 -> 8 vCPUs,
+    # 2000-concurrent-student capacity audit) — matches the doubled cores.
+    # --max-memory-per-child (2026-11-16, same audit as the vCPU resize
+    # above): Celery workers had no equivalent of gunicorn's own
+    # --max-requests worker recycling — they ran indefinitely, with no
+    # protection against a slow per-task memory leak accumulating over an
+    # hours-long exam day (or compounding further across 3 consecutive
+    # days, if containers aren't restarted between them). 512000 KiB
+    # (500MB) is generous headroom above this worker's observed baseline
+    # (~40-200MB per child, confirmed via `docker stats` on the live
+    # instance) — high enough not to recycle a normal process, low enough
+    # to catch a genuine runaway leak well before it threatens the host.
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=8", "--max-memory-per-child=512000", "-Q", "resource-service"]
     depends_on:
       pgbouncer:
         condition: service_healthy
@@ -373,7 +385,11 @@ services:
     image: ${REGISTRY:-spark}/notification-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/notification-service/.env
-    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=4", "-Q", "notification-service"]
+    # Concurrency doubled 4 -> 8 (2026-11-16, EC2 resize 4 -> 8 vCPUs,
+    # 2000-concurrent-student capacity audit) — matches the doubled cores.
+    # --max-memory-per-child — see resource-worker's own comment above for
+    # the full reasoning (same fix, same audit).
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=8", "--max-memory-per-child=512000", "-Q", "notification-service"]
     depends_on:
       pgbouncer:
         condition: service_healthy
@@ -428,7 +444,11 @@ services:
     image: ${REGISTRY:-spark}/analytics-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/analytics-service/.env
-    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=4", "-Q", "analytics-service"]
+    # Concurrency doubled 4 -> 8 (2026-11-16, EC2 resize 4 -> 8 vCPUs,
+    # 2000-concurrent-student capacity audit) — matches the doubled cores.
+    # --max-memory-per-child — see resource-worker's own comment above for
+    # the full reasoning (same fix, same audit).
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=8", "--max-memory-per-child=512000", "-Q", "analytics-service"]
     depends_on:
       pgbouncer:
         condition: service_healthy
@@ -503,7 +523,11 @@ services:
     image: ${REGISTRY:-spark}/assessment-service:${GIT_SHA:-latest}
     restart: always
     env_file: ../services/assessment-service/.env
-    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=4", "-Q", "assessment-service"]
+    # Concurrency doubled 4 -> 8 (2026-11-16, EC2 resize 4 -> 8 vCPUs,
+    # 2000-concurrent-student capacity audit) — matches the doubled cores.
+    # --max-memory-per-child — see resource-worker's own comment above for
+    # the full reasoning (same fix, same audit).
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=8", "--max-memory-per-child=512000", "-Q", "assessment-service"]
     depends_on:
       pgbouncer:
         condition: service_healthy
@@ -571,7 +595,13 @@ services:
     # service-capacity-plan.md Section 2's explicit sizing decision,
     # derived from the LLM quota-tracker's own throughput ceiling, not
     # copied from a sibling service's unrelated worker-sizing math.
-    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=20", "-Q", "essay-service"]
+    # Concurrency doubled 20 -> 40 (2026-11-16, EC2 resize 4 -> 8 vCPUs,
+    # 2000-concurrent-student capacity audit) — matches the doubled cores.
+    # Already deliberately higher than the others (I/O-bound LLM calls, not
+    # CPU-bound) — doubling preserves that same relative sizing.
+    # --max-memory-per-child — see resource-worker's own comment above for
+    # the full reasoning (same fix, same audit).
+    entrypoint: ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=40", "--max-memory-per-child=512000", "-Q", "essay-service"]
     depends_on:
       pgbouncer:
         condition: service_healthy

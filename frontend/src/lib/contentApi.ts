@@ -1,4 +1,4 @@
-import api from "@/lib/api";
+import api, { getErrorMessage } from "@/lib/api";
 
 // Typed client for the content bank (services/practice-service, /api/practice/content/).
 // Mirrors LIVETRACKER4.md section 2.6. Draft writes carry If-Match (the ETag from the last read).
@@ -98,7 +98,15 @@ function toApiError(err: unknown): ContentApiError {
         )
       : {};
   return new ContentApiError(
-    body?.message ?? e.message ?? "Request failed.",
+    // Falling back to the raw axios error (`e.message`, e.g. "Network
+    // Error" / "Request failed with status code 500") used to leak
+    // straight through to messageFor() below whenever the server sent no
+    // JSON `message` body — a genuine outage or network drop showed the
+    // admin that raw HTTP-client string instead of a clean one.
+    // getErrorMessage() is this app's one shared source of clean fallback
+    // text for exactly these cases (network/429/5xx/unrecognized shape) —
+    // reusing it here instead of duplicating that logic.
+    body?.message ?? getErrorMessage(err),
     body?.code ?? (status === 0 ? "network_error" : "unknown_error"),
     status,
     errors,

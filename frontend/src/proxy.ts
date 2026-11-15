@@ -73,7 +73,15 @@ export function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL(PORTAL_LOGIN_BY_PREFIX[portalPrefix], request.url));
   }
 
-  return NextResponse.next();
+  // Defense-in-depth against the browser's back-forward cache (bfcache)
+  // showing a frozen, previously-rendered protected page after logout —
+  // usePortalGuard.ts's own pageshow listener is the real fix (it forces a
+  // reload that re-reads this tab's actual, already-cleared session), this
+  // just tells the browser not to keep this response around for bfcache to
+  // serve in the first place.
+  const response = NextResponse.next();
+  response.headers.set("Cache-Control", "no-store, must-revalidate");
+  return response;
 }
 
 export const config = {

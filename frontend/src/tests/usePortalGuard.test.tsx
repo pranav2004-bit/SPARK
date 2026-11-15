@@ -86,4 +86,58 @@ describe("usePortalGuard", () => {
     render(<Harness role="admin" />);
     expect(screen.getByTestId("ready").textContent).toBe("false");
   });
+
+  // bfcache restore coverage (2026-11-16 production-readiness audit): after
+  // logout (api.ts's forceLogout does a hard window.location.href redirect,
+  // a real page unload), the pre-logout protected page becomes eligible for
+  // the browser's back-forward cache. A later back navigation can hand back
+  // that frozen snapshot — still showing isAuthenticated: true in its own
+  // frozen state — instantly, with no reason for this hook's own effect to
+  // re-fire. The fix is a pageshow listener that forces a reload on a
+  // persisted restore, re-reading this tab's actual (already-cleared)
+  // sessionStorage from scratch.
+  describe("bfcache restore (pageshow)", () => {
+    // jsdom's window.location.reload is read-only and non-configurable —
+    // neither reassignment, Object.defineProperty, nor jest.spyOn can
+    // intercept it directly (same constraint the codebase already
+    // documents for window.location.href in studentMyProfilePage.test.tsx).
+    // Calling the real thing instead surfaces as a `console.error` ("Not
+    // implemented: navigation") — harmless jsdom noise, but it reliably
+    // proves reload() was actually invoked, which is what these tests
+    // assert on instead of a call count on a mock.
+    let errorSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      errorSpy.mockRestore();
+    });
+
+    function firePageShow(persisted: boolean) {
+      window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted }));
+    }
+
+    it("reloads the page on a persisted (bfcache) pageshow restore", () => {
+      mockAuthState = { user: { role: "admin" }, isAuthenticated: true, hasHydrated: true };
+      render(<Harness role="admin" />);
+      firePageShow(true);
+      expect(errorSpy.mock.calls.some(args => String(args[0]).includes("Not implemented: navigation"))).toBe(true);
+    });
+
+    it("does not reload on an ordinary (non-bfcache) pageshow", () => {
+      mockAuthState = { user: { role: "admin" }, isAuthenticated: true, hasHydrated: true };
+      render(<Harness role="admin" />);
+      firePageShow(false);
+      expect(errorSpy.mock.calls.some(args => String(args[0]).includes("Not implemented: navigation"))).toBe(false);
+    });
+
+    it("does not reload when skip:true — matches super-admin's own login page, which has nothing sensitive to protect against a stale restore", () => {
+      mockAuthState = { user: null, isAuthenticated: false, hasHydrated: true };
+      render(<Harness role="super_admin" skip />);
+      firePageShow(true);
+      expect(errorSpy.mock.calls.some(args => String(args[0]).includes("Not implemented: navigation"))).toBe(false);
+    });
+  });
 });

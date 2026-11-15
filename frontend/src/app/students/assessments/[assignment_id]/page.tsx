@@ -57,7 +57,11 @@ const LOCKOUT_COUNTDOWN_SECONDS = 5;
 // fires normally when time runs out. This must not ship live: it silently
 // disables a real anti-cheat mechanism for every student, not just this
 // dev session.
-const DEV_DISABLE_ANTI_CHEAT_LOCKOUT = true;
+//
+// Found still set to `true` in the 2026-11-15 production-readiness audit —
+// the real anti-cheat lockout had been silently disabled for every student
+// in production. Set back to false here.
+const DEV_DISABLE_ANTI_CHEAT_LOCKOUT = false;
 
 // Mobile hamburger dropdown content (added 2026-08-31, explicit request) —
 // a real component, not just inline JSX in StudentExamPage, because it
@@ -265,6 +269,45 @@ export default function StudentExamPage() {
     }
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [sessionStatus]);
+
+  // bfcache restore (browser back/forward) — the browser can freeze this
+  // whole page, including every piece of in-memory state above (fullscreen
+  // gate, timer sync, question/answer state, submitted/result screen), and
+  // hand back that exact frozen snapshot instantly on a later back/forward
+  // navigation, without re-running any of this component's effects. A
+  // student who submitted, left, and then pressed back could otherwise
+  // briefly see the stale pre-submit exam UI instead of the real
+  // "Submitted" screen. A full reload is deliberate, not a half-measure —
+  // this page's state (fullscreen entry, server-synced timer, activity
+  // tracking) is too interdependent to selectively re-sync piece by piece;
+  // reloading re-runs every effect from a genuine fresh mount, the same way
+  // a direct/bookmarked visit already does safely.
+  useEffect(() => {
+    function handlePageShow(e: PageTransitionEvent) {
+      if (e.persisted) window.location.reload();
+    }
+    window.addEventListener("pageshow", handlePageShow);
+    return () => window.removeEventListener("pageshow", handlePageShow);
+  }, []);
+
+  // Trap the browser back button while an exam is actually in progress —
+  // without this, back navigation silently leaves the exam page with no
+  // warning at all (unlike a tab close/reload, which handleBeforeUnload
+  // above already warns on) and isn't tracked as suspicious activity the
+  // way a tab-switch is. Keeps re-pushing a dummy history entry so back
+  // never actually navigates away on its own; the same confirm-exit dialog
+  // the header's "Exit Test" button already uses is shown instead, so
+  // leaving this way goes through the same explicit, informed confirmation.
+  useEffect(() => {
+    if (sessionStatus !== "IN_PROGRESS") return;
+    window.history.pushState(null, "", window.location.href);
+    function handlePopState() {
+      window.history.pushState(null, "", window.location.href);
+      setConfirmExit(true);
+    }
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
   }, [sessionStatus]);
 
   // Clicking "Enter Fullscreen & Start Exam" on the gate screen below.

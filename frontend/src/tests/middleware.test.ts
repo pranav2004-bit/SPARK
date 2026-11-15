@@ -29,7 +29,11 @@ jest.mock("next/server", () => ({
     },
     next: () => {
       nextCalls.push(1);
-      return { type: "next" };
+      // Real NextResponse exposes a mutable `.headers` (a Headers-like
+      // object) — proxy.ts's bfcache Cache-Control fix calls
+      // `.headers.set(...)` on what next() returns, so the mock needs the
+      // same shape or that call throws under test.
+      return { type: "next", headers: new Map<string, string>() as unknown as Headers };
     },
   },
 }));
