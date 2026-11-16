@@ -36,6 +36,7 @@ from .models import (
     ACTIVITY_EVENT_SCREENSHOT_ATTEMPT, ACTIVITY_EVENT_CONNECTION_LOST, ACTIVITY_EVENT_ADMIN_EXTENDED_TIME,
     ACTIVITY_EVENT_QUESTION_TIME_SPENT,
     SESSION_STATUS_IN_PROGRESS, SESSION_STATUS_SUBMITTED, SESSION_STATUS_AUTO_SUBMITTED,
+    RetestReset,
 )
 from .serializers import (
     QuestionPaperSerializer, QuestionSetSerializer, QuestionSectionSerializer,
@@ -1596,6 +1597,78 @@ class AdminAssignmentExtendSessionView(APIView):
             data={"session_id": str(session.id), "ends_at": session.ends_at},
             message=f"Session extended by {extend_minutes} minute(s).",
         )
+
+
+class AdminAssignmentResetSessionView(APIView):
+    """POST /api/assessments/admin/assignments/<pk>/sessions/<session_id>/reset/
+    — admin "retest" action (2026-11-16, user decision): completely erases a
+    student's prior attempt on this assignment (session, every saved
+    answer, the finalized result) so their next Start-session call creates
+    a genuinely fresh session, never a resume.
+
+    Requires the assignment to be LIVE, not merely "not closed" — matches
+    StudentAssignmentStartSessionView's own gate on creating a brand new
+    session (see that view), so the single state this leaves behind — no
+    session row for this student — is always immediately actionable, never
+    a dead end where the student has nothing to resume and the assignment
+    can't create a new session either. A CLOSED assignment must go through
+    the existing reopen/ endpoint first.
+
+    A mandatory reason is required and permanently written (RetestReset)
+    before anything is deleted — the sole surviving record this reset ever
+    happened, since every row it erases is gone right after.
+    """
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, pk, session_id):
+        institution_id = _get_institution_id(request)
+        assignment = get_object_or_404(BatchAssignment, pk=pk, institution_id=institution_id)
+
+        if assignment.status != ASSIGNMENT_STATUS_LIVE:
+            return error_response(
+                f"Cannot reset — this assessment is {assignment.status.lower()}, not live. "
+                "Reopen it first, then try the reset again.",
+                status_code=409,
+            )
+
+        reason = (request.data.get("reason") or "").strip()
+        if not reason:
+            return error_response("A reason is required to reset a student's attempt.", status_code=400)
+
+        session = get_object_or_404(AssessmentSession, pk=session_id, assignment_id=pk)
+
+        # Terminal-only guard — a student actively mid-exam has no result
+        # to "retest" yet, and erasing their in-flight session out from
+        # under them would be a genuine data-loss bug, not a feature. The
+        # Results table only ever surfaces this action for a submitted row
+        # in the first place; this is the server-side backstop against a
+        # stale page / direct API call racing a session that just started.
+        if session.status == SESSION_STATUS_IN_PROGRESS:
+            return error_response(
+                "This student is currently mid-exam — cannot reset an attempt that's still in progress.",
+                status_code=409,
+            )
+
+        result = ResultSummary.objects.filter(session=session).first()
+
+        with transaction.atomic():
+            RetestReset.objects.create(
+                assignment=assignment, student_id=session.student_id, reset_by=request.user.id,
+                reason=reason,
+                previous_score=result.score if result else None,
+                previous_total_marks=result.total_marks if result else None,
+                previous_status=session.status,
+            )
+            # Children first — ActivityLog/ResultSummary/AssessmentResponse
+            # all PROTECT their session FK, so deleting the session itself
+            # would otherwise raise ProtectedError.
+            ActivityLog.objects.filter(session=session).delete()
+            AssessmentResponse.objects.filter(session=session).delete()
+            if result:
+                result.delete()
+            session.delete()
+
+        return success_response(message="Reset — this student can start a fresh attempt now.")
 
 
 class AdminAssignmentStatusView(APIView):

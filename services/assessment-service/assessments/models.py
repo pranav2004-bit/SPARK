@@ -829,6 +829,56 @@ class ActivityLog(models.Model):
         return f"{self.event_type} @ {self.occurred_at} (session {self.session_id})"
 
 
+class RetestReset(models.Model):
+    """Audit trail for AdminAssignmentResetSessionView's "retest" action
+    (2026-11-16, user decision): an admin can completely erase a student's
+    prior attempt on a LIVE assignment (session, every answer, the
+    finalized result) so their next Start creates a genuinely fresh
+    session, not a resume.
+
+    Deliberately NOT a FK to AssessmentSession/ResultSummary — those rows
+    are gone (deleted, not just flagged) by the time this row is read, so
+    there's nothing left to join against. Every field below is a frozen
+    snapshot taken immediately before the delete — this row is the sole
+    surviving record that the reset ever happened, which is also why
+    `reason` is mandatory at the view layer rather than just a nice-to-have:
+    an undo-proof action against a real exam attempt needs a real
+    explanation on file, not just a timestamp."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    assignment = models.ForeignKey(
+        BatchAssignment, on_delete=models.PROTECT, related_name="retest_resets", db_index=True,
+    )
+    # The student whose attempt was erased — same JWT user_id convention as
+    # every other student_id column in this file.
+    student_id = models.UUIDField(db_index=True)
+    # The admin who performed the reset — JWT user_id, no FK (matches
+    # BatchAssignment.created_by's existing convention for an admin
+    # identity with no local User row to reference).
+    reset_by = models.UUIDField()
+    reason = models.TextField()
+    # Snapshot of the attempt being erased, for the admin's own later
+    # reference (e.g. "what score did they have before I reset this?") —
+    # null when the erased session was AUTO_SUBMITTED with no result yet
+    # scored is impossible in practice (finalize always writes both
+    # together), but kept nullable since previous_status alone can still be
+    # SUBMITTED/AUTO_SUBMITTED without a score in a genuinely corrupt edge
+    # case, and this audit write must never itself fail.
+    previous_score = models.PositiveIntegerField(null=True, blank=True)
+    previous_total_marks = models.PositiveIntegerField(null=True, blank=True)
+    previous_status = models.CharField(max_length=20, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "assessment_retest_resets"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["assignment", "student_id"], name="idx_rr_assignment_student"),
+        ]
+
+    def __str__(self):
+        return f"reset for {self.student_id} on assignment {self.assignment_id} @ {self.created_at}"
+
+
 class FailedJob(models.Model):
     """Task 13.1's dead-letter mechanism for Celery task failures (AT12).
 
