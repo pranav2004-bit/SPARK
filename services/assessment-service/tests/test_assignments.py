@@ -7,7 +7,8 @@ from django.utils import timezone
 
 from assessments.models import (
     QuestionPaper, QuestionSet, Question, QuestionOption, BatchAssignment, AssessmentSession,
-    StudentSetAllocation,
+    StudentSetAllocation, AssessmentResponse, ActivityLog, ResultSummary, RetestReset,
+    ACTIVITY_EVENT_TAB_SWITCH,
     ASSIGNMENT_STATUS_SCHEDULED, ASSIGNMENT_STATUS_LIVE, ASSIGNMENT_STATUS_CLOSED,
     SESSION_STATUS_AUTO_SUBMITTED,
 )
@@ -904,6 +905,130 @@ class TestExtendSessionStub:
         )
         assert resp.status_code == 400
         assert not ActivityLog.objects.filter(session=session).exists()
+
+
+# ── Reset (retest) ───────────────────────────────────────────────────────────
+
+class TestResetSessionStub:
+    def _create_direct(self, paper, status=ASSIGNMENT_STATUS_LIVE):
+        return BatchAssignment.objects.create(
+            paper=paper, batch_id=uuid.uuid4(), institution_id=INSTITUTION_A,
+            global_start_time=timezone.now() - timedelta(minutes=1),
+            global_expire_time=timezone.now() + timedelta(hours=3),
+            exam_duration_minutes=60, created_by=ADMIN_USER_ID, status=status,
+        )
+
+    def _submitted_session(self, assignment, paper):
+        session = AssessmentSession.objects.create(
+            assignment=assignment, student_id=STUDENT_USER_ID, set=paper.sets.first(),
+            ends_at=timezone.now() + timedelta(hours=1), status=SESSION_STATUS_AUTO_SUBMITTED,
+        )
+        question = paper.sets.first().questions.first()
+        AssessmentResponse.objects.create(session=session, question=question, selected_option_ids=["x"])
+        ActivityLog.objects.create(session=session, event_type=ACTIVITY_EVENT_TAB_SWITCH, occurred_at=timezone.now())
+        result = ResultSummary.objects.create(
+            session=session, assignment=assignment, student_id=STUDENT_USER_ID, institution_id=INSTITUTION_A,
+            started_at=timezone.now() - timedelta(minutes=30), ended_at=timezone.now(),
+            duration_seconds=1800, score=1, total_marks=1, status=SESSION_STATUS_AUTO_SUBMITTED,
+        )
+        return session, result
+
+    def test_rejected_when_assignment_not_live(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper, status=ASSIGNMENT_STATUS_CLOSED)
+        session, result = self._submitted_session(assignment, published_paper)
+        resp = admin_client.post(
+            f"/api/assessments/admin/assignments/{assignment.id}/sessions/{session.id}/reset/",
+            {"reason": "retest requested"}, format="json",
+        )
+        assert resp.status_code == 409
+        assert "live" in resp.json()["message"].lower()
+        assert AssessmentSession.objects.filter(pk=session.pk).exists()
+
+    def test_missing_reason_rejected(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        session, result = self._submitted_session(assignment, published_paper)
+        resp = admin_client.post(
+            f"/api/assessments/admin/assignments/{assignment.id}/sessions/{session.id}/reset/",
+            {"reason": "   "}, format="json",
+        )
+        assert resp.status_code == 400
+        assert AssessmentSession.objects.filter(pk=session.pk).exists()
+
+    def test_in_progress_session_rejected(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        session = AssessmentSession.objects.create(
+            assignment=assignment, student_id=STUDENT_USER_ID, set=published_paper.sets.first(),
+            ends_at=timezone.now() + timedelta(hours=1),
+        )
+        resp = admin_client.post(
+            f"/api/assessments/admin/assignments/{assignment.id}/sessions/{session.id}/reset/",
+            {"reason": "retest requested"}, format="json",
+        )
+        assert resp.status_code == 409
+        assert AssessmentSession.objects.filter(pk=session.pk).exists()
+
+    def test_no_session_404(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        resp = admin_client.post(
+            f"/api/assessments/admin/assignments/{assignment.id}/sessions/{uuid.uuid4()}/reset/",
+            {"reason": "retest requested"}, format="json",
+        )
+        assert resp.status_code == 404
+
+    def test_successful_reset_erases_everything_and_logs_audit_row(self, admin_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        session, result = self._submitted_session(assignment, published_paper)
+        resp = admin_client.post(
+            f"/api/assessments/admin/assignments/{assignment.id}/sessions/{session.id}/reset/",
+            {"reason": "malpractice dispute resolved, retest approved"}, format="json",
+        )
+        assert resp.status_code == 200
+        assert not AssessmentSession.objects.filter(pk=session.pk).exists()
+        assert not ResultSummary.objects.filter(pk=result.pk).exists()
+        assert not AssessmentResponse.objects.filter(session_id=session.pk).exists()
+        assert not ActivityLog.objects.filter(session_id=session.pk).exists()
+
+        audit = RetestReset.objects.get(assignment=assignment, student_id=STUDENT_USER_ID)
+        assert audit.reason == "malpractice dispute resolved, retest approved"
+        assert audit.reset_by == ADMIN_USER_ID
+        assert audit.previous_score == 1
+        assert audit.previous_total_marks == 1
+        assert audit.previous_status == SESSION_STATUS_AUTO_SUBMITTED
+
+    def test_after_reset_student_can_start_a_fresh_session(self, admin_client, student_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        session, result = self._submitted_session(assignment, published_paper)
+        StudentSetAllocation.objects.create(
+            assignment=assignment, student_id=STUDENT_USER_ID, set=published_paper.sets.first(),
+        )
+        admin_client.post(
+            f"/api/assessments/admin/assignments/{assignment.id}/sessions/{session.id}/reset/",
+            {"reason": "retest requested"}, format="json",
+        )
+        resp = student_client.post(f"/api/assessments/student/assignments/{assignment.id}/start-session/")
+        assert resp.status_code == 201
+        new_session = AssessmentSession.objects.get(assignment=assignment, student_id=STUDENT_USER_ID)
+        assert new_session.pk != session.pk
+        assert new_session.status == "IN_PROGRESS"
+
+    def test_cross_institution_404(self, admin_b_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        session, result = self._submitted_session(assignment, published_paper)
+        resp = admin_b_client.post(
+            f"/api/assessments/admin/assignments/{assignment.id}/sessions/{session.id}/reset/",
+            {"reason": "retest requested"}, format="json",
+        )
+        assert resp.status_code == 404
+        assert AssessmentSession.objects.filter(pk=session.pk).exists()
+
+    def test_non_admin_forbidden(self, student_client, published_paper):
+        assignment = self._create_direct(published_paper)
+        session, result = self._submitted_session(assignment, published_paper)
+        resp = student_client.post(
+            f"/api/assessments/admin/assignments/{assignment.id}/sessions/{session.id}/reset/",
+            {"reason": "retest requested"}, format="json",
+        )
+        assert resp.status_code == 403
 
 
 # ── Status ───────────────────────────────────────────────────────────────────

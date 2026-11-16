@@ -117,6 +117,9 @@ export default function AdminAssessmentResultsPage() {
   const [extendTarget, setExtendTarget] = useState<{ sessionId: string; studentName: string } | null>(null);
   const [extendMinutes, setExtendMinutes] = useState("15");
   const [extending, setExtending] = useState(false);
+  const [resetTarget, setResetTarget] = useState<{ sessionId: string; studentName: string } | null>(null);
+  const [resetReason, setResetReason] = useState("");
+  const [resetting, setResetting] = useState(false);
   const [confirmPublish, setConfirmPublish] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -272,6 +275,36 @@ export default function AdminAssessmentResultsPage() {
       toast.error(getErrorMessage(err));
     } finally {
       setExtending(false);
+    }
+  }
+
+  // Erases this student's prior attempt (session, every saved answer, the
+  // finalized result) so their next Start creates a genuinely fresh
+  // session — server-gated on the assignment being LIVE (409 otherwise,
+  // surfaced via toast below exactly as-is, per the explicit requirement
+  // that a not-live reset shows an error rather than silently failing or
+  // being hidden).
+  async function handleReset() {
+    if (!resetTarget) return;
+    const reason = resetReason.trim();
+    if (!reason) {
+      toast.error("Enter a reason for this reset.");
+      return;
+    }
+    setResetting(true);
+    try {
+      await api.post(
+        `/assessments/admin/assignments/${assignment_id}/sessions/${resetTarget.sessionId}/reset/`,
+        { reason },
+      );
+      toast.success(`${resetTarget.studentName}'s attempt was reset — they can retake it now.`);
+      setResetTarget(null);
+      setResetReason("");
+      load(true);
+    } catch (err) {
+      toast.error(getErrorMessage(err));
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -660,10 +693,19 @@ export default function AdminAssessmentResultsPage() {
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       {r.result_id ? (
-                        <Button variant="ghost" size="sm" loading={detailLoading === r.result_id + ":responses"}
-                          onClick={() => openResponses(r.result_id!)}>
-                          Responses
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          <Button variant="ghost" size="sm" loading={detailLoading === r.result_id + ":responses"}
+                            onClick={() => openResponses(r.result_id!)}>
+                            Responses
+                          </Button>
+                          <Button
+                            variant="ghost" size="sm" leftIcon={<RefreshCw size={13} />}
+                            onClick={() => { setResetTarget({ sessionId: r.session_id!, studentName: r.student_name }); setResetReason(""); }}
+                            title="Erase this attempt and let the student retake it"
+                          >
+                            Reset
+                          </Button>
+                        </div>
                       ) : r.exam_status === "writing" && r.session_id ? (
                         <Button
                           variant="ghost" size="sm" leftIcon={<Clock size={13} />}
@@ -807,6 +849,39 @@ export default function AdminAssessmentResultsPage() {
         <div className="flex justify-end gap-3 mt-5">
           <Button variant="secondary" onClick={() => setExtendTarget(null)}>Cancel</Button>
           <Button variant="primary" loading={extending} onClick={handleExtend}>Extend</Button>
+        </div>
+      </Modal>
+
+      {/* Reset (retest) — erases the student's prior attempt entirely
+          (session, answers, result) so they can take it fresh. Only
+          actually succeeds while the assignment is LIVE; a reopen/ call
+          first is required otherwise, and that exact error surfaces via
+          toast rather than being silently blocked here. */}
+      <Modal isOpen={!!resetTarget} onClose={() => setResetTarget(null)} title="Reset this attempt?" maxWidth="sm">
+        <p className="text-sm mb-4 leading-relaxed" style={{ color: "var(--color-text-muted)" }}>
+          This permanently erases <strong>{resetTarget?.studentName}</strong>&apos;s score and every
+          answer from this attempt. They&apos;ll be able to retake the exam from scratch, with no trace
+          of this attempt left. This can&apos;t be undone.
+        </p>
+        <div>
+          <label className="block text-xs font-semibold mb-1.5" style={{ color: "var(--color-text-muted)" }}>
+            Reason (required)
+          </label>
+          <textarea
+            value={resetReason}
+            onChange={e => setResetReason(e.target.value)}
+            rows={3}
+            placeholder="Why is this attempt being reset?"
+            autoFocus
+            className="w-full text-sm rounded-[var(--radius-md)] px-3.5 py-2.5 outline-none leading-relaxed"
+            style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+          />
+        </div>
+        <div className="flex justify-end gap-3 mt-5">
+          <Button variant="secondary" onClick={() => setResetTarget(null)}>Cancel</Button>
+          <Button variant="primary" loading={resetting} disabled={!resetReason.trim()} onClick={handleReset}>
+            Reset
+          </Button>
         </div>
       </Modal>
 

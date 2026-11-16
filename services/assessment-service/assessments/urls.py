@@ -24,6 +24,7 @@ from .views import (
     AdminAssignmentPublishResultsView,
     AdminAssignmentResyncRosterView,
     AdminAssignmentExtendSessionView,
+    AdminAssignmentResetSessionView,
     AdminAssignmentStatusView,
     StudentServerTimeView,
     StudentAssignmentListView,
@@ -86,6 +87,7 @@ urlpatterns = [
     path("admin/assignments/<uuid:pk>/publish-results/",      AdminAssignmentPublishResultsView.as_view(), name="admin_assignment_publish_results"),
     path("admin/assignments/<uuid:pk>/resync-roster/",        AdminAssignmentResyncRosterView.as_view(), name="admin_assignment_resync_roster"),
     path("admin/assignments/<uuid:pk>/sessions/<uuid:session_id>/extend/", AdminAssignmentExtendSessionView.as_view(), name="admin_assignment_extend_session"),
+    path("admin/assignments/<uuid:pk>/sessions/<uuid:session_id>/reset/", AdminAssignmentResetSessionView.as_view(), name="admin_assignment_reset_session"),
     path("admin/assignments/<uuid:pk>/status/",                AdminAssignmentStatusView.as_view(),     name="admin_assignment_status"),
 
     # Student (Task 4.2 / 5.1)
