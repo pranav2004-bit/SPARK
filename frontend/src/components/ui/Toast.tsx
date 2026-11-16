@@ -13,12 +13,17 @@ interface Toast {
 }
 
 interface ToastContextValue {
-  showToast: (type: ToastType, message: string) => void;
-  success: (message: string) => void;
-  error: (message: string) => void;
+  // durationMs (2026-11-16, explicit request) — optional per-call override
+  // of the default 4000ms auto-dismiss, for the one case (the exam page's
+  // fullscreen-exit/tab-switch warning, re-shown the moment its own popup
+  // closes) that needs to stay up longer than the default. Every existing
+  // call site keeps the default by simply not passing it.
+  showToast: (type: ToastType, message: string, durationMs?: number) => void;
+  success: (message: string, durationMs?: number) => void;
+  error: (message: string, durationMs?: number) => void;
   /** Amber, non-fatal — a graduated caution (e.g. "2 of 5 warnings used")
    * that isn't a failure but shouldn't read as a green success either. */
-  warning: (message: string) => void;
+  warning: (message: string, durationMs?: number) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -35,22 +40,22 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  const showToast = useCallback((type: ToastType, message: string) => {
+  const showToast = useCallback((type: ToastType, message: string, durationMs = 4000) => {
     const id = crypto.randomUUID();
     setToasts((prev) => [...prev, { id, type, message }]);
-    setTimeout(() => removeToast(id), 4000);
+    setTimeout(() => removeToast(id), durationMs);
   }, [removeToast]);
 
   const success = useCallback(
-    (message: string) => showToast("success", message),
+    (message: string, durationMs?: number) => showToast("success", message, durationMs),
     [showToast]
   );
   const error = useCallback(
-    (message: string) => showToast("error", message),
+    (message: string, durationMs?: number) => showToast("error", message, durationMs),
     [showToast]
   );
   const warning = useCallback(
-    (message: string) => showToast("warning", message),
+    (message: string, durationMs?: number) => showToast("warning", message, durationMs),
     [showToast]
   );
 

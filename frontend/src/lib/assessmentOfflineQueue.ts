@@ -91,12 +91,24 @@ function isRetryableNetworkError(err: unknown): boolean {
  * "saved locally, reconnecting…" state rather than an error. On any other
  * HTTP rejection (4xx/5xx), throws as usual — that's a genuine failure,
  * not a transient condition the queue can retry past.
+ *
+ * Write-ahead (2026-11-16, production-readiness audit): queued to local
+ * storage BEFORE attempting the network call, not only after it fails.
+ * Closes a real gap the old "try network, queue only on failure" order
+ * left open — a genuine instant power loss (no graceful shutdown, so
+ * nothing else here ever gets a chance to run) mid-request used to lose
+ * whichever single answer was actively in flight at that exact instant,
+ * since it was never durably written anywhere until the failure handler
+ * ran. Writing first means that answer is already safely on disk the
+ * moment the student picks it, regardless of what happens to the request
+ * afterward.
  */
 export async function saveAnswerResilient(
   sessionId: string,
   questionId: string,
   selectedOptionIds: string[]
 ): Promise<"saved" | "queued"> {
+  enqueueAnswer(sessionId, questionId, selectedOptionIds);
   try {
     await api.put(`/assessments/student/sessions/${sessionId}/questions/${questionId}/answer/`, {
       selected_option_ids: selectedOptionIds,
@@ -105,9 +117,17 @@ export async function saveAnswerResilient(
     return "saved";
   } catch (err) {
     if (isRetryableNetworkError(err)) {
+      // Re-assert this call's own value — a second, newer call for the
+      // SAME question could have already overwritten or cleared this
+      // entry while this request was in flight; this guarantees the
+      // queue reflects this attempt's own outcome rather than whatever a
+      // differently-timed call left behind.
       enqueueAnswer(sessionId, questionId, selectedOptionIds);
       return "queued";
     }
+    // A genuine rejection (e.g. the session expired) — stale, retrying
+    // forever would be wrong, same reasoning flushQueue already uses.
+    dequeueAnswer(sessionId, questionId);
     throw err;
   }
 }

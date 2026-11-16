@@ -184,7 +184,10 @@ describe("Exam-taking screen — sections navigator", () => {
     expect(screen.queryByText("Question 1 text")).not.toBeInTheDocument();
   });
 
-  it("hides the Sections column entirely for a single-section paper", async () => {
+  // Updated 2026-11-16 (explicit request) — the Sections column now shows
+  // even for a single-section paper, showing that one section's own name,
+  // rather than being hidden entirely as it used to be.
+  it("still shows the Sections column, with that one section's name, for a single-section paper", async () => {
     mockApi(SINGLE_SECTION_QUESTIONS);
     mockStartSession();
     const user = userEvent.setup();
@@ -193,6 +196,6 @@ describe("Exam-taking screen — sections navigator", () => {
     await enterExam(user);
 
     expect(await screen.findByText("Question 1 text")).toBeInTheDocument();
-    expect(screen.queryByText("Section 1")).not.toBeInTheDocument();
+    expect(screen.getByText("Section 1")).toBeInTheDocument();
   });
 });

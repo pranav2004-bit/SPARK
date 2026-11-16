@@ -114,8 +114,8 @@ describe("Pre-exam briefing — first-time start", () => {
     mockApi();
     render(<StudentExamPage />);
 
-    expect(await screen.findByText(/more than 3 times auto-submits/)).toBeInTheDocument();
-    expect(screen.getByText(/more than 5 times auto-submits/)).toBeInTheDocument();
+    expect(await screen.findByText(/Exiting fullscreen 3 times auto-submits/)).toBeInTheDocument();
+    expect(screen.getByText(/Switching to another tab or application 3 times auto-submits/)).toBeInTheDocument();
   });
 
   it("accurately describes copy/paste as disabled and right-click/PrintScreen as monitored, not blocked", async () => {
@@ -152,7 +152,7 @@ describe("Pre-exam briefing — first-time start", () => {
     render(<StudentExamPage />);
 
     await screen.findByRole("heading", { name: "MOCK TEST - 3" });
-    expect(screen.getByText("5 tab switches = auto-submit")).toBeInTheDocument();
+    expect(screen.getByText("3 tab switches = auto-submit")).toBeInTheDocument();
     expect(screen.getByText("3 fullscreen exits = auto-submit")).toBeInTheDocument();
     expect(screen.getByText("Activity monitored")).toBeInTheDocument();
     expect(screen.getByText("Auto-submits at 0:00")).toBeInTheDocument();
