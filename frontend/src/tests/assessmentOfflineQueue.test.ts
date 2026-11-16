@@ -93,6 +93,28 @@ describe("saveAnswerResilient", () => {
     expect(pendingCount(SESSION_ID)).toBe(0);
   });
 
+  // Proves the actual fix (2026-11-16, production-readiness audit): the
+  // answer must be durable on disk WHILE the request is still in flight,
+  // not just before the call starts or after it resolves — that in-flight
+  // window is exactly what a genuine instant power loss (no graceful
+  // shutdown to react to) used to lose, back when this only wrote to
+  // local storage inside the failure handler.
+  it("is already durable in local storage while the live PUT is still in flight, before it resolves either way", async () => {
+    let resolvePut!: (value: { data: { success: true } }) => void;
+    (api.put as jest.Mock).mockReturnValueOnce(
+      new Promise(resolve => { resolvePut = resolve; })
+    );
+
+    const pending = saveAnswerResilient(SESSION_ID, "q1", ["a"]);
+
+    // The request hasn't resolved yet — a real power loss landing exactly
+    // here is the scenario being tested. The answer must already be safe.
+    expect(pendingCount(SESSION_ID)).toBe(1);
+
+    resolvePut({ data: { success: true } });
+    await pending;
+  });
+
   it("queues locally and returns 'queued' on a network failure", async () => {
     (api.put as jest.Mock).mockRejectedValueOnce(networkError());
 

@@ -11,6 +11,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toast";
 import api, { getErrorMessage } from "@/lib/api";
+import { consumeExamAutoSubmitReason } from "@/lib/examAutoSubmitReason";
 import type { ApiSuccess, StudentAssignmentListItem } from "@/types";
 
 function formatDateTime(iso: string | null): string {
@@ -92,6 +93,16 @@ export default function StudentAssessmentsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(load, []);
 
+  // The exam page itself unmounts immediately on its own auto-submit
+  // redirect, so it can't show this toast directly — it leaves the reason
+  // in sessionStorage instead (see examAutoSubmitReason.ts) for this page
+  // to pick up once, right after landing here.
+  useEffect(() => {
+    const reason = consumeExamAutoSubmitReason();
+    if (reason) toast.warning(`Your assessment was auto-submitted because ${reason}.`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const isEmpty = !loading && items.length === 0;
 
   return (
@@ -141,6 +152,11 @@ export default function StudentAssessmentsPage() {
                     <p className="text-xs mt-2 flex items-center gap-1.5" style={{ color: "var(--color-text-subtle)" }}>
                       <Clock size={11} /> {item.exam_duration_minutes} minutes
                     </p>
+                    {item.global_start_time && (
+                      <p className="text-xs mt-1 flex items-center gap-1.5" style={{ color: "var(--color-text-subtle)" }}>
+                        starts {formatDateTime(item.global_start_time)}
+                      </p>
+                    )}
                     <p className="text-xs mt-1 flex items-center gap-1.5" style={{ color: "var(--color-text-subtle)" }}>
                       closes {formatDateTime(item.global_expire_time)}
                     </p>

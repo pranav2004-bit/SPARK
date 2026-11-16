@@ -18,6 +18,7 @@ import { useOfflineAnswerQueue } from "@/hooks/useOfflineAnswerQueue";
 import { useServerTimeSync } from "@/hooks/useServerTimeSync";
 import { useActivityCapture, clearExamViolationCounts } from "@/hooks/useActivityCapture";
 import api, { getErrorMessage } from "@/lib/api";
+import { setExamAutoSubmitReason } from "@/lib/examAutoSubmitReason";
 import { toTitleCase } from "@/lib/format";
 import type {
   ApiSuccess, StudentStartSessionResponse, StudentSessionQuestionsResponse,
@@ -36,6 +37,25 @@ function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
+// Shared by handleSubmit and every answer-save call site (2026-11-16,
+// production-readiness audit) — session_is_writable (enforcement.py) is
+// the single server-side guard behind every mutating student endpoint on
+// this session, submit included, so an autosave can be rejected with
+// these exact same three reasons, not just a submit. Before this existed,
+// an answer-save hit by one of these (most realistically "time expired",
+// if the student clicks a new answer right as the deadline passes) failed
+// completely silently — the saving indicator just quietly cleared, with
+// no explanation and no attempt to actually finalize the now-genuinely-
+// over exam.
+function sessionTerminalRejectionReason(err: unknown): "expired" | "finalized" | null {
+  const response = (err as { response?: { status?: number; data?: { message?: string } } })?.response;
+  if (response?.status !== 403) return null;
+  const message = response.data?.message;
+  if (message === "Time has expired for this session.") return "expired";
+  if (message?.startsWith("This session is no longer in progress")) return "finalized";
+  return null;
+}
+
 // Mirrors scoring.py's TAB_SWITCH_THRESHOLD / FULLSCREEN_EXIT_THRESHOLD
 // exactly (backend: "> 5" and "> 3", i.e. the 6th switch / 4th exit trips
 // it) — kept in sync by convention since neither constant is exposed via
@@ -43,9 +63,19 @@ function formatDateTime(iso: string): string {
 // server's own malpractice flagging, not a replacement for it: the server
 // computes malpractice_flag independently, from its own logged event
 // counts, at finalize time, regardless of whether this lockout ever fires.
-const TAB_SWITCH_LIMIT = 5;
+const TAB_SWITCH_LIMIT = 3;
 const FULLSCREEN_EXIT_LIMIT = 3;
-const LOCKOUT_COUNTDOWN_SECONDS = 5;
+// Every fullscreen exit (not just the final one) opens a centered popup
+// with this countdown and a "Go to Fullscreen" button (explicit request,
+// 2026-11-16, replacing the old dismissible banner). Returning to
+// fullscreen in time cancels it on exits 1-2, but NOT once the student has
+// reached FULLSCREEN_EXIT_LIMIT — that one always auto-submits when the
+// countdown reaches 0, whether or not they went back to fullscreen.
+const FULLSCREEN_EXIT_POPUP_SECONDS = 15;
+// Same mechanism as the fullscreen-exit popup above, for tab switches —
+// except there's no reliable automatic "they're back" signal the way
+// isFullscreen is, so this one only cancels on an explicit Continue click.
+const TAB_SWITCH_POPUP_SECONDS = 15;
 
 // TEMPORARY DEV OVERRIDE (added 2026-08-27) — set back to false before this
 // page is considered done. While true, tab-switch/fullscreen-exit counts
@@ -234,6 +264,20 @@ export default function StudentExamPage() {
   const exitToAssessments = useCallback(() => router.push("/students/assessments"), [router]);
   const [result, setResult] = useState<StudentSubmitResponse | null>(null);
   const autoSubmitTriggered = useRef(false);
+  // Set once on unmount — guards the forced-submit retry loop below
+  // (attemptForcedAutoSubmit), whose setTimeout can outlive the effect
+  // that scheduled it and isn't cleaned up by any single effect's own
+  // cleanup function.
+  const examUnmountedRef = useRef(false);
+  useEffect(() => {
+    return () => { examUnmountedRef.current = true; };
+  }, []);
+  // Lets handleSelect/handleClear (defined before retrySubmitUntilSuccess
+  // below, so they can't reference it directly without a TDZ error) kick
+  // off the same retry-until-success finalize path on a terminal-session
+  // rejection, without needing retrySubmitUntilSuccess itself to exist
+  // yet at closure-creation time — populated by an effect once it does.
+  const triggerTimeExpiredSubmitRef = useRef<() => void>(() => {});
 
   const { saveAnswer, isReconnecting } = useOfflineAnswerQueue(sessionId ?? "");
   const { secondsRemaining, isSyncFailing, lastExtension } = useServerTimeSync();
@@ -241,18 +285,19 @@ export default function StudentExamPage() {
     isFullscreen, requestFullscreen, tabSwitchCount, fullscreenExitCount, screenshotAttempts,
     notifyActiveQuestion,
   } = useActivityCapture(sessionStatus === "IN_PROGRESS" ? sessionId : null);
-  const [fullscreenPromptDismissed, setFullscreenPromptDismissed] = useState(false);
-
-  // Reached once either count crosses its limit — drives the blocking,
-  // non-dismissable "auto-submitting" overlay with its own countdown.
-  const [lockout, setLockout] = useState<{ label: string; secondsLeft: number } | null>(null);
-
-  // Re-arm the prompt every time fullscreen is (re-)entered, so exiting
-  // again later shows it fresh rather than staying dismissed forever
-  // after the first time.
-  useEffect(() => {
-    if (isFullscreen) setFullscreenPromptDismissed(false);
-  }, [isFullscreen]);
+  // Opened on EVERY fullscreen exit (see FULLSCREEN_EXIT_POPUP_SECONDS
+  // above) — forcedSubmit is true once this exit reached the strike limit,
+  // meaning returning to fullscreen no longer cancels the countdown.
+  // `message` is the exact warning toast text shown when this popup opened
+  // — stored here (not recomputed) so it can be re-shown verbatim, with a
+  // longer duration, the moment the popup closes (explicit request,
+  // 2026-11-16: the toast must still be visible for a full 10s *after*
+  // the popup disappears, not just for its own fixed 4s from whenever it
+  // first appeared, which could already be long gone by the time a
+  // 15-second popup closes).
+  const [fullscreenExitPopup, setFullscreenExitPopup] = useState<{ secondsLeft: number; forcedSubmit: boolean; message: string } | null>(null);
+  // Same shape, for tab switches (see TAB_SWITCH_POPUP_SECONDS above).
+  const [tabSwitchPopup, setTabSwitchPopup] = useState<{ secondsLeft: number; forcedSubmit: boolean; message: string } | null>(null);
 
   // Warn before an accidental tab close / reload / back-navigation while an
   // exam is actually in progress — answers themselves are never lost
@@ -413,13 +458,26 @@ export default function StudentExamPage() {
       setSavingState(s => ({ ...s, [questionId]: "saving" }));
       saveAnswer(questionId, next[questionId])
         .then(outcome => setSavingState(s => ({ ...s, [questionId]: outcome })))
-        .catch(() => { /* real rejection — session no longer writable; leave state as "saving" cleared below */
+        .catch((err: unknown) => {
           setSavingState(s => { const copy = { ...s }; delete copy[questionId]; return copy; });
+          // Found 2026-11-16, production-readiness audit: a real rejection
+          // here used to fail completely silently — most realistically the
+          // student clicking a new answer right as the deadline passes.
+          // Now surfaces clearly and, if nothing has already started
+          // finalizing this session, kicks that off immediately rather
+          // than waiting for the timer's own next tick to notice.
+          const reason = sessionTerminalRejectionReason(err);
+          if (reason) {
+            toast.warning(reason === "expired"
+              ? "Time's up — your assessment is being submitted automatically."
+              : "This assessment has already been submitted.");
+            triggerTimeExpiredSubmitRef.current();
+          }
         });
 
       return next;
     });
-  }, [saveAnswer]);
+  }, [saveAnswer, toast]);
 
   // Single-choice questions have no natural way to deselect (clicking the
   // same option again is a no-op — see the "single" branch above, which
@@ -431,25 +489,40 @@ export default function StudentExamPage() {
       setSavingState(s => ({ ...s, [questionId]: "saving" }));
       saveAnswer(questionId, [])
         .then(outcome => setSavingState(s => ({ ...s, [questionId]: outcome })))
-        .catch(() => {
+        .catch((err: unknown) => {
           setSavingState(s => { const copy = { ...s }; delete copy[questionId]; return copy; });
+          // Same reasoning as handleSelect's own catch above.
+          const reason = sessionTerminalRejectionReason(err);
+          if (reason) {
+            toast.warning(reason === "expired"
+              ? "Time's up — your assessment is being submitted automatically."
+              : "This assessment has already been submitted.");
+            triggerTimeExpiredSubmitRef.current();
+          }
         });
       return next;
     });
-  }, [saveAnswer]);
+  }, [saveAnswer, toast]);
 
   // A ref, not the `submitting` state, guards re-entrancy — state updates
   // are batched/async, so two callers landing in the same tick (e.g. the
-  // countdown timer hitting 0 right as the lockout overlay also reaches 0)
-  // could both pass a `submitting` check before either had actually set it.
+  // exam countdown hitting 0 right as a tab-switch/fullscreen-exit popup
+  // also reaches 0) could both pass a `submitting` check before either had
+  // actually set it.
   // The backend's own race-safe finalize already makes a genuine double
   // POST harmless (verified earlier), but this avoids firing the second
   // network call — and the resulting "already submitted" error toast —
   // at all.
   const submitInFlight = useRef(false);
 
-  const handleSubmit = useCallback(async () => {
-    if (!sessionId || submitInFlight.current) return;
+  // Returns whether the session actually reached a terminal state (a real
+  // success, or the graceful "already expired" case below) — callers that
+  // need to know the real outcome (the forced tab-switch/fullscreen-exit
+  // submit effects) use this instead of assuming the call always succeeds;
+  // the manual-submit button and confirm dialog ignore it, since their own
+  // UI already reflects success/failure via sessionStatus/the error toast.
+  const handleSubmit = useCallback(async (): Promise<boolean> => {
+    if (!sessionId || submitInFlight.current) return false;
     submitInFlight.current = true;
     setSubmitting(true);
     try {
@@ -461,8 +534,45 @@ export default function StudentExamPage() {
       // A successful submit here is always a genuine terminal transition —
       // safe to stop tracking this session's violation counts.
       clearExamViolationCounts(sessionId);
+      return true;
     } catch (err) {
+      // A narrow but real timing race (2026-11-16, production-readiness
+      // audit): this request can arrive a moment after the server's own
+      // clock already passed ends_at — session_is_writable (enforcement.py)
+      // rejects it with this exact 403 before finalize_sessions() ever
+      // runs. The deadline has genuinely passed either way, so the
+      // backend's own sweep WILL finalize this session as AUTO_SUBMITTED
+      // within ~20s regardless of this request's outcome — showing a raw
+      // error here instead of that true, inevitable outcome would leave
+      // the student stuck looking at an error on a session that is
+      // already, unrecoverably over. No score yet (this request never
+      // reached finalize_sessions, so there's no result payload to show) —
+      // that's expected; the results screen below already renders
+      // correctly with no result data, and the real score becomes visible
+      // once the sweep actually runs.
+      const reason = sessionTerminalRejectionReason(err);
+      if (reason === "expired") {
+        setSessionStatus("AUTO_SUBMITTED");
+        clearExamViolationCounts(sessionId);
+        return true;
+      }
+      // A second real race, found while checking this (2026-11-16): the
+      // tab-switch and fullscreen-exit strike limits can both be reached
+      // at nearly the same moment (e.g. alt-tabbing away from the exam
+      // commonly exits fullscreen AND switches tabs in the same instant),
+      // so both forced-submit attempts can fire concurrently. Whichever
+      // request loses that race gets this exact rejection — the session
+      // is already finalized by the winner. Without this, the loser's own
+      // retry loop would treat that as a transient failure and retry
+      // every 2s forever, since "no longer in progress" never becomes
+      // untrue. This is also a genuine success for this request's own
+      // purpose (the session IS done) — not setting sessionStatus here
+      // deliberately, since the winning call already set it correctly.
+      if (reason === "finalized") {
+        return true;
+      }
       toast.error(getErrorMessage(err));
+      return false;
     } finally {
       setSubmitting(false);
       setConfirmSubmit(false);
@@ -470,38 +580,40 @@ export default function StudentExamPage() {
     }
   }, [sessionId, toast]);
 
-  // ── Tab-switch / fullscreen-exit graduated warnings + hard lockout ──────
-  // Every occurrence below the limit shows a warning toast naming how many
-  // are left; crossing the limit (same boundary as the backend's own
-  // malpractice check — see TAB_SWITCH_LIMIT/FULLSCREEN_EXIT_LIMIT above)
-  // starts the lockout overlay instead. setLockout(prev => prev ?? ...)
-  // guards against a second trigger (e.g. both counts crossing near
-  // simultaneously) restarting an already-running countdown.
+  // ── Tab-switch / fullscreen-exit graduated warnings + popup ─────────────
+  // Every occurrence (not just the one crossing the limit) shows a warning
+  // toast naming how many are left, and opens its own popup with a 15s
+  // countdown + a confirm button. Below the strike limit, confirming in
+  // time cancels it and the exam resumes; at the strike limit, confirming
+  // no longer matters — it always runs out and submits (see
+  // TAB_SWITCH_LIMIT/FULLSCREEN_EXIT_LIMIT above).
   useEffect(() => {
     if (DEV_DISABLE_ANTI_CHEAT_LOCKOUT) return;
     if (tabSwitchCount === 0 || sessionStatus !== "IN_PROGRESS") return;
-    if (tabSwitchCount > TAB_SWITCH_LIMIT) {
-      setLockout(prev => prev ?? { label: "tab switches", secondsLeft: LOCKOUT_COUNTDOWN_SECONDS });
-    } else {
-      toast.warning(
-        `Tab switch detected - warning ${tabSwitchCount} of ${TAB_SWITCH_LIMIT}. ` +
-        `Reaching the limit will auto-submit your exam.`
-      );
-    }
+    const message =
+      `Tab switch detected - warning ${tabSwitchCount} of ${TAB_SWITCH_LIMIT}. ` +
+      `Reaching the limit will auto-submit your exam.`;
+    toast.warning(message);
+    setTabSwitchPopup({
+      secondsLeft: TAB_SWITCH_POPUP_SECONDS,
+      forcedSubmit: tabSwitchCount >= TAB_SWITCH_LIMIT,
+      message,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabSwitchCount]);
 
   useEffect(() => {
     if (DEV_DISABLE_ANTI_CHEAT_LOCKOUT) return;
     if (fullscreenExitCount === 0 || sessionStatus !== "IN_PROGRESS") return;
-    if (fullscreenExitCount > FULLSCREEN_EXIT_LIMIT) {
-      setLockout(prev => prev ?? { label: "fullscreen exits", secondsLeft: LOCKOUT_COUNTDOWN_SECONDS });
-    } else {
-      toast.warning(
-        `Fullscreen exit detected - warning ${fullscreenExitCount} of ${FULLSCREEN_EXIT_LIMIT}. ` +
-        `Reaching the limit will auto-submit your exam.`
-      );
-    }
+    const message =
+      `Fullscreen exit detected - warning ${fullscreenExitCount} of ${FULLSCREEN_EXIT_LIMIT}. ` +
+      `Reaching the limit will auto-submit your exam.`;
+    toast.warning(message);
+    setFullscreenExitPopup({
+      secondsLeft: FULLSCREEN_EXIT_POPUP_SECONDS,
+      forcedSubmit: fullscreenExitCount >= FULLSCREEN_EXIT_LIMIT,
+      message,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fullscreenExitCount]);
 
@@ -528,31 +640,125 @@ export default function StudentExamPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastExtension]);
 
-  // Ticks the lockout overlay's countdown down to 0, then actually submits
-  // (reusing the exact same submit path a manual click uses) and redirects
-  // to the student's assessments home once that call settles.
+  // Ticks the fullscreen-exit popup's own countdown. Returning to
+  // fullscreen cancels it early — UNLESS forcedSubmit (this exit reached
+  // FULLSCREEN_EXIT_LIMIT), in which case it counts all the way to 0 and
+  // submits regardless of fullscreen state, per the explicit requirement
+  // that the strike limit itself is the trigger, not just the timeout.
+  // The server-synced exam timer (useServerTimeSync, above) is completely
+  // independent of this countdown and keeps running the whole time either
+  // way — this popup only ever decides whether to submit early, never
+  // pauses or extends the real exam clock.
+  // Shared by both forced-submit effects below. Unlike the plain
+  // timer-expiry auto-submit, there's no backend sweep watching for a
+  // strike-limit condition — this frontend call is the ONLY thing that
+  // will ever finalize a tab-switch/fullscreen-exit strike-limit
+  // auto-submit, and the normal timer-expiry one has no retry of its own
+  // either (a single failed attempt there used to just give up — a real
+  // gap if the internet happens to be down at the exact moment the timer
+  // hits 0, found 2026-11-16 walking through that exact scenario).
+  // Reporting success regardless of whether the call actually succeeded
+  // would risk telling the student it's done when it genuinely isn't — so
+  // this only ever calls onSuccess on a real success, and otherwise
+  // retries every 2s, recursing on itself, until it actually goes through.
+  // examUnmountedRef guards every step (this retry chain isn't owned by
+  // any single effect's cleanup, since it can outlive several renders) —
+  // if the student has already navigated away, this stops touching state
+  // on a page that's no longer there.
+  const retrySubmitUntilSuccess = useCallback((onSuccess: () => void) => {
+    handleSubmit().then(success => {
+      if (examUnmountedRef.current) return;
+      if (success) {
+        onSuccess();
+      } else {
+        setTimeout(() => {
+          if (!examUnmountedRef.current) retrySubmitUntilSuccess(onSuccess);
+        }, 2000);
+      }
+    });
+  }, [handleSubmit]);
+
+  // Populates the ref handleSelect/handleClear use (defined earlier in
+  // this component, before retrySubmitUntilSuccess exists) to kick off
+  // the exact same retry-until-success finalize path the timer-expiry
+  // effect below uses, deduped against it via autoSubmitTriggered so an
+  // answer-save rejection and the timer's own tick can't both start their
+  // own independent retry chain for the same already-over session.
   useEffect(() => {
-    if (!lockout) return;
-    if (lockout.secondsLeft <= 0) {
-      handleSubmit().finally(() => router.push("/students/assessments"));
+    triggerTimeExpiredSubmitRef.current = () => {
+      if (autoSubmitTriggered.current) return;
+      autoSubmitTriggered.current = true;
+      retrySubmitUntilSuccess(() => {});
+    };
+  }, [retrySubmitUntilSuccess]);
+
+  const attemptForcedAutoSubmit = useCallback((reason: string) => {
+    retrySubmitUntilSuccess(() => {
+      setExamAutoSubmitReason(reason);
+      router.push("/students/assessments");
+    });
+  }, [retrySubmitUntilSuccess, router]);
+
+  useEffect(() => {
+    if (!fullscreenExitPopup) return;
+    if (!fullscreenExitPopup.forcedSubmit && isFullscreen) {
+      // Re-shown here, not just left to its own original 4s run (which
+      // could already be long over by now) — explicit request: the
+      // warning must stay visible for a full 10s counted from the exact
+      // moment the popup itself disappears, not from whenever it first
+      // appeared alongside the popup opening.
+      toast.warning(fullscreenExitPopup.message, 10000);
+      setFullscreenExitPopup(null);
+      return;
+    }
+    if (fullscreenExitPopup.secondsLeft <= 0) {
+      attemptForcedAutoSubmit("you exited fullscreen too many times");
       return;
     }
     const t = setTimeout(() => {
-      setLockout(l => (l ? { ...l, secondsLeft: l.secondsLeft - 1 } : l));
+      setFullscreenExitPopup(p => (p ? { ...p, secondsLeft: p.secondsLeft - 1 } : p));
     }, 1000);
     return () => clearTimeout(t);
-  }, [lockout, handleSubmit, router]);
+  }, [fullscreenExitPopup, isFullscreen, attemptForcedAutoSubmit, toast]);
+
+  // Ticks the tab-switch popup's own countdown. Unlike the fullscreen-exit
+  // popup, there's no reliable automatic "they're back" browser signal to
+  // auto-cancel on — the student must click Continue explicitly (its
+  // onClick clears this state directly, below). forcedSubmit works the
+  // same way as the fullscreen popup: once reached, the countdown always
+  // runs to 0 and submits regardless of whether Continue was clicked. The
+  // exam timer itself is unaffected either way, same reasoning as above.
+  useEffect(() => {
+    if (!tabSwitchPopup) return;
+    if (tabSwitchPopup.secondsLeft <= 0) {
+      attemptForcedAutoSubmit("you switched tabs too many times");
+      return;
+    }
+    const t = setTimeout(() => {
+      setTabSwitchPopup(p => (p ? { ...p, secondsLeft: p.secondsLeft - 1 } : p));
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [tabSwitchPopup, attemptForcedAutoSubmit]);
 
   // Auto-submit attempt once the local countdown hits 0 — the server sweep
   // will catch it within ~20s regardless, but attempting an immediate
   // submit gives a snappier transition when it's this student's own
-  // deadline (not a race against another cause of expiry).
+  // deadline (not a race against another cause of expiry). Retries via
+  // retrySubmitUntilSuccess rather than a single bare attempt (2026-11-16
+  // fix) — a real gap found walking through "internet drops at the exact
+  // moment the timer hits 0": the one attempt used to just fail silently
+  // and never retry, leaving the student on a stale live exam screen
+  // potentially until they interacted with something themselves. On
+  // success here there's deliberately no redirect, unlike the forced
+  // tab-switch/fullscreen-exit case — handleSubmit's own success path
+  // already sets sessionStatus/result, which re-renders this same page
+  // straight into the terminal "Time's up" screen in place.
   useEffect(() => {
     if (secondsRemaining === 0 && !autoSubmitTriggered.current && sessionStatus === "IN_PROGRESS") {
       autoSubmitTriggered.current = true;
-      handleSubmit();
+      retrySubmitUntilSuccess(() => {});
     }
-  }, [secondsRemaining, sessionStatus, handleSubmit]);
+  }, [secondsRemaining, sessionStatus, retrySubmitUntilSuccess]);
 
   const answeredCount = useMemo(
     () => questions.filter(q => (answers[q.id]?.length ?? 0) > 0).length,
@@ -678,7 +884,7 @@ export default function StudentExamPage() {
   // question down the page.
   const [mobileSectionsOpen, setMobileSectionsOpen] = useState(false);
   const activeSectionTitle = sections.find(s => s.indices.includes(activeIndex))?.title;
-  const mobileSectionsDropdown = sections.length > 1 && (
+  const mobileSectionsDropdown = sections.length > 0 && (
     <div className="lg:hidden mb-5 relative z-40">
       <button
         onClick={() => setMobileSectionsOpen(v => !v)}
@@ -998,8 +1204,8 @@ export default function StudentExamPage() {
                 style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", color: "var(--color-text-muted)" }}
               >
                 <li>• This exam must be taken in fullscreen for its entire duration.</li>
-                <li>• Exiting fullscreen more than {FULLSCREEN_EXIT_LIMIT} times auto-submits your exam immediately.</li>
-                <li>• Switching to another tab or application more than {TAB_SWITCH_LIMIT} times auto-submits your exam immediately.</li>
+                <li>• Exiting fullscreen {FULLSCREEN_EXIT_LIMIT} times auto-submits your exam immediately.</li>
+                <li>• Switching to another tab or application {TAB_SWITCH_LIMIT} times auto-submits your exam immediately.</li>
                 <li>• Copy and paste are disabled on every question and answer.</li>
                 <li>• Right-clicks and PrintScreen attempts are recorded and reviewed.</li>
                 <li>• The exam submits automatically the instant your time runs out - there is no grace period.</li>
@@ -1202,36 +1408,6 @@ export default function StudentExamPage() {
             menu, and not the plain always-expanded list it briefly was). */}
         {mobileSectionsDropdown}
 
-        {/* ── Fullscreen nudge — shown again if the student exits fullscreen
-            mid-exam. Not a hard block on its own (they get graduated
-            warnings first, per the effect above), but exits do count toward
-            the same limit that triggers the lockout overlay below. ────── */}
-        {!isFullscreen && !fullscreenPromptDismissed && (
-          <div
-            className="flex items-start gap-3 px-4 py-3.5 rounded-[var(--radius-lg)] mb-5"
-            style={{ background: "#FFF4E6", border: "1px solid #FDE0B0" }}
-          >
-            <ShieldAlert size={18} style={{ color: "#B45309", flexShrink: 0, marginTop: 2 }} />
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold" style={{ color: "#92400E" }}>
-                You've left fullscreen
-              </p>
-              <p className="text-xs mt-1 leading-relaxed" style={{ color: "#92400E" }}>
-                This exam monitors tab switches, window focus, fullscreen exits and copy/paste.
-                Fullscreen exits are limited to {FULLSCREEN_EXIT_LIMIT} - going over auto-submits your exam.
-              </p>
-              <div className="flex gap-2 mt-2.5">
-                <Button variant="warning" size="sm" leftIcon={<Maximize size={13} />} onClick={() => { requestFullscreen().catch(() => {}); }}>
-                  Return to Fullscreen
-                </Button>
-                <Button variant="secondary" size="sm" onClick={() => setFullscreenPromptDismissed(true)}>
-                  Dismiss
-                </Button>
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* Three columns on desktop — sections, question, question numbers,
             in that reading order (2026-08-28) — via lg:order-* rather than
             DOM order, so mobile keeps its own sensible stack (sections,
@@ -1267,15 +1443,15 @@ export default function StudentExamPage() {
             </>
           )}
           {/* ── Sections ───────────────────────────────────────────────────
-              Only rendered when the paper actually has more than one —
-              every question always belongs to *some* section (the backend
-              auto-creates a default one for papers that were never split
-              up), so a single-section paper would otherwise show a
-              "sections" column with exactly one, meaningless entry.
+              Always rendered, even for a single-section paper (explicit
+              request, 2026-11-16) — every question always belongs to
+              *some* section (the backend auto-creates a default one for
+              papers that were never split up), so a single-section paper
+              shows that one section's name rather than hiding the panel.
               flex-grow (not a width utility) is what makes this a genuine
               20% share of the row by default — see the sectionsWidth state
               comment above for why. */}
-          {sections.length > 1 && (
+          {sections.length > 0 && (
             sectionsOpen ? (
               <div
                 ref={sectionsPanelRef}
@@ -1605,12 +1781,16 @@ export default function StudentExamPage() {
         message={`You have answered ${answeredCount} of ${questions.length} questions. Leaving now does NOT submit your exam - your timer keeps running and your session stays in progress. Come back to this page to resume.`}
         confirmLabel="Exit Test"
         confirmVariant="danger"
+        requireTypedConfirmation="EXIT"
       />
 
-      {/* ── Lockout overlay — reaching either limit lands here. No close
-          button, no Escape-to-dismiss (unlike Modal): the whole point is
-          that this can't be dismissed, only counted down through. ────── */}
-      {lockout && (
+      {/* ── Tab-switch popup — opens on every tab switch (2026-11-16,
+          explicit request, same mechanism as the fullscreen-exit popup
+          below). No automatic "they're back" detection here, unlike
+          fullscreen — only the Continue button's own onClick cancels it,
+          and only below the strike limit. No close button, no
+          Escape-to-dismiss, same reasoning as the overlay this replaced. */}
+      {tabSwitchPopup && (
         <div
           className="fixed inset-0 z-[200] flex items-center justify-center p-4"
           style={{ background: "rgba(15,23,42,0.75)" }}
@@ -1626,17 +1806,135 @@ export default function StudentExamPage() {
               <AlertTriangle size={26} style={{ color: "#DC2626" }} />
             </div>
             <h2 className="text-lg font-bold mb-2" style={{ color: "var(--color-text)" }}>
-              You've reached the limit
+              You switched tabs
             </h2>
             <p className="text-sm mb-5 leading-relaxed" style={{ color: "var(--color-text-muted)" }}>
-              Too many {lockout.label} were detected. Your assessment is being submitted automatically.
+              {tabSwitchPopup.secondsLeft > 0
+                ? (tabSwitchPopup.forcedSubmit
+                    ? `You've reached the ${TAB_SWITCH_LIMIT}-switch limit. Your assessment will be submitted automatically.`
+                    : `Click Continue within the countdown below, or your assessment will be submitted automatically.`)
+                // Retrying (2026-11-16 fix): unlike a plain timeout, there's
+                // no backend safety net for this specific trigger — this
+                // request is retried until it actually succeeds, so this
+                // text (and the button's own loading state below) must
+                // stay visible the whole time rather than going quiet.
+                : "Submitting your assessment…"}
             </p>
             <div
-              className="w-14 h-14 rounded-full flex items-center justify-center mx-auto font-mono text-xl font-bold"
+              className="w-14 h-14 rounded-full flex items-center justify-center mx-auto font-mono text-xl font-bold mb-5"
               style={{ background: "#FEF2F2", color: "#DC2626", border: "2px solid #FECACA" }}
             >
-              {lockout.secondsLeft}
+              {tabSwitchPopup.secondsLeft > 0 ? tabSwitchPopup.secondsLeft : "…"}
             </div>
+            <Button
+              variant="danger"
+              loading={tabSwitchPopup.secondsLeft <= 0}
+              disabled={tabSwitchPopup.forcedSubmit || tabSwitchPopup.secondsLeft <= 0}
+              onClick={() => {
+                // Same reasoning as the fullscreen-exit popup's own
+                // re-shown toast — must stay visible for a full 10s
+                // counted from the moment the popup disappears, not from
+                // whenever it first appeared.
+                toast.warning(tabSwitchPopup.message, 10000);
+                setTabSwitchPopup(null);
+              }}
+            >
+              {tabSwitchPopup.secondsLeft <= 0 ? "Submitting…" : "Continue"}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Fullscreen-exit popup — opens on every exit (2026-11-16,
+          explicit request, replacing the old dismissible banner). On exits
+          below the strike limit, clicking the button (or returning to
+          fullscreen any other way) cancels it. Once forcedSubmit is true
+          (this exit reached FULLSCREEN_EXIT_LIMIT), the button still works
+          for re-entering fullscreen, but the countdown no longer cancels on
+          its own — it always runs out and submits. No close button, no
+          Escape-to-dismiss, same reasoning as the lockout overlay. ────── */}
+      {fullscreenExitPopup && (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center p-4"
+          style={{ background: "rgba(15,23,42,0.75)" }}
+          role="alertdialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-sm rounded-[var(--radius-xl)] p-6 text-center"
+            style={{ background: "#fff", boxShadow: "var(--shadow-xl)" }}
+          >
+            <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+              style={{ background: "#FFF4E6" }}>
+              <Maximize size={26} style={{ color: "#B45309" }} />
+            </div>
+            <h2 className="text-lg font-bold mb-2" style={{ color: "var(--color-text)" }}>
+              You've left fullscreen
+            </h2>
+            <p className="text-sm mb-5 leading-relaxed" style={{ color: "var(--color-text-muted)" }}>
+              {fullscreenExitPopup.secondsLeft > 0
+                ? (fullscreenExitPopup.forcedSubmit
+                    ? `You've reached the ${FULLSCREEN_EXIT_LIMIT}-exit limit. Your assessment will be submitted automatically, whether or not you return to fullscreen.`
+                    : `Return to fullscreen within the countdown below, or your assessment will be submitted automatically.`)
+                // Retrying (2026-11-16 fix): same reasoning as the
+                // tab-switch popup above — no backend safety net for this
+                // trigger, so this keeps retrying (and saying so) until it
+                // actually succeeds.
+                : "Submitting your assessment…"}
+            </p>
+            <div
+              className="w-14 h-14 rounded-full flex items-center justify-center mx-auto font-mono text-xl font-bold mb-5"
+              style={{ background: "#FFF4E6", color: "#B45309", border: "2px solid #FDE0B0" }}
+            >
+              {fullscreenExitPopup.secondsLeft > 0 ? fullscreenExitPopup.secondsLeft : "…"}
+            </div>
+            <Button
+              variant="warning"
+              leftIcon={fullscreenExitPopup.secondsLeft > 0 ? <Maximize size={14} /> : undefined}
+              loading={fullscreenExitPopup.secondsLeft <= 0}
+              disabled={fullscreenExitPopup.secondsLeft <= 0}
+              onClick={() => { requestFullscreen().catch(() => {}); }}
+            >
+              {fullscreenExitPopup.secondsLeft <= 0 ? "Submitting…" : "Go to Fullscreen"}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Time's-up overlay — found missing 2026-11-16, walking through
+          "internet is down right when the timer hits 0": the retry loop
+          behind this (retrySubmitUntilSuccess) could already run silently
+          for as long as it takes to actually succeed, with nothing on
+          screen showing it was happening — the student would just see
+          their live exam frozen at 0:00 with no explanation. Shown
+          whenever time is up but the session hasn't reached a terminal
+          state yet; disappears on its own the instant it does, since the
+          terminal-screen branch above this component's return takes over
+          immediately once sessionStatus changes. ────── */}
+      {secondsRemaining === 0 && sessionStatus === "IN_PROGRESS" && (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center p-4"
+          style={{ background: "rgba(15,23,42,0.75)" }}
+          role="alertdialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-sm rounded-[var(--radius-xl)] p-6 text-center"
+            style={{ background: "#fff", boxShadow: "var(--shadow-xl)" }}
+          >
+            <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+              style={{ background: "#F0FDF4" }}>
+              <Clock size={26} style={{ color: "#16A34A" }} />
+            </div>
+            <h2 className="text-lg font-bold mb-2" style={{ color: "var(--color-text)" }}>
+              Time&apos;s up
+            </h2>
+            <p className="text-sm mb-5 leading-relaxed" style={{ color: "var(--color-text-muted)" }}>
+              Submitting your assessment…
+            </p>
+            <Button variant="primary" loading disabled>
+              Submitting…
+            </Button>
           </div>
         </div>
       )}
