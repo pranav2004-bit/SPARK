@@ -1,0 +1,136 @@
+# ══════════════════════════════════════════════════════════════════════════
+# SELF-HOSTED PRODUCTION OVERRIDE -- full migration off AWS RDS/S3 + Vercel
+# onto this single VPS. Adds local Postgres + SeaweedFS (S3-compatible) +
+# the real Next.js frontend, and points pgbouncer/nginx at them.
+#
+# Usage (from infra/ directory):
+#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.selfhosted.yml up -d --build
+#
+# Pre-cutover bring-up: plain HTTP via the VPS's own IP (no domain/SSL yet --
+# gateway/nginx.selfhosted.conf). Swap in the real domain + certbot-issued
+# SSL once DNS points here (separate step, not done by this file).
+# ══════════════════════════════════════════════════════════════════════════
+
+services:
+
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: dev_password
+      POSTGRES_DB: postgres
+    volumes:
+      - prod_postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - spark-internal
+
+  pgbouncer:
+    volumes:
+      - ./pgbouncer/pgbouncer.local.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    restart: always
+    command: ["server", "-s3", "-dir=/data", "-ip.bind=0.0.0.0", "-s3.config=/etc/seaweedfs/s3-config.json"]
+    volumes:
+      - prod_seaweedfs_data:/data
+      - ./seaweedfs/s3-config.json:/etc/seaweedfs/s3-config.json:ro
+    networks:
+      - spark-internal
+
+  seaweedfs-init:
+    image: amazon/aws-cli:latest
+    restart: "no"
+    depends_on:
+      - seaweedfs
+    environment:
+      AWS_ACCESS_KEY_ID: spark_media_access_key
+      AWS_SECRET_ACCESS_KEY: spark_media_secret_key_dev_2024
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: >
+      /bin/sh -c "
+      until aws --endpoint-url http://seaweedfs:8333 s3 ls >/dev/null 2>&1; do echo 'waiting for seaweedfs...'; sleep 2; done &&
+      (aws --endpoint-url http://seaweedfs:8333 s3 mb s3://spark-app-media-2026 || true) &&
+      echo 'Bucket ready.'
+      "
+    networks:
+      - spark-internal
+
+  resource-service:
+    environment:
+      AWS_ACCESS_KEY_ID: spark_media_access_key
+      AWS_SECRET_ACCESS_KEY: spark_media_secret_key_dev_2024
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
+      AWS_S3_ENDPOINT_URL: http://seaweedfs:8333
+      AWS_S3_CDN_DOMAIN: ""
+    depends_on:
+      seaweedfs:
+        condition: service_started
+
+  resource-worker:
+    environment:
+      AWS_ACCESS_KEY_ID: spark_media_access_key
+      AWS_SECRET_ACCESS_KEY: spark_media_secret_key_dev_2024
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
+      AWS_S3_ENDPOINT_URL: http://seaweedfs:8333
+      AWS_S3_CDN_DOMAIN: ""
+    depends_on:
+      seaweedfs:
+        condition: service_started
+
+  practice-service:
+    environment:
+      AWS_ACCESS_KEY_ID: spark_media_access_key
+      AWS_SECRET_ACCESS_KEY: spark_media_secret_key_dev_2024
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
+      AWS_S3_ENDPOINT_URL: http://seaweedfs:8333
+      AWS_S3_CDN_DOMAIN: ""
+    depends_on:
+      seaweedfs:
+        condition: service_started
+
+  assessment-service:
+    environment:
+      AWS_ACCESS_KEY_ID: spark_media_access_key
+      AWS_SECRET_ACCESS_KEY: spark_media_secret_key_dev_2024
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
+      AWS_S3_ENDPOINT_URL: http://seaweedfs:8333
+      AWS_S3_CDN_DOMAIN: ""
+    depends_on:
+      seaweedfs:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    restart: always
+    networks:
+      - spark-internal
+
+  nginx:
+    volumes:
+      - ../gateway/nginx.selfhosted.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      frontend:
+        condition: service_started
+
+volumes:
+  prod_postgres_data:
+  prod_seaweedfs_data:
