@@ -54,18 +54,11 @@ def _get_client():
         raise RuntimeError("boto3 is not installed.")
 
     region = settings.AWS_DEFAULT_REGION
-    # AWS_S3_ENDPOINT_URL lets this point at an S3-compatible store (e.g.
-    # self-hosted MinIO) instead of real AWS S3. Unset in production on AWS
-    # (default ""), so behavior there is completely unchanged. MinIO/most
-    # S3-compatible stores need path-style addressing, not virtual-hosted
-    # style, since they do not own wildcard DNS for <bucket>.<host>.
-    endpoint_url = getattr(settings, "AWS_S3_ENDPOINT_URL", "") or f"https://s3.{region}.amazonaws.com"
-    addressing_style = "path" if getattr(settings, "AWS_S3_ENDPOINT_URL", "") else "virtual"
     return boto3.client(
         "s3",
         region_name=region,
-        endpoint_url=endpoint_url,
-        config=Config(s3={"addressing_style": addressing_style}),
+        endpoint_url=f"https://s3.{region}.amazonaws.com",
+        config=Config(s3={"addressing_style": "virtual"}),
     )
 
 

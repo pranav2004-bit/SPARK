@@ -57,17 +57,10 @@ def _get_client():
 
     import boto3
     region = settings.AWS_DEFAULT_REGION
-    # AWS_S3_ENDPOINT_URL lets this point at an S3-compatible store (e.g.
-    # self-hosted MinIO) instead of real AWS S3. Unset in production on AWS
-    # (default ""), so behavior there is completely unchanged. MinIO/most
-    # S3-compatible stores need path-style addressing, not virtual-hosted
-    # style, since they do not own wildcard DNS for <bucket>.<host>.
-    endpoint_url = getattr(settings, "AWS_S3_ENDPOINT_URL", "") or f"https://s3.{region}.amazonaws.com"
-    addressing_style = "path" if getattr(settings, "AWS_S3_ENDPOINT_URL", "") else "virtual"
     return boto3.client(
         "s3",
         region_name=region,
-        endpoint_url=endpoint_url,
+        endpoint_url=f"https://s3.{region}.amazonaws.com",
         # connect/read timeouts (Task 13.1 — every outbound call needs an
         # explicit, reasoned budget, not botocore's default 60s/60s, which
         # was never actually chosen for this service, just inherited).
@@ -76,7 +69,7 @@ def _get_client():
         # framing) — head_object/get_object/delete_object here are quick
         # metadata or small-range reads, not full-object transfers, so 5s
         # to connect and 15s to read is generous, not tight.
-        config=Config(connect_timeout=5, read_timeout=15, s3={"addressing_style": addressing_style}),
+        config=Config(connect_timeout=5, read_timeout=15, s3={"addressing_style": "virtual"}),
     )
 
 
