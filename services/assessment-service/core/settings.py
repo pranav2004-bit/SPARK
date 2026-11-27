@@ -42,7 +42,12 @@ if ENVIRONMENT == "production":
     # them here would force static keys back into production even though
     # storage.py's _get_client() never needs them. See storage.py's own
     # comment for the matching change on that side.
-    _require_env("AWS_S3_CDN_DOMAIN")
+    # Only required for real AWS S3 production (CDN in front of a public
+    # bucket). Self-hosted deployments (AWS_S3_ENDPOINT_URL set, e.g. local
+    # SeaweedFS) have no CDN concept -- storage.py's get_cdn_url() already
+    # falls back cleanly to the bare file_key when this is empty.
+    if not os.environ.get("AWS_S3_ENDPOINT_URL", "").strip():
+        _require_env("AWS_S3_CDN_DOMAIN")
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
@@ -184,6 +189,10 @@ AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
 AWS_DEFAULT_REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-south-2")
 AWS_STORAGE_BUCKET_NAME = os.environ.get("AWS_STORAGE_BUCKET_NAME", "spark-app-media-2026")
 AWS_S3_CDN_DOMAIN = os.environ.get("AWS_S3_CDN_DOMAIN", "")
+# Optional S3-compatible endpoint override (e.g. self-hosted MinIO on
+# the VPS). Empty by default -> storage.py falls back to the real AWS
+# regional endpoint, so production on AWS is unaffected.
+AWS_S3_ENDPOINT_URL = os.environ.get("AWS_S3_ENDPOINT_URL", "")
 AWS_S3_PRESIGNED_URL_EXPIRY = 3600
 
 # ClamAV — malware scanning for question/option images, mirrors
