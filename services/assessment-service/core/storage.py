@@ -25,6 +25,34 @@ def build_file_key(upload_type: str, original_filename: str) -> str:
 
 
 def get_cdn_url(file_key: str) -> str:
+    """Public, directly-fetchable URL for a stored object.
+
+    Real AWS production: a CDN domain in front of a public-read bucket —
+    no signature needed, just concatenate domain + key (unchanged below).
+
+    Self-hosted (AWS_S3_ENDPOINT_URL set, e.g. local SeaweedFS): there is no
+    CDN and no public-read bucket — SeaweedFS's S3 gateway requires every
+    request to be signed (confirmed 2026-11-28: an unauthenticated GET
+    returns 403). Generate a presigned GET URL against the internal
+    endpoint, then swap its host for the public /media/ proxy route
+    (gateway/nginx.conf), which forwards the request straight through to
+    SeaweedFS while explicitly restoring the Host header the signature was
+    computed against — path and query string (including the signature)
+    pass through byte-for-byte, so the signature still validates on the
+    other side regardless of what public Host header the browser actually
+    sent."""
+    endpoint_url = getattr(settings, "AWS_S3_ENDPOINT_URL", "")
+    if endpoint_url:
+        public_base = getattr(settings, "AWS_S3_PUBLIC_MEDIA_BASE_URL", "")
+        if not public_base:
+            raise RuntimeError(
+                "AWS_S3_PUBLIC_MEDIA_BASE_URL must be set when AWS_S3_ENDPOINT_URL "
+                "is configured (self-hosted storage) — there is no way to serve a "
+                "file read without it."
+            )
+        signed_url = generate_presigned_read_url(file_key)
+        return signed_url.replace(endpoint_url.rstrip("/"), public_base.rstrip("/"), 1)
+
     cdn_domain = getattr(settings, "AWS_S3_CDN_DOMAIN", "")
     if not cdn_domain:
         return file_key
@@ -206,4 +234,33 @@ def generate_presigned_upload_url(file_key: str, content_type: str, expires_in: 
         )
     except ClientError as exc:
         logger.error("Failed to generate presigned URL for key=%s: %s", file_key, exc)
+        raise
+
+
+def generate_presigned_read_url(file_key: str, expires_in: int = None) -> str:
+    """Signed, time-limited GET URL for a stored object — the read-side
+    counterpart to generate_presigned_upload_url() above. Only meaningful
+    for self-hosted deployments (AWS_S3_ENDPOINT_URL set): real AWS
+    production instead reads straight off a public-read bucket behind
+    AWS_S3_CDN_DOMAIN, which needs no signature at all. SeaweedFS's S3
+    gateway has no such public/CDN story and returns 403 on every
+    unauthenticated request (confirmed 2026-11-28), so self-hosted reads
+    need the exact same presigned-URL treatment uploads already get."""
+    from botocore.exceptions import ClientError
+
+    if expires_in is None:
+        expires_in = getattr(settings, "AWS_S3_PRESIGNED_URL_EXPIRY", 3600)
+
+    client = _get_client()
+    try:
+        return client.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
+                "Key": file_key,
+            },
+            ExpiresIn=expires_in,
+        )
+    except ClientError as exc:
+        logger.error("Failed to generate presigned read URL for key=%s: %s", file_key, exc)
         raise

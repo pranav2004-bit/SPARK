@@ -75,6 +75,7 @@ services:
       AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
       AWS_S3_ENDPOINT_URL: http://seaweedfs:8333
       AWS_S3_CDN_DOMAIN: ""
+      AWS_S3_PUBLIC_MEDIA_BASE_URL: https://api.spark.sanjivo.com/media
     depends_on:
       seaweedfs:
         condition: service_started
@@ -87,6 +88,7 @@ services:
       AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
       AWS_S3_ENDPOINT_URL: http://seaweedfs:8333
       AWS_S3_CDN_DOMAIN: ""
+      AWS_S3_PUBLIC_MEDIA_BASE_URL: https://api.spark.sanjivo.com/media
     depends_on:
       seaweedfs:
         condition: service_started
@@ -99,6 +101,7 @@ services:
       AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
       AWS_S3_ENDPOINT_URL: http://seaweedfs:8333
       AWS_S3_CDN_DOMAIN: ""
+      AWS_S3_PUBLIC_MEDIA_BASE_URL: https://api.spark.sanjivo.com/media
     depends_on:
       seaweedfs:
         condition: service_started
@@ -111,6 +114,7 @@ services:
       AWS_STORAGE_BUCKET_NAME: spark-app-media-2026
       AWS_S3_ENDPOINT_URL: http://seaweedfs:8333
       AWS_S3_CDN_DOMAIN: ""
+      AWS_S3_PUBLIC_MEDIA_BASE_URL: https://api.spark.sanjivo.com/media
     depends_on:
       seaweedfs:
         condition: service_started
