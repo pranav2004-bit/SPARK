@@ -7,7 +7,6 @@
 #   docker compose -f docker-compose.prod.yml -f docker-compose.prod.selfhosted.yml up -d --build
 #
 # Pre-cutover bring-up: plain HTTP via the VPS's own IP (no domain/SSL yet --
-# gateway/nginx.selfhosted.conf). Swap in the real domain + certbot-issued
 # SSL once DNS points here (separate step, not done by this file).
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -125,8 +124,6 @@ services:
       - spark-internal
 
   nginx:
-    volumes:
-      - ../gateway/nginx.selfhosted.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       frontend:
         condition: service_started
