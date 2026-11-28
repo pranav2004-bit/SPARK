@@ -1765,8 +1765,8 @@ class StudentAssignmentListView(APIView):
                 # across every set of a paper before an assignment can even
                 # be created, so this always matches what the student is
                 # actually about to see regardless of which set they landed on.
-                "total_marks": alloc.set.total_marks(),
-                "question_count": alloc.set.questions.count(),
+                "total_marks": alloc.set.total_marks() if alloc.set else None,
+                "question_count": alloc.set.questions.count() if alloc.set else None,
             })
 
         return success_response(data=results)
