@@ -24,6 +24,31 @@ def build_file_key(upload_type: str, original_filename: str) -> str:
     return f"uploads/{upload_type}/{uuid.uuid4()}{ext}"
 
 
+def _rewrite_to_public_media_url(signed_url: str) -> str:
+    """Self-hosted deployments only (AWS_S3_ENDPOINT_URL set): a presigned
+    URL from _get_client() is signed against the INTERNAL endpoint (e.g.
+    http://seaweedfs:8333), which a browser can neither resolve nor reach,
+    and which gets blocked as mixed content on an HTTPS page regardless.
+    gateway/nginx.conf's /media/ location proxies straight through to that
+    internal endpoint, explicitly restoring the exact Host header the
+    signature was computed against — so swapping only the host prefix here
+    is safe: path and query string (including the signature) pass through
+    byte-for-byte, and the signature still validates server-side no matter
+    what public Host the browser actually sent. Shared by both the read
+    side (get_cdn_url) and the write side (generate_presigned_upload_url)
+    — BUG-010 was exactly this helper missing from the write side after
+    BUG-009 added it for reads only."""
+    endpoint_url = getattr(settings, "AWS_S3_ENDPOINT_URL", "")
+    public_base = getattr(settings, "AWS_S3_PUBLIC_MEDIA_BASE_URL", "")
+    if not public_base:
+        raise RuntimeError(
+            "AWS_S3_PUBLIC_MEDIA_BASE_URL must be set when AWS_S3_ENDPOINT_URL "
+            "is configured (self-hosted storage) — there is no way to serve a "
+            "browser-facing URL (read or upload) without it."
+        )
+    return signed_url.replace(endpoint_url.rstrip("/"), public_base.rstrip("/"), 1)
+
+
 def get_cdn_url(file_key: str) -> str:
     """Public, directly-fetchable URL for a stored object.
 
@@ -43,15 +68,8 @@ def get_cdn_url(file_key: str) -> str:
     sent."""
     endpoint_url = getattr(settings, "AWS_S3_ENDPOINT_URL", "")
     if endpoint_url:
-        public_base = getattr(settings, "AWS_S3_PUBLIC_MEDIA_BASE_URL", "")
-        if not public_base:
-            raise RuntimeError(
-                "AWS_S3_PUBLIC_MEDIA_BASE_URL must be set when AWS_S3_ENDPOINT_URL "
-                "is configured (self-hosted storage) — there is no way to serve a "
-                "file read without it."
-            )
         signed_url = generate_presigned_read_url(file_key)
-        return signed_url.replace(endpoint_url.rstrip("/"), public_base.rstrip("/"), 1)
+        return _rewrite_to_public_media_url(signed_url)
 
     cdn_domain = getattr(settings, "AWS_S3_CDN_DOMAIN", "")
     if not cdn_domain:
@@ -211,9 +229,16 @@ def delete_file(file_key: str) -> None:
 
 
 def generate_presigned_upload_url(file_key: str, content_type: str, expires_in: int = None) -> str:
-    """Same client as every other call here — unlike MinIO, real S3 has no
-    separate "internal vs. browser-facing" endpoint distinction to work
-    around."""
+    """BUG-010 (2026-11-28): this docstring used to claim real S3 has no
+    "internal vs. browser-facing" endpoint distinction to work around —
+    true for real AWS, but self-hosted (SeaweedFS) very much has that
+    distinction, same as the read side already handled in get_cdn_url.
+    That stale claim is exactly why this function shipped unpatched
+    alongside BUG-009's read-side fix and went unnoticed until a real
+    browser upload against self-hosted storage actually failed (mixed
+    content: http://seaweedfs:8333 on an HTTPS page). Self-hosted now gets
+    the identical host-rewrite treatment as get_cdn_url, via the same
+    shared helper."""
     from botocore.exceptions import ClientError
 
     if expires_in is None:
@@ -221,7 +246,7 @@ def generate_presigned_upload_url(file_key: str, content_type: str, expires_in: 
 
     client = _get_client()
     try:
-        return client.generate_presigned_url(
+        signed_url = client.generate_presigned_url(
             "put_object",
             Params={
                 "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
@@ -233,6 +258,11 @@ def generate_presigned_upload_url(file_key: str, content_type: str, expires_in: 
     except ClientError as exc:
         logger.error("Failed to generate presigned URL for key=%s: %s", file_key, exc)
         raise
+
+    endpoint_url = getattr(settings, "AWS_S3_ENDPOINT_URL", "")
+    if endpoint_url:
+        return _rewrite_to_public_media_url(signed_url)
+    return signed_url
 
 
 def generate_presigned_read_url(file_key: str, expires_in: int = None) -> str:

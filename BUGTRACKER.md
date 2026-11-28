@@ -330,4 +330,47 @@ the self-hosted branch, not just the real-AWS branch — this gap shipped
 because nothing had ever actually tried to open a file on the self-hosted
 deployment end-to-end before a real user did.
 
+## BUG-010 -- Image Upload Broken On Self-Hosted Storage (Mixed Content / Unreachable Host)
+
+**Symptoms:** Uploading a new question image (or any other image/file) in
+the admin paper editor failed with "Image upload failed. Please try
+again." Browser console showed a blocked mixed-content request: the page
+was loaded over HTTPS, but the upload's presigned PUT URL pointed at
+`http://seaweedfs:8333/...` -- the internal-only Docker hostname, over
+plain HTTP.
+
+**Root Cause:** BUG-009 fixed the READ side (`get_cdn_url`) by rewriting a
+presigned URL's internal SeaweedFS host to the public `/media/` proxy
+route, but `generate_presigned_upload_url` (the WRITE side, used for
+direct browser-to-storage PUT uploads) was never touched -- its docstring
+claimed "real S3 has no internal vs. browser-facing endpoint distinction
+to work around," which is true for real AWS but false for self-hosted
+SeaweedFS, the exact same gap BUG-009 closed on the read side. This went
+unnoticed because no new image had actually been uploaded against
+self-hosted storage since the migration -- the existing image on the
+question used to discover this (via BUG-009 testing) predated the
+self-hosted cutover entirely, so only the READ path had been exercised,
+never the WRITE path.
+
+**Fix:** Extracted the host-rewrite logic BUG-009 added inline in
+`get_cdn_url` into a shared `_rewrite_to_public_media_url()` helper, used
+by both `get_cdn_url` (reads) and `generate_presigned_upload_url` (writes)
+in all three affected services' `core/storage.py` (resource-service,
+practice-service, assessment-service). No nginx change was needed --
+`gateway/nginx.conf`'s existing `/media/` location already proxies any
+HTTP method through to SeaweedFS with the correct `Host` header restored,
+and the server-level CORS headers (including the OPTIONS preflight
+short-circuit) are inherited automatically since this location defines no
+`add_header` of its own. (Branch `fix/selfhosted-upload-presign-host`.)
+
+**Rule:** A read-side fix and a write-side fix for the same underlying
+constraint (self-hosted storage has a real internal/public endpoint split
+that real-AWS code never had to handle) are two separate code paths and
+two separate bugs until both are verified -- fixing `get_cdn_url` alone
+left a stale, now-incorrect comment on `generate_presigned_upload_url`
+asserting the exact problem that still existed there. Whenever a
+self-hosted-specific assumption is fixed in one function, grep for every
+other function carrying the same assumption in its own docstring before
+declaring the class of bug closed.
+
 ---
