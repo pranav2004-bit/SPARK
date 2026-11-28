@@ -27,6 +27,21 @@ SPARK has 7 microservices, each requiring its own set of secrets. This document 
 
 ---
 
+## Self-Hosted Storage Config (not secrets, but required together)
+
+Added 2026-11-28 (BUG-009) when the VPS migration moved storage off real AWS
+S3 onto a self-hosted SeaweedFS instance. These are plain config, not
+sensitive values, but are documented here because they belong to the exact
+same three services (resource, practice, assessment) and must be set
+*together* — missing either one breaks file reads, not just uploads.
+
+| Variable | Services | Description |
+|----------|----------|--------------|
+| `AWS_S3_ENDPOINT_URL` | resource, practice, assessment | S3-compatible endpoint override. Set to `http://seaweedfs:8333` in `infra/docker-compose.prod.selfhosted.yml` for the self-hosted VPS deployment; left empty (default) on real AWS production, where `storage.py` falls back to the real regional S3 endpoint. |
+| `AWS_S3_PUBLIC_MEDIA_BASE_URL` | resource, practice, assessment | Public base URL the gateway's `/media/` proxy route (`gateway/nginx.conf`) listens on — `https://api.spark.sanjivo.com/media` on the VPS. **Required** whenever `AWS_S3_ENDPOINT_URL` is set (enforced at startup, `core/settings.py`) — without it, `get_cdn_url()` has no way to turn a presigned SeaweedFS read URL into something a browser can actually reach. Leave empty on real AWS production (uses `AWS_S3_CDN_DOMAIN` instead, see above). |
+
+---
+
 ## Generating Secure Values
 
 ```bash

@@ -48,6 +48,14 @@ if ENVIRONMENT == "production":
     # falls back cleanly to the bare file_key when this is empty.
     if not os.environ.get("AWS_S3_ENDPOINT_URL", "").strip():
         _require_env("AWS_S3_CDN_DOMAIN")
+    else:
+        # Self-hosted storage has no CDN, but DOES need a public base URL
+        # for the /media/ proxy route (gateway/nginx.conf) — otherwise
+        # storage.py's get_cdn_url() has no way to turn a presigned read
+        # URL (signed against the internal seaweedfs:8333 endpoint) into
+        # something a browser can actually reach. Fail loudly at startup,
+        # not with a broken link discovered later (2026-11-28 incident).
+        _require_env("AWS_S3_PUBLIC_MEDIA_BASE_URL")
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
@@ -153,6 +161,10 @@ AWS_S3_CDN_DOMAIN = os.environ.get("AWS_S3_CDN_DOMAIN", "")
 # regional endpoint, so production on AWS is unaffected.
 AWS_S3_ENDPOINT_URL = os.environ.get("AWS_S3_ENDPOINT_URL", "")
 AWS_S3_PRESIGNED_URL_EXPIRY = 3600
+# Public base URL for reading self-hosted media through the gateway's
+# /media/ proxy route (gateway/nginx.conf) — only meaningful (and required,
+# see the AWS_S3_ENDPOINT_URL validation above) when storage is self-hosted.
+AWS_S3_PUBLIC_MEDIA_BASE_URL = os.environ.get("AWS_S3_PUBLIC_MEDIA_BASE_URL", "")
 
 # ClamAV — malware scanning for confirmed file uploads (resources/tasks.py).
 # Empty CLAMAV_HOST disables scanning (local dev without the clamav
