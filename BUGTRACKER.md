@@ -296,9 +296,30 @@ location in `gateway/nginx.conf` proxies those requests straight through to
 SeaweedFS, explicitly force-setting the `Host` header back to
 `seaweedfs:8333` — the exact host the AWS SigV4 signature was computed
 against — regardless of the public `Host` header the browser sent, since
-that's what SeaweedFS validates the signature against. (PR pending as of
-2026-11-28, branch `feat/selfhosted-media-presigned-reads`, commit
-`714cb1a`.)
+that's what SeaweedFS validates the signature against. (PR #48, merged,
+branch `feat/selfhosted-media-presigned-reads`, commit `714cb1a`; tests +
+docs added in `5877d1a`.)
+
+**Follow-up fix (same bug, found during deploy validation):** The new
+`/media/` location initially used a static `proxy_pass http://seaweedfs:8333;`
+-- inconsistent with every other backend in `gateway/nginx.conf`, which
+resolves its upstream through a `map $host $X_backend` variable instead of
+a literal hostname. A static proxy_pass target is resolved once, at nginx
+config-load time, and nginx refuses to start if that hostname isn't
+resolvable yet -- confirmed directly via `nginx -t`, which failed with
+"host not found in upstream seaweedfs" the first time this was tested in
+isolation. Fixed by adding `map $host $seaweedfs_backend { default
+seaweedfs:8333; }` alongside the existing backend maps and changing
+`proxy_pass` to use it -- `proxy_set_header Host seaweedfs:8333;` was left
+unchanged, since that literal value (not the map mechanism) is what the
+AWS SigV4 signature was computed against. (PR #49, merged, branch
+`fix/nginx-media-proxy-map-backend`, commit `787d876`.)
+
+**Verified end-to-end (2026-11-28):** All three affected services rebuilt
+and redeployed on the VPS, `nginx -t` passes, and a real resource PDF was
+opened directly in the browser through `https://api.spark.sanjivo.com/media/...`
+and rendered correctly (16-page PDF, full content). This is now a closed
+bug, not a code-reviewed-but-unverified fix.
 
 **Rule:** A "self-hosted has no CDN concept, falls back to X" comment next
 to a silent fallback is a red flag, not a resolution — it documents a gap,
