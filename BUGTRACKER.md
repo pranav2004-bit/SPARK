@@ -231,3 +231,82 @@ design, so a missed alias fails silently as a client-side "network error"
 with no server-side error to grep for.
 
 ---
+## BUG-008 — Assignments List 500s For Any Student With An Old Closed Exam
+
+**Symptoms:** `GET /api/assessments/student/assignments/` returned a 500
+for any student who had at least one old, closed exam in their history —
+breaking the entire assignments list on the student home page, not just
+that one assignment.
+
+**Root Cause:** `assessments/views.py`'s student-assignments endpoint read
+`alloc.set.total_marks()` and `alloc.set.questions.count()` unconditionally.
+`StudentSetAllocation.set_id` is `None` for 3,566 of 9,286 rows in
+production — confirmed identical on the original AWS RDS database (same
+counts, pre-dating the VPS migration entirely — this was not caused by the
+infra migration). All 22 distinct affected assignments are `status=CLOSED`,
+spanning August–November 2026.
+
+**Fix:** Guard both fields against a missing allocation instead of assuming
+one always exists:
+```python
+"total_marks": alloc.set.total_marks() if alloc.set else None,
+"question_count": alloc.set.questions.count() if alloc.set else None,
+```
+(PR #47, commit `44922d3`.)
+
+**Rule:** Never assume a FK on a model tied to *closed/historical* records
+is populated just because newer/active records always populate it at
+creation time — old rows can predate a field becoming mandatory in
+practice. Check real production data before assuming a crash means bad
+data, not bad code.
+
+---
+
+## BUG-009 — Every File Read Broken On Self-Hosted Storage (404/"Page not found")
+
+**Symptoms:** Every resource PDF, practice-question image, and any other
+uploaded file returned "Page not found" on the frontend when opened. The
+API itself returned 200 — the problem was the `file_url`/`read_url` field
+in the response: a bare storage key (e.g. `uploads/pdf/<uuid>.pdf`) with no
+domain at all, which the frontend's router then tried (and failed) to
+resolve as one of its own pages.
+
+**Root Cause:** `core/storage.py`'s `get_cdn_url()` concatenates
+`AWS_S3_CDN_DOMAIN` + the file key — a pattern that only makes sense for
+real AWS production, which serves reads straight off a public-read bucket
+behind a CDN (no signature needed). Self-hosted deployments deliberately
+set `AWS_S3_CDN_DOMAIN=""` (there is no CDN in front of SeaweedFS), and
+`get_cdn_url()` silently fell back to returning the bare key — this was a
+known, documented gap ("self-hosted has no CDN concept") that was never
+actually closed with a working alternative.
+
+Confirmed directly (not assumed): an unauthenticated `GET` against
+SeaweedFS's S3 gateway returns `403`. Unlike the old CDN+public-bucket
+model, SeaweedFS requires every single request to be signed — reads
+included, not just writes.
+
+**Fix:** Added `generate_presigned_read_url()` (the GET counterpart to the
+existing `generate_presigned_upload_url()`) to all three affected services'
+`core/storage.py` (resource-service, practice-service, assessment-service —
+each has its own near-identical copy of this file). `get_cdn_url()` now
+calls it whenever `AWS_S3_ENDPOINT_URL` is set, then swaps the internal
+`seaweedfs:8333` host prefix for a new `AWS_S3_PUBLIC_MEDIA_BASE_URL`
+setting, leaving the signed path+query string untouched. A new `/media/`
+location in `gateway/nginx.conf` proxies those requests straight through to
+SeaweedFS, explicitly force-setting the `Host` header back to
+`seaweedfs:8333` — the exact host the AWS SigV4 signature was computed
+against — regardless of the public `Host` header the browser sent, since
+that's what SeaweedFS validates the signature against. (PR pending as of
+2026-11-28, branch `feat/selfhosted-media-presigned-reads`, commit
+`714cb1a`.)
+
+**Rule:** A "self-hosted has no CDN concept, falls back to X" comment next
+to a silent fallback is a red flag, not a resolution — it documents a gap,
+it doesn't close one. Any code path that can silently return a
+syntactically-valid-looking-but-functionally-broken value (a bare key that
+looks like it could be a relative URL) needs an explicit test exercising
+the self-hosted branch, not just the real-AWS branch — this gap shipped
+because nothing had ever actually tried to open a file on the self-hosted
+deployment end-to-end before a real user did.
+
+---
